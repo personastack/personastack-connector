@@ -14,6 +14,7 @@ import (
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/pairing"
 	"github.com/personastack/personastack-connector/internal/runtime"
+	"github.com/personastack/personastack-connector/internal/service"
 )
 
 const usage = `Usage:
@@ -22,6 +23,7 @@ const usage = `Usage:
   personastack-connector runtime detect
   personastack-connector mcp install
   personastack-connector mcp stdio --binding <connection_id>
+  personastack-connector service install
   personastack-connector run --foreground
   personastack-connector unpair
 `
@@ -78,6 +80,8 @@ func (cmd command) Run(ctx context.Context, args []string) error {
 		return cmd.runRuntime(args[1:])
 	case "mcp":
 		return cmd.runMCP(ctx, args[1:])
+	case "service":
+		return cmd.runService(args[1:])
 	case "run":
 		return cmd.runDaemon(ctx, args[1:])
 	case "unpair":
@@ -135,6 +139,11 @@ func (cmd command) runPair(args []string) error {
 			return err
 		}
 	}
+	serviceResult, err := (service.Installer{}).Install()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.stdout, "service installed kind=%s path=%s\n", serviceResult.Kind, serviceResult.Path)
 	fmt.Fprintf(cmd.stdout, "paired persona=%s connection=%s runtime=%s configure_mcp=%t\n", result.Binding.PersonaID, result.Binding.ConnectionID, result.Binding.RuntimeKind, *configureMCP)
 	return nil
 }
@@ -222,6 +231,24 @@ func (cmd command) runMCPStdio(ctx context.Context, args []string) error {
 
 	proxy := mcp.NewStdioProxy(cmd.store)
 	return proxy.Serve(ctx, config.ConnectionID(*bindingID), cmd.stdin, cmd.stdout, cmd.stderr)
+}
+
+func (cmd command) runService(args []string) error {
+	if len(args) == 0 {
+		return errors.New("service requires a subcommand")
+	}
+	if args[0] != "install" {
+		return fmt.Errorf("unknown service subcommand %q", args[0])
+	}
+	if len(args) != 1 {
+		return errors.New("service install accepts no arguments")
+	}
+	result, err := (service.Installer{}).Install()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.stdout, "service installed kind=%s path=%s\n", result.Kind, result.Path)
+	return nil
 }
 
 func (cmd command) runDaemon(ctx context.Context, args []string) error {
