@@ -1,0 +1,221 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/personastack/personastack-connector/internal/config"
+	"github.com/personastack/personastack-connector/internal/mcp"
+	"github.com/personastack/personastack-connector/internal/runtime"
+)
+
+const usage = `Usage:
+  personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--configure-mcp]
+  personastack-connector status
+  personastack-connector runtime detect
+  personastack-connector mcp install
+  personastack-connector mcp stdio --binding <connection_id>
+  personastack-connector run --foreground
+  personastack-connector unpair
+`
+
+type command struct {
+	stdin  io.Reader
+	stdout io.Writer
+	stderr io.Writer
+	store  config.Store
+}
+
+func main() {
+	cmd := command{
+		stdin:  os.Stdin,
+		stdout: os.Stdout,
+		stderr: os.Stderr,
+		store:  config.EmptyStore(),
+	}
+
+	err := cmd.Run(context.Background(), os.Args[1:])
+	if err == nil {
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
+}
+
+func Run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	cmd := command{
+		stdin:  stdin,
+		stdout: stdout,
+		stderr: stderr,
+		store:  config.EmptyStore(),
+	}
+	return cmd.Run(ctx, args)
+}
+
+func (cmd command) Run(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		cmd.printUsage(cmd.stderr)
+		return flag.ErrHelp
+	}
+
+	switch args[0] {
+	case "-h", "--help", "help":
+		cmd.printUsage(cmd.stdout)
+		return nil
+	case "pair":
+		return cmd.runPair(args[1:])
+	case "status":
+		return cmd.runStatus(args[1:])
+	case "runtime":
+		return cmd.runRuntime(args[1:])
+	case "mcp":
+		return cmd.runMCP(ctx, args[1:])
+	case "run":
+		return cmd.runDaemon(args[1:])
+	case "unpair":
+		return cmd.runUnpair(args[1:])
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+func (cmd command) printUsage(writer io.Writer) {
+	fmt.Fprint(writer, usage)
+}
+
+func (cmd command) runPair(args []string) error {
+	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
+	flags.SetOutput(cmd.stderr)
+
+	runtimeValue := flags.String("runtime", "auto", "runtime adapter")
+	configureMCP := flags.Bool("configure-mcp", false, "configure native runtime MCP")
+
+	err := flags.Parse(args)
+	if err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("pair requires one pairing code")
+	}
+
+	kind, err := runtime.ParseAdapterKind(*runtimeValue)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(cmd.stdout, "pairing scaffold accepted runtime=%s configure_mcp=%t\n", kind, *configureMCP)
+	return nil
+}
+
+func (cmd command) runStatus(args []string) error {
+	if len(args) != 0 {
+		return errors.New("status accepts no arguments")
+	}
+
+	bindings := cmd.store.ListBindings()
+	if len(bindings) == 0 {
+		fmt.Fprintln(cmd.stdout, "no bindings")
+		return nil
+	}
+
+	for _, binding := range bindings {
+		fmt.Fprintf(cmd.stdout, "%s persona=%s runtime=%s state=%s\n", binding.ConnectionID, binding.PersonaID, binding.RuntimeKind, binding.ReadinessState)
+	}
+	return nil
+}
+
+func (cmd command) runRuntime(args []string) error {
+	if len(args) == 0 {
+		return errors.New("runtime requires a subcommand")
+	}
+	if args[0] != "detect" {
+		return fmt.Errorf("unknown runtime subcommand %q", args[0])
+	}
+	if len(args) != 1 {
+		return errors.New("runtime detect accepts no arguments")
+	}
+
+	for _, kind := range []runtime.AdapterKind{runtime.AdapterKindHermes, runtime.AdapterKindOpenClaw} {
+		detection := runtime.NewPlaceholderAdapter(kind).Detect()
+		fmt.Fprintf(cmd.stdout, "%s %s %s\n", detection.Kind, detection.State, detection.Note)
+	}
+	return nil
+}
+
+func (cmd command) runMCP(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return errors.New("mcp requires a subcommand")
+	}
+
+	switch args[0] {
+	case "install":
+		return cmd.runMCPInstall(args[1:])
+	case "stdio":
+		return cmd.runMCPStdio(ctx, args[1:])
+	default:
+		return fmt.Errorf("unknown mcp subcommand %q", args[0])
+	}
+}
+
+func (cmd command) runMCPInstall(args []string) error {
+	if len(args) != 0 {
+		return errors.New("mcp install accepts no arguments")
+	}
+	fmt.Fprintln(cmd.stdout, "mcp install scaffold: native runtime config is not implemented")
+	return nil
+}
+
+func (cmd command) runMCPStdio(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("mcp stdio", flag.ContinueOnError)
+	flags.SetOutput(cmd.stderr)
+
+	bindingID := flags.String("binding", "", "Connector binding id")
+
+	err := flags.Parse(args)
+	if err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("mcp stdio accepts flags only")
+	}
+	if *bindingID == "" {
+		return errors.New("mcp stdio requires --binding")
+	}
+
+	proxy := mcp.NewStdioProxy(cmd.store)
+	return proxy.Serve(ctx, config.ConnectionID(*bindingID), cmd.stdin, cmd.stdout, cmd.stderr)
+}
+
+func (cmd command) runDaemon(args []string) error {
+	flags := flag.NewFlagSet("run", flag.ContinueOnError)
+	flags.SetOutput(cmd.stderr)
+
+	foreground := flags.Bool("foreground", false, "run in foreground")
+
+	err := flags.Parse(args)
+	if err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("run accepts flags only")
+	}
+	if !*foreground {
+		return errors.New("run requires --foreground in this scaffold")
+	}
+
+	fmt.Fprintln(cmd.stdout, "connector daemon scaffold: websocket transport is not implemented")
+	return nil
+}
+
+func (cmd command) runUnpair(args []string) error {
+	if len(args) != 0 {
+		return errors.New("unpair accepts no arguments")
+	}
+	fmt.Fprintln(cmd.stdout, "unpair scaffold: no persisted bindings")
+	return nil
+}
