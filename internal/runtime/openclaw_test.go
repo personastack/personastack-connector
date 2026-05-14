@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -105,5 +106,80 @@ func TestOpenClawAdapterStartRunUsesAgentMethod(t *testing.T) {
 	}
 	if runID != "assignment-1" {
 		t.Fatalf("run id = %q", runID)
+	}
+}
+
+func TestOpenClawAdapterWaitRunUsesAgentWait(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		if request.Method != "agent.wait" || request.ID != "wait-run-1" {
+			t.Fatalf("unexpected request: %+v", request)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"status":"completed","output":"done"}`)})
+	}))
+	defer server.Close()
+
+	result, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").WaitRun(context.Background(), "run-1")
+	if err != nil {
+		t.Fatalf("wait run: %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestOpenClawAdapterCancelRunReadsAbortResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		if request.Method != "sessions.abort" || request.ID != "cancel-run-1" {
+			t.Fatalf("unexpected request: %+v", request)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"ok":true}`)})
+	}))
+	defer server.Close()
+
+	err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").CancelRun("run-1")
+	if err != nil {
+		t.Fatalf("cancel run: %v", err)
+	}
+}
+
+func TestOpenClawAdapterCancelRunSurfacesAbortError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Error: "not found"})
+	}))
+	defer server.Close()
+
+	err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").CancelRun("run-1")
+	if err == nil {
+		t.Fatalf("expected cancel error")
 	}
 }

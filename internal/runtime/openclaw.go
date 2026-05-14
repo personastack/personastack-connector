@@ -164,6 +164,13 @@ func (adapter OpenClawAdapter) CancelRun(nativeRunID string) error {
 	if err := conn.WriteJSON(request); err != nil {
 		return fmt.Errorf("OpenClaw cancel: %w", err)
 	}
+	var response openClawResponse
+	if err := conn.ReadJSON(&response); err != nil {
+		return fmt.Errorf("OpenClaw cancel response: %w", err)
+	}
+	if response.Error != "" {
+		return fmt.Errorf("OpenClaw cancel error: %s", response.Error)
+	}
 	return nil
 }
 
