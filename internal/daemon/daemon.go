@@ -14,8 +14,10 @@ import (
 )
 
 type Runner struct {
-	Store config.Store
-	Now   func() time.Time
+	Store        config.Store
+	Now          func() time.Time
+	ReconnectMin time.Duration
+	ReconnectMax time.Duration
 }
 
 func (r Runner) RunForeground(ctx context.Context) error {
@@ -51,6 +53,27 @@ func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
 	if err != nil {
 		return err
 	}
+	backoff := r.reconnectMin()
+	for {
+		err = r.runBindingSession(ctx, binding, session)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err == nil {
+			backoff = r.reconnectMin()
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+		backoff = minDuration(backoff*2, r.reconnectMax())
+	}
+}
+
+func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, session bridge.Session) error {
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, binding.GatewayWebsocketURL, nil)
 	if err != nil {
 		return fmt.Errorf("connect gateway websocket: %w", err)
@@ -129,4 +152,25 @@ func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
 			}
 		}
 	}
+}
+
+func (r Runner) reconnectMin() time.Duration {
+	if r.ReconnectMin > 0 {
+		return r.ReconnectMin
+	}
+	return time.Second
+}
+
+func (r Runner) reconnectMax() time.Duration {
+	if r.ReconnectMax > 0 {
+		return r.ReconnectMax
+	}
+	return 30 * time.Second
+}
+
+func minDuration(a time.Duration, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }

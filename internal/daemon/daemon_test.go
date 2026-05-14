@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -21,6 +22,8 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 		t.Fatalf("generate key: %v", err)
 	}
 	seenHeartbeat := make(chan externalagentprotocol.Frame, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -69,6 +72,7 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 		if wakeAck.MessageType != externalagentprotocol.FrameTypeWakeProbeAccepted {
 			t.Fatalf("unexpected wake ack: %+v", wakeAck)
 		}
+		cancel()
 	}))
 	defer server.Close()
 
@@ -83,7 +87,7 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 		RuntimeKind:          runtime.AdapterKindHermes,
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
-	if err := (Runner{Store: store}).RunForeground(t.Context()); err != nil {
+	if err := (Runner{Store: store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx); err != nil {
 		t.Fatalf("run foreground: %v", err)
 	}
 	heartbeat := <-seenHeartbeat
