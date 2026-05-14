@@ -21,7 +21,7 @@ func TestInstallerWritesSystemdUserUnit(t *testing.T) {
 	runner := &recordingRunner{}
 	result, err := (Installer{
 		HomeDir:        homeDir,
-		ExecutablePath: "/usr/local/bin/personastack-connector",
+		ExecutablePath: "/opt/PersonaStack Connector/personastack-connector",
 		GOOS:           "linux",
 		Runner:         runner,
 	}).Install()
@@ -35,7 +35,7 @@ func TestInstallerWritesSystemdUserUnit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read unit: %v", err)
 	}
-	if !strings.Contains(string(raw), "ExecStart=/usr/local/bin/personastack-connector run --foreground") {
+	if !strings.Contains(string(raw), `ExecStart="/opt/PersonaStack Connector/personastack-connector" run --foreground`) {
 		t.Fatalf("unexpected unit:\n%s", raw)
 	}
 	if len(runner.commands) != 2 || !strings.Contains(runner.commands[1], "enable --now") {
@@ -48,7 +48,7 @@ func TestInstallerWritesLaunchAgent(t *testing.T) {
 	runner := &recordingRunner{}
 	result, err := (Installer{
 		HomeDir:        homeDir,
-		ExecutablePath: "/Applications/PersonaStack Connector.app/Contents/MacOS/personastack-connector",
+		ExecutablePath: "/Applications/PersonaStack & Connector.app/Contents/MacOS/personastack-connector",
 		GOOS:           "darwin",
 		Runner:         runner,
 	}).Install()
@@ -62,7 +62,7 @@ func TestInstallerWritesLaunchAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read plist: %v", err)
 	}
-	if !strings.Contains(string(raw), "personastack-connector") {
+	if !strings.Contains(string(raw), "PersonaStack &amp; Connector.app") {
 		t.Fatalf("unexpected plist:\n%s", raw)
 	}
 	if len(runner.commands) != 4 || !strings.Contains(runner.commands[3], "kickstart") {

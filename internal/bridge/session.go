@@ -120,6 +120,18 @@ func (s Session) RunAcceptedFrame(request externalagentprotocol.Frame, nativeRun
 	return frame
 }
 
+func (s Session) RunStartedFrame(request externalagentprotocol.Frame, nativeRunID string) externalagentprotocol.Frame {
+	frame := s.baseFrame(externalagentprotocol.FrameTypeRunStarted, s.now())
+	frame.MessageID = strings.TrimSpace(request.MessageID)
+	frame.RunID = strings.TrimSpace(request.RunID)
+	frame.AssignmentID = strings.TrimSpace(request.AssignmentID)
+	frame.RunStarted = &externalagentprotocol.RunStartedPayload{
+		StartedAt:   frame.SentAt,
+		NativeRunID: strings.TrimSpace(nativeRunID),
+	}
+	return frame
+}
+
 func (s Session) RunTerminalFrame(request externalagentprotocol.Frame, status externalagentprotocol.RunStatus, reason externalagentprotocol.TerminalReason, output string) externalagentprotocol.Frame {
 	frame := s.baseFrame(externalagentprotocol.FrameTypeRunCompleted, s.now())
 	if status == externalagentprotocol.RunStatusFailed {

@@ -79,12 +79,18 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		return fmt.Errorf("connect gateway websocket: %w", err)
 	}
 	defer conn.Close()
+	var writeMu sync.Mutex
+	writeFrame := func(frame externalagentprotocol.Frame) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteJSON(frame)
+	}
 
 	connectFrame, err := session.ConnectFrame("connector-startup")
 	if err != nil {
 		return err
 	}
-	if err := conn.WriteJSON(connectFrame); err != nil {
+	if err := writeFrame(connectFrame); err != nil {
 		return fmt.Errorf("write connect frame: %w", err)
 	}
 	var accepted externalagentprotocol.Frame
@@ -97,7 +103,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	adapter := runtime.NewAdapter(binding.RuntimeKind)
 	detection := adapter.Detect()
 	heartbeat := session.HeartbeatFrame(detection.State, nil)
-	if err := conn.WriteJSON(heartbeat); err != nil {
+	if err := writeFrame(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
 	heartbeatStop := make(chan struct{})
@@ -111,7 +117,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				return
 			case <-ticker.C:
 				state := adapter.Detect().State
-				_ = conn.WriteJSON(session.HeartbeatFrame(state, nil))
+				_ = writeFrame(session.HeartbeatFrame(state, nil))
 			}
 		}
 	}()
@@ -125,7 +131,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.WakeProbe == nil {
 				continue
 			}
-			if err := conn.WriteJSON(session.WakeProbeAcceptedFrame(frame.WakeProbe.ProbeID)); err != nil {
+			if err := writeFrame(session.WakeProbeAcceptedFrame(frame.WakeProbe.ProbeID)); err != nil {
 				return fmt.Errorf("write wake probe ack: %w", err)
 			}
 		case externalagentprotocol.FrameTypeRunStart:
@@ -135,14 +141,36 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			nativeRunID, err := adapter.StartRun(frame.AssignmentID, frame.RunStart.FullyComposedPrompt)
 			if err != nil {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
-				if writeErr := conn.WriteJSON(failed); writeErr != nil {
+				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run failure: %w", writeErr)
 				}
 				continue
 			}
-			if err := conn.WriteJSON(session.RunAcceptedFrame(frame, nativeRunID)); err != nil {
+			if err := writeFrame(session.RunAcceptedFrame(frame, nativeRunID)); err != nil {
 				return fmt.Errorf("write run accepted: %w", err)
 			}
+			if err := writeFrame(session.RunStartedFrame(frame, nativeRunID)); err != nil {
+				return fmt.Errorf("write run started: %w", err)
+			}
+			go func(frame externalagentprotocol.Frame, nativeRunID string) {
+				result, err := adapter.WaitRun(ctx, nativeRunID)
+				if err != nil {
+					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+					_ = writeFrame(failed)
+					return
+				}
+				status := externalagentprotocol.RunStatusCompleted
+				reason := externalagentprotocol.TerminalReasonSucceeded
+				if result.Status == runtime.RunStatusFailed {
+					status = externalagentprotocol.RunStatusFailed
+					reason = externalagentprotocol.TerminalReasonFailed
+				}
+				if result.Status == runtime.RunStatusCancelled {
+					status = externalagentprotocol.RunStatusCancelled
+					reason = externalagentprotocol.TerminalReasonCancelled
+				}
+				_ = writeFrame(session.RunTerminalFrame(frame, status, reason, result.Output))
+			}(frame, nativeRunID)
 		case externalagentprotocol.FrameTypeRunCancel:
 			if frame.RunCancel == nil {
 				continue

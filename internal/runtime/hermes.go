@@ -2,10 +2,12 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const defaultHermesURL = "http://127.0.0.1:8642"
@@ -112,6 +114,61 @@ func (adapter HermesAdapter) StartRun(assignmentID string, fullyComposedPrompt s
 	return strings.TrimSpace(decoded.ID), nil
 }
 
+func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
+	trimmedRunID := strings.TrimSpace(nativeRunID)
+	if trimmedRunID == "" {
+		return RunResult{}, fmt.Errorf("native run id required")
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		result, terminal, err := adapter.runStatus(ctx, trimmedRunID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if terminal {
+			return result, nil
+		}
+		select {
+		case <-ctx.Done():
+			return RunResult{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (adapter HermesAdapter) runStatus(ctx context.Context, nativeRunID string) (RunResult, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, adapter.BaseURL+"/v1/runs/"+strings.TrimSpace(nativeRunID), nil)
+	if err != nil {
+		return RunResult{}, false, err
+	}
+	if adapter.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
+	}
+	resp, err := adapter.client().Do(req)
+	if err != nil {
+		return RunResult{}, false, fmt.Errorf("Hermes run status: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return RunResult{}, false, fmt.Errorf("Hermes run status %d", resp.StatusCode)
+	}
+	var decoded hermesRunStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return RunResult{}, false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(decoded.Status)) {
+	case "completed", "succeeded", "success":
+		return RunResult{Status: RunStatusSucceeded, Output: strings.TrimSpace(decoded.Output)}, true, nil
+	case "failed", "error":
+		return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(decoded.Error)}, true, nil
+	case "cancelled", "canceled":
+		return RunResult{Status: RunStatusCancelled}, true, nil
+	default:
+		return RunResult{}, false, nil
+	}
+}
+
 func (adapter HermesAdapter) CancelRun(nativeRunID string) error {
 	req, err := http.NewRequest(http.MethodPost, adapter.BaseURL+"/v1/runs/"+strings.TrimSpace(nativeRunID)+"/stop", nil)
 	if err != nil {
@@ -150,4 +207,10 @@ type hermesCapabilities struct {
 
 type hermesRunResponse struct {
 	ID string `json:"id"`
+}
+
+type hermesRunStatusResponse struct {
+	Status string `json:"status"`
+	Output string `json:"output"`
+	Error  string `json:"error"`
 }

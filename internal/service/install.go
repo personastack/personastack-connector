@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,7 +79,7 @@ func (installer Installer) installLaunchAgent(homeDir string, executablePath str
   <key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-`, executablePath, filepath.Join(homeDir, "Library", "Logs", "personastack-connector.log"), filepath.Join(homeDir, "Library", "Logs", "personastack-connector.err.log"))
+`, xmlEscape(executablePath), xmlEscape(filepath.Join(homeDir, "Library", "Logs", "personastack-connector.log")), xmlEscape(filepath.Join(homeDir, "Library", "Logs", "personastack-connector.err.log")))
 	if err := writeOwnerOnly(path, []byte(plist)); err != nil {
 		return InstallResult{}, err
 	}
@@ -109,7 +110,7 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-`, executablePath)
+`, systemdQuote(executablePath))
 	if err := writeOwnerOnly(path, []byte(unit)); err != nil {
 		return InstallResult{}, err
 	}
@@ -179,4 +180,14 @@ func writeOwnerOnly(path string, raw []byte) error {
 		return fmt.Errorf("write service file: %w", err)
 	}
 	return nil
+}
+
+func xmlEscape(value string) string {
+	return html.EscapeString(strings.TrimSpace(value))
+}
+
+func systemdQuote(value string) string {
+	escaped := strings.ReplaceAll(strings.TrimSpace(value), `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
 }

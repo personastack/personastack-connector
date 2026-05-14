@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -93,9 +94,23 @@ type Adapter interface {
 	ConfigureMCP(bindingID string) error
 	VerifyMCP(bindingID string) (AdapterState, error)
 	StartRun(assignmentID string, fullyComposedPrompt string) (string, error)
+	WaitRun(ctx context.Context, nativeRunID string) (RunResult, error)
 	CancelRun(nativeRunID string) error
 	Diagnose() Detection
 }
+
+type RunResult struct {
+	Status RunStatus
+	Output string
+}
+
+type RunStatus int
+
+const (
+	RunStatusSucceeded RunStatus = iota
+	RunStatusFailed
+	RunStatusCancelled
+)
 
 func NewAdapter(kind AdapterKind) Adapter {
 	switch kind {
@@ -142,6 +157,10 @@ func (adapter PlaceholderAdapter) VerifyMCP(bindingID string) (AdapterState, err
 
 func (adapter PlaceholderAdapter) StartRun(assignmentID string, fullyComposedPrompt string) (string, error) {
 	return "", fmt.Errorf("%s run dispatch is not implemented", adapter.kind)
+}
+
+func (adapter PlaceholderAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
+	return RunResult{}, fmt.Errorf("%s run wait is not implemented", adapter.kind)
 }
 
 func (adapter PlaceholderAdapter) CancelRun(nativeRunID string) error {

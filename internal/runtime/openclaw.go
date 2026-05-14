@@ -86,6 +86,43 @@ func (adapter OpenClawAdapter) StartRun(assignmentID string, fullyComposedPrompt
 	return strings.TrimSpace(assignmentID), nil
 }
 
+func (adapter OpenClawAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
+	conn, err := adapter.dial(ctx)
+	if err != nil {
+		return RunResult{}, err
+	}
+	defer conn.Close()
+	request := openClawRequest{
+		ID:     "wait-" + strings.TrimSpace(nativeRunID),
+		Method: "agent.wait",
+		Params: map[string]string{
+			"runId": strings.TrimSpace(nativeRunID),
+		},
+	}
+	if err := conn.WriteJSON(request); err != nil {
+		return RunResult{}, fmt.Errorf("OpenClaw wait: %w", err)
+	}
+	var response openClawResponse
+	if err := conn.ReadJSON(&response); err != nil {
+		return RunResult{}, fmt.Errorf("OpenClaw wait response: %w", err)
+	}
+	if response.Error != "" {
+		return RunResult{}, fmt.Errorf("OpenClaw wait error: %s", response.Error)
+	}
+	var result openClawRunResult
+	if len(response.Result) > 0 {
+		_ = json.Unmarshal(response.Result, &result)
+	}
+	switch strings.ToLower(strings.TrimSpace(result.Status)) {
+	case "failed", "error":
+		return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(result.Error)}, nil
+	case "cancelled", "canceled":
+		return RunResult{Status: RunStatusCancelled}, nil
+	default:
+		return RunResult{Status: RunStatusSucceeded, Output: strings.TrimSpace(result.Output)}, nil
+	}
+}
+
 func (adapter OpenClawAdapter) CancelRun(nativeRunID string) error {
 	conn, err := adapter.dial(context.Background())
 	if err != nil {
@@ -137,4 +174,10 @@ type openClawResponse struct {
 	ID     string          `json:"id"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
+}
+
+type openClawRunResult struct {
+	Status string `json:"status"`
+	Output string `json:"output"`
+	Error  string `json:"error"`
 }
