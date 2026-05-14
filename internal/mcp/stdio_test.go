@@ -224,6 +224,7 @@ func TestStdioProxyBridgesGetStreamEventsToStdout(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatalf("GET stream did not open")
 			}
+			time.Sleep(50 * time.Millisecond)
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`))
 		default:
 			t.Fatalf("unexpected method: %s", message.Method)
