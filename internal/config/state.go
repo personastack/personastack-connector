@@ -129,9 +129,13 @@ func (store FileStore) ListBindings() []Binding {
 }
 
 func (store FileStore) SaveBinding(binding Binding) error {
+	storedBinding, err := storeBindingSecrets(binding)
+	if err != nil {
+		return err
+	}
 	state := store.load()
 	memory := NewMemoryStore(state)
-	if err := (&memory).SaveBinding(binding); err != nil {
+	if err := (&memory).SaveBinding(storedBinding); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
@@ -155,6 +159,9 @@ func (store FileStore) load() State {
 	var state State
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return State{}
+	}
+	for i, binding := range state.Bindings {
+		state.Bindings[i] = loadBindingSecrets(binding)
 	}
 	return state
 }
