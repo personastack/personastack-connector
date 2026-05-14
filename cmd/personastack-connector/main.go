@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 
+	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/mcp"
+	"github.com/personastack/personastack-connector/internal/pairing"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
 
@@ -35,7 +37,7 @@ func main() {
 		stdin:  os.Stdin,
 		stdout: os.Stdout,
 		stderr: os.Stderr,
-		store:  config.EmptyStore(),
+		store:  defaultStore(),
 	}
 
 	err := cmd.Run(context.Background(), os.Args[1:])
@@ -94,6 +96,7 @@ func (cmd command) runPair(args []string) error {
 
 	runtimeValue := flags.String("runtime", "auto", "runtime adapter")
 	configureMCP := flags.Bool("configure-mcp", false, "configure native runtime MCP")
+	gateway := flags.String("gateway", externalagentprotocol.DefaultGatewayBaseURL, "PersonaStack gateway URL")
 
 	err := flags.Parse(args)
 	if err != nil {
@@ -107,8 +110,26 @@ func (cmd command) runPair(args []string) error {
 	if err != nil {
 		return err
 	}
+	if kind == runtime.AdapterKindAuto {
+		kind = runtime.AdapterKindHermes
+	}
 
-	fmt.Fprintf(cmd.stdout, "pairing scaffold accepted runtime=%s configure_mcp=%t\n", kind, *configureMCP)
+	writable, ok := cmd.store.(config.WritableStore)
+	if !ok {
+		return errors.New("connector store is not writable")
+	}
+	result, err := pairing.Client{GatewayBaseURL: *gateway}.Exchange(context.Background(), pairing.Request{
+		Code:         flags.Arg(0),
+		RuntimeKind:  kind,
+		ConfigureMCP: *configureMCP,
+	})
+	if err != nil {
+		return err
+	}
+	if err := writable.SaveBinding(result.Binding); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.stdout, "paired persona=%s connection=%s runtime=%s configure_mcp=%t\n", result.Binding.PersonaID, result.Binding.ConnectionID, result.Binding.RuntimeKind, *configureMCP)
 	return nil
 }
 
@@ -218,4 +239,12 @@ func (cmd command) runUnpair(args []string) error {
 	}
 	fmt.Fprintln(cmd.stdout, "unpair scaffold: no persisted bindings")
 	return nil
+}
+
+func defaultStore() config.Store {
+	store, err := config.DefaultFileStore()
+	if err != nil {
+		return config.EmptyStore()
+	}
+	return store
 }
