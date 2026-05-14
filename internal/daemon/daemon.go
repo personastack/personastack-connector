@@ -145,6 +145,15 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.RunStart == nil {
 				continue
 			}
+			if nativeRunID, ok := r.activeNativeRunIDForRunStart(binding, frame); ok {
+				if err := writeFrame(session.RunAcceptedFrame(frame, nativeRunID)); err != nil {
+					return fmt.Errorf("write redelivered run accepted: %w", err)
+				}
+				if err := writeFrame(session.RunStartedFrame(frame, nativeRunID)); err != nil {
+					return fmt.Errorf("write redelivered run started: %w", err)
+				}
+				continue
+			}
 			if readiness := r.bindingReadiness(adapter, binding); !canStartRunWithReadiness(readiness.State) {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
 				if writeErr := writeFrame(failed); writeErr != nil {
@@ -225,6 +234,24 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			return nil
 		}
 	}
+}
+
+func (r Runner) activeNativeRunIDForRunStart(binding config.Binding, frame externalagentprotocol.Frame) (string, bool) {
+	if r.Store == nil {
+		return "", false
+	}
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok {
+		return "", false
+	}
+	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(frame.RunID) {
+		return "", false
+	}
+	nativeRunID := strings.TrimSpace(latest.ActiveNativeRunID)
+	if nativeRunID == "" {
+		return "", false
+	}
+	return nativeRunID, true
 }
 
 func (r Runner) revokeBinding(binding config.Binding, adapter runtime.Adapter, reason string) error {

@@ -45,6 +45,9 @@ external persona.
   local runtime selection, and local readiness state.
 - Local assignment state is persisted until the API has acknowledged a terminal
   run event.
+- Redelivered `run.start` frames for the currently active run id must reuse the
+  journaled native run id and resend accepted/started frames instead of starting
+  a second local runtime run.
 - Native runtime run ids are local correlation values and are not PersonaStack
   run authority.
 - A `token.revoked` bridge frame deletes the local binding, clears OS credential

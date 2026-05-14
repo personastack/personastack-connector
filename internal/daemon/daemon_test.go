@@ -304,3 +304,30 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 		t.Fatalf("active token not cleared: %+v", cleared)
 	}
 }
+
+func TestActiveNativeRunIDForRunStartDeduplicatesRedelivery(t *testing.T) {
+	binding := config.Binding{
+		ConnectionID:      "conn-1",
+		PersonaID:         "persona-1",
+		ActiveRunID:       "run-1",
+		ActiveNativeRunID: "native-1",
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	runner := Runner{Store: &store}
+	frame := externalagentprotocol.Frame{
+		RunID:        "run-1",
+		AssignmentID: "assignment-1",
+		RunStart:     &externalagentprotocol.RunStartPayload{RunScopedMCPToken: "run-token"},
+	}
+
+	nativeRunID, ok := runner.activeNativeRunIDForRunStart(binding, frame)
+	if !ok || nativeRunID != "native-1" {
+		t.Fatalf("expected redelivered native run id, got ok=%t native=%q", ok, nativeRunID)
+	}
+
+	frame.RunID = "run-2"
+	nativeRunID, ok = runner.activeNativeRunIDForRunStart(binding, frame)
+	if ok || nativeRunID != "" {
+		t.Fatalf("unexpected match for different run, got ok=%t native=%q", ok, nativeRunID)
+	}
+}
