@@ -60,6 +60,7 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 		GatewayWebsocketURL: websocketURL,
 		ConfigureMCP:        request.ConfigureMCP,
 	}
+	payload.DeviceKeyProof = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(deviceProofMessage(payload))))
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return Result{}, fmt.Errorf("encode pairing exchange: %w", err)
@@ -105,6 +106,20 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 		HasBridgeSecret:      true,
 		HasPersonaMCPToken:   false,
 	}}, nil
+}
+
+func deviceProofMessage(request externalagentprotocol.PairingExchangeRequest) string {
+	return strings.Join([]string{
+		pairingCodeHash(request.Code),
+		string(request.RuntimeKind),
+		strings.TrimSpace(request.DevicePublicKey),
+	}, "\n")
+}
+
+func pairingCodeHash(code string) string {
+	normalized := strings.NewReplacer(" ", "", "-", "").Replace(strings.ToUpper(strings.TrimSpace(code)))
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:])
 }
 
 func runtimeKindForAdapter(kind runtime.AdapterKind) externalagentprotocol.RuntimeKind {

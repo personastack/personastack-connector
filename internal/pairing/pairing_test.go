@@ -19,7 +19,7 @@ func TestClientExchangeBuildsBinding(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if request.Code != "PAIR-1234" || request.RuntimeKind != externalagentprotocol.RuntimeKindOpenClaw || request.DevicePublicKey == "" {
+		if request.Code != "PAIR-1234" || request.RuntimeKind != externalagentprotocol.RuntimeKindOpenClaw || request.DevicePublicKey == "" || request.DeviceKeyProof == "" {
 			t.Fatalf("unexpected request: %+v", request)
 		}
 		_ = json.NewEncoder(w).Encode(externalagentprotocol.PairingExchangeResponse{
