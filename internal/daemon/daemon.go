@@ -163,6 +163,14 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
+			if err := r.recordNativeRunID(binding, frame.RunID, nativeRunID); err != nil {
+				_ = r.clearRunMCPToken(binding, frame.RunID)
+				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+				if writeErr := writeFrame(failed); writeErr != nil {
+					return fmt.Errorf("write run journal failure: %w", writeErr)
+				}
+				continue
+			}
 			if err := writeFrame(session.RunAcceptedFrame(frame, nativeRunID)); err != nil {
 				return fmt.Errorf("write run accepted: %w", err)
 			}
@@ -221,6 +229,22 @@ func (r Runner) activateRunMCPToken(binding config.Binding, frame externalagentp
 	return writable.SaveBinding(active)
 }
 
+func (r Runner) recordNativeRunID(binding config.Binding, runID string, nativeRunID string) error {
+	writable, ok := r.Store.(config.WritableStore)
+	if !ok {
+		return nil
+	}
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(runID) {
+		return nil
+	}
+	latest.ActiveNativeRunID = strings.TrimSpace(nativeRunID)
+	return writable.SaveBinding(latest)
+}
+
 func (r Runner) clearRunMCPToken(binding config.Binding, runID string) error {
 	writable, ok := r.Store.(config.WritableStore)
 	if !ok {
@@ -234,6 +258,7 @@ func (r Runner) clearRunMCPToken(binding config.Binding, runID string) error {
 		return nil
 	}
 	latest.ActiveRunID = ""
+	latest.ActiveNativeRunID = ""
 	latest.ActiveRunMCPToken = ""
 	latest.HasActiveRunMCPToken = false
 	return writable.SaveBinding(latest)

@@ -95,6 +95,8 @@ Adapter result states must be concrete typed enums, including:
 - During an active run, Connector stores the API-issued run-scoped MCP token as
   the binding's active credential and the stdio proxy prefers it over the stable
   pairing credential; terminal cleanup clears the active token.
+- Connector journals the active PersonaStack run id and native runtime run id in
+  binding state while the run is active and clears both on terminal cleanup.
 - Native runtime config must not contain PersonaStack bearer tokens by default.
 - Loopback HTTP MCP proxying is a fallback only and must use loopback binding,
   random port selection, a high-entropy local token, and owner-only local config

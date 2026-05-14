@@ -135,11 +135,18 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 	if !ok || active.ActiveRunID != "run-1" || active.ActiveRunMCPToken != "run-token" || !active.HasActiveRunMCPToken {
 		t.Fatalf("active token not stored: %+v", active)
 	}
+	if err := runner.recordNativeRunID(binding, "run-1", "native-1"); err != nil {
+		t.Fatalf("record native run id: %v", err)
+	}
+	active, ok = store.Binding("conn-1")
+	if !ok || active.ActiveNativeRunID != "native-1" {
+		t.Fatalf("native run id not stored: %+v", active)
+	}
 	if err := runner.clearRunMCPToken(binding, "run-1"); err != nil {
 		t.Fatalf("clear run token: %v", err)
 	}
 	cleared, ok := store.Binding("conn-1")
-	if !ok || cleared.ActiveRunID != "" || cleared.ActiveRunMCPToken != "" || cleared.HasActiveRunMCPToken {
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveNativeRunID != "" || cleared.ActiveRunMCPToken != "" || cleared.HasActiveRunMCPToken {
 		t.Fatalf("active token not cleared: %+v", cleared)
 	}
 }
