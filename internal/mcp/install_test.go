@@ -90,3 +90,37 @@ func TestVerifyBindingRequiresCredentialAndInstalledServer(t *testing.T) {
 		t.Fatalf("verified.State = %s note=%s", verified.State, verified.Note)
 	}
 }
+
+func TestVerifyBindingRejectsBrokenStdioServerConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		server map[string]any
+	}{
+		{
+			name:   "missing command",
+			server: map[string]any{"args": []any{"mcp", "stdio", "--binding", "conn-1"}},
+		},
+		{
+			name:   "wrong command shape",
+			server: map[string]any{"command": "/bin/personastack-connector", "args": []any{"not-a-binding", "conn-1"}},
+		},
+		{
+			name:   "wrong binding",
+			server: map[string]any{"command": "/bin/personastack-connector", "args": []any{"mcp", "stdio", "--binding", "conn-2"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state, note := verifyServerMap(map[string]any{
+				"mcp": map[string]any{
+					"servers": map[string]any{
+						"personastack-conn-1": tt.server,
+					},
+				},
+			}, "personastack-conn-1", "conn-1")
+			if state != runtime.AdapterStateMCPConfigMissing {
+				t.Fatalf("state = %s note=%s", state, note)
+			}
+		})
+	}
+}

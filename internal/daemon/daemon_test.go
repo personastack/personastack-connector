@@ -95,3 +95,25 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 		t.Fatalf("unexpected heartbeat: %+v", heartbeat)
 	}
 }
+
+func TestCanStartRunWithReadiness(t *testing.T) {
+	if !canStartRunWithReadiness(runtime.AdapterStateMCPVerified) {
+		t.Fatalf("mcp verified should be runnable")
+	}
+	if !canStartRunWithReadiness(runtime.AdapterStateReady) {
+		t.Fatalf("ready should be runnable")
+	}
+	for _, state := range []runtime.AdapterState{
+		runtime.AdapterStateRuntimeMissing,
+		runtime.AdapterStateRuntimeStopped,
+		runtime.AdapterStateAuthMissing,
+		runtime.AdapterStateCapabilityMissing,
+		runtime.AdapterStateMCPConfigMissing,
+		runtime.AdapterStateMCPRestartRequired,
+		runtime.AdapterStateWakeProbeFailed,
+	} {
+		if canStartRunWithReadiness(state) {
+			t.Fatalf("%s should not be runnable", state)
+		}
+	}
+}

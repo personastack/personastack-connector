@@ -139,6 +139,13 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.RunStart == nil {
 				continue
 			}
+			if readiness := r.bindingReadiness(adapter, binding); !canStartRunWithReadiness(readiness.State) {
+				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
+				if writeErr := writeFrame(failed); writeErr != nil {
+					return fmt.Errorf("write run readiness failure: %w", writeErr)
+				}
+				continue
+			}
 			nativeRunID, err := adapter.StartRun(frame.AssignmentID, frame.RunStart.FullyComposedPrompt)
 			if err != nil {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
@@ -192,6 +199,10 @@ func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding
 	detection.State = verify.State
 	detection.Note = verify.Note
 	return detection
+}
+
+func canStartRunWithReadiness(state runtime.AdapterState) bool {
+	return state == runtime.AdapterStateMCPVerified || state == runtime.AdapterStateReady
 }
 
 func (r Runner) reconnectMin() time.Duration {

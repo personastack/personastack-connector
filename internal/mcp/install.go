@@ -227,13 +227,17 @@ func verifyServerMap(root map[string]any, serverName string, bindingID config.Co
 	if !ok {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP server missing"
 	}
-	if !serverArgsContainBinding(server["args"], bindingID) {
+	command, ok := server["command"].(string)
+	if !ok || strings.TrimSpace(command) == "" {
+		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP command missing"
+	}
+	if !serverArgsMatchBinding(server["args"], bindingID) {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP binding argument missing"
 	}
 	return runtime.AdapterStateMCPVerified, "PersonaStack MCP config present; runtime restart may be required"
 }
 
-func serverArgsContainBinding(value any, bindingID config.ConnectionID) bool {
+func serverArgsMatchBinding(value any, bindingID config.ConnectionID) bool {
 	target := strings.TrimSpace(string(bindingID))
 	if target == "" {
 		return false
@@ -242,8 +246,15 @@ func serverArgsContainBinding(value any, bindingID config.ConnectionID) bool {
 	if !ok {
 		return false
 	}
+	args := make([]string, 0, len(values))
 	for _, item := range values {
-		if strings.TrimSpace(fmt.Sprint(item)) == target {
+		args = append(args, strings.TrimSpace(fmt.Sprint(item)))
+	}
+	if len(args) < 4 || args[0] != "mcp" || args[1] != "stdio" {
+		return false
+	}
+	for index := 2; index < len(args)-1; index++ {
+		if args[index] == "--binding" && args[index+1] == target {
 			return true
 		}
 	}
