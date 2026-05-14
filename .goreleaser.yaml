@@ -1,0 +1,57 @@
+version: 2
+
+project_name: personastack-connector
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: personastack-connector
+    main: ./cmd/personastack-connector
+    binary: personastack-connector
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.gitCommit={{ .Commit }}
+      - -X main.buildDate={{ .Date }}
+
+archives:
+  - id: default
+    ids:
+      - personastack-connector
+    name_template: >-
+      personastack-connector_{{ .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: personastack-connector_{{ .Version }}_checksums.txt
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+    documents:
+      - "{{ .ProjectName }}_{{ .Version }}_sbom.spdx.json"
+
+release:
+  github:
+    owner: personastack
+    name: personastack-connector
+  draft: true
+  mode: replace
