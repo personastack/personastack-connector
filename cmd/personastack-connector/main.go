@@ -10,6 +10,7 @@ import (
 
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/config"
+	"github.com/personastack/personastack-connector/internal/daemon"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/pairing"
 	"github.com/personastack/personastack-connector/internal/runtime"
@@ -78,7 +79,7 @@ func (cmd command) Run(ctx context.Context, args []string) error {
 	case "mcp":
 		return cmd.runMCP(ctx, args[1:])
 	case "run":
-		return cmd.runDaemon(args[1:])
+		return cmd.runDaemon(ctx, args[1:])
 	case "unpair":
 		return cmd.runUnpair(args[1:])
 	default:
@@ -212,7 +213,7 @@ func (cmd command) runMCPStdio(ctx context.Context, args []string) error {
 	return proxy.Serve(ctx, config.ConnectionID(*bindingID), cmd.stdin, cmd.stdout, cmd.stderr)
 }
 
-func (cmd command) runDaemon(args []string) error {
+func (cmd command) runDaemon(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(cmd.stderr)
 
@@ -229,7 +230,10 @@ func (cmd command) runDaemon(args []string) error {
 		return errors.New("run requires --foreground in this scaffold")
 	}
 
-	fmt.Fprintln(cmd.stdout, "connector daemon scaffold: websocket transport is not implemented")
+	if err := (daemon.Runner{Store: cmd.store}).RunForeground(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(cmd.stdout, "connector daemon stopped")
 	return nil
 }
 

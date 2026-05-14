@@ -21,6 +21,22 @@ type Credential struct {
 	PublicKey  ed25519.PublicKey
 }
 
+func CredentialFromBinding(binding config.Binding) (Credential, error) {
+	privateKeyRaw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(binding.BridgePrivateKey))
+	if err != nil {
+		return Credential{}, fmt.Errorf("decode bridge private key: %w", err)
+	}
+	publicKeyRaw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(binding.BridgePublicKey))
+	if err != nil {
+		return Credential{}, fmt.Errorf("decode bridge public key: %w", err)
+	}
+	return Credential{
+		ID:         strings.TrimSpace(binding.BridgeCredentialID),
+		PrivateKey: ed25519.PrivateKey(privateKeyRaw),
+		PublicKey:  ed25519.PublicKey(publicKeyRaw),
+	}, nil
+}
+
 type Session struct {
 	Binding    config.Binding
 	Credential Credential
