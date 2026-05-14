@@ -178,6 +178,71 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 	}
 }
 
+func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ConnectionGeneration: 1,
+				HeartbeatSeconds:     15,
+			},
+		})
+		var heartbeat externalagentprotocol.Frame
+		if err := conn.ReadJSON(&heartbeat); err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "revoke-1",
+			MessageType:  externalagentprotocol.FrameTypeTokenRevoked,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now(),
+			TokenRevoked: &externalagentprotocol.TokenRevokedPayload{
+				TokenKind: "bridge",
+				Reason:    "user_requested",
+			},
+		})
+	}))
+	defer server.Close()
+
+	binding := config.Binding{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ConnectionGeneration: 1,
+		GatewayWebsocketURL:  "ws" + server.URL[len("http"):],
+		BridgeCredentialID:   "cred-1",
+		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:          runtime.AdapterKindHermes,
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	err = (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(t.Context())
+	if err != nil {
+		t.Fatalf("run foreground: %v", err)
+	}
+	if _, ok := store.Binding("conn-1"); ok {
+		t.Fatalf("expected token revocation to delete binding")
+	}
+}
+
 func TestCanStartRunWithReadiness(t *testing.T) {
 	if !canStartRunWithReadiness(runtime.AdapterStateMCPVerified) {
 		t.Fatalf("mcp verified should be runnable")

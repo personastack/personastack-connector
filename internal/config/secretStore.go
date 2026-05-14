@@ -76,6 +76,16 @@ func loadBindingSecrets(binding Binding) Binding {
 	return binding
 }
 
+func deleteBindingSecrets(binding Binding) {
+	connectionID := strings.TrimSpace(string(binding.ConnectionID))
+	if connectionID == "" {
+		return
+	}
+	_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "bridge-private-key"))
+	_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "persona-mcp-token"))
+	_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "active-run-mcp-token"))
+}
+
 func bindingSecretKey(connectionID string, name string) string {
 	return strings.TrimSpace(connectionID) + ":" + strings.TrimSpace(name)
 }

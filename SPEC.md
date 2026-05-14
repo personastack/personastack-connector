@@ -47,6 +47,9 @@ external persona.
   run event.
 - Native runtime run ids are local correlation values and are not PersonaStack
   run authority.
+- A `token.revoked` bridge frame deletes the local binding, clears OS credential
+  storage for bridge/MCP/active-run secrets, best-effort cancels the active
+  native run when one is journaled, and stops reconnecting that binding.
 
 ## CLI Surface
 

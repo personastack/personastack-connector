@@ -47,17 +47,22 @@ func (r Runner) RunForeground(ctx context.Context) error {
 }
 
 func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
-	credential, err := bridge.CredentialFromBinding(binding)
-	if err != nil {
-		return err
-	}
-	session, err := bridge.NewSession(binding, credential)
-	if err != nil {
-		return err
-	}
+	connectionID := binding.ConnectionID
 	backoff := r.reconnectMin()
 	for {
-		err = r.runBindingSession(ctx, binding, session)
+		latest, ok := r.Store.Binding(connectionID)
+		if !ok {
+			return nil
+		}
+		credential, err := bridge.CredentialFromBinding(latest)
+		if err != nil {
+			return err
+		}
+		session, err := bridge.NewSession(latest, credential)
+		if err != nil {
+			return err
+		}
+		err = r.runBindingSession(ctx, latest, session)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -210,8 +215,28 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := adapter.CancelRun(nativeRunID); err != nil {
 				return fmt.Errorf("cancel local run: %w", err)
 			}
+		case externalagentprotocol.FrameTypeTokenRevoked:
+			if frame.TokenRevoked == nil {
+				continue
+			}
+			if err := r.revokeBinding(binding, adapter, frame.TokenRevoked.Reason); err != nil {
+				return err
+			}
+			return nil
 		}
 	}
+}
+
+func (r Runner) revokeBinding(binding config.Binding, adapter runtime.Adapter, reason string) error {
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if ok && strings.TrimSpace(latest.ActiveNativeRunID) != "" {
+		_ = adapter.CancelRun(strings.TrimSpace(latest.ActiveNativeRunID))
+	}
+	deleting, ok := r.Store.(config.DeletingStore)
+	if !ok {
+		return fmt.Errorf("deletable connector store required")
+	}
+	return deleting.DeleteBinding(binding.ConnectionID)
 }
 
 func (r Runner) activateRunMCPToken(binding config.Binding, frame externalagentprotocol.Frame) error {

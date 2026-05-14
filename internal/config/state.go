@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
@@ -67,6 +68,11 @@ type WritableStore interface {
 	SaveBinding(Binding) error
 }
 
+type DeletingStore interface {
+	Store
+	DeleteBinding(ConnectionID) error
+}
+
 type MemoryStore struct {
 	state State
 }
@@ -108,6 +114,19 @@ func (store *MemoryStore) SaveBinding(binding Binding) error {
 	return nil
 }
 
+func (store *MemoryStore) DeleteBinding(connectionID ConnectionID) error {
+	if store == nil {
+		return fmt.Errorf("memory store required")
+	}
+	for i, binding := range store.state.Bindings {
+		if binding.ConnectionID == connectionID {
+			store.state.Bindings = append(store.state.Bindings[:i], store.state.Bindings[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
+
 type FileStore struct {
 	path string
 }
@@ -146,6 +165,39 @@ func (store FileStore) SaveBinding(binding Binding) error {
 		return fmt.Errorf("create connector config dir: %w", err)
 	}
 	raw, err := json.MarshalIndent(memory.state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode connector state: %w", err)
+	}
+	if err := os.WriteFile(store.path, raw, 0o600); err != nil {
+		return fmt.Errorf("write connector state: %w", err)
+	}
+	return nil
+}
+
+func (store FileStore) DeleteBinding(connectionID ConnectionID) error {
+	trimmedID := ConnectionID(strings.TrimSpace(string(connectionID)))
+	if trimmedID == "" {
+		return nil
+	}
+	state := store.load()
+	bindings := state.Bindings[:0]
+	var deleted *Binding
+	for _, binding := range state.Bindings {
+		if binding.ConnectionID == trimmedID {
+			copyBinding := binding
+			deleted = &copyBinding
+			continue
+		}
+		bindings = append(bindings, binding)
+	}
+	state.Bindings = bindings
+	if deleted != nil {
+		deleteBindingSecrets(*deleted)
+	}
+	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
+		return fmt.Errorf("create connector config dir: %w", err)
+	}
+	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode connector state: %w", err)
 	}

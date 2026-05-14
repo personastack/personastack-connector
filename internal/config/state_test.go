@@ -100,3 +100,58 @@ func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 		t.Fatalf("expected active run token to be deleted")
 	}
 }
+
+func TestFileStoreDeleteBindingDeletesSecrets(t *testing.T) {
+	secrets := map[string]string{}
+	originalGet := keyringGet
+	originalSet := keyringSet
+	originalDelete := keyringDelete
+	keyringGet = func(service string, user string) (string, error) {
+		value, ok := secrets[service+":"+user]
+		if !ok {
+			return "", os.ErrNotExist
+		}
+		return value, nil
+	}
+	keyringSet = func(service string, user string, password string) error {
+		secrets[service+":"+user] = password
+		return nil
+	}
+	keyringDelete = func(service string, user string) error {
+		delete(secrets, service+":"+user)
+		return nil
+	}
+	t.Cleanup(func() {
+		keyringGet = originalGet
+		keyringSet = originalSet
+		keyringDelete = originalDelete
+	})
+
+	path := t.TempDir() + "/state.json"
+	store := NewFileStore(path)
+	binding := Binding{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		BridgePrivateKey:     "bridge-secret",
+		PersonaMCPToken:      "mcp-token",
+		ActiveRunMCPToken:    "run-mcp-token",
+		HasBridgeSecret:      true,
+		HasPersonaMCPToken:   true,
+		HasActiveRunMCPToken: true,
+	}
+	if err := store.SaveBinding(binding); err != nil {
+		t.Fatalf("save binding: %v", err)
+	}
+	if len(secrets) != 3 {
+		t.Fatalf("expected secrets before delete: %+v", secrets)
+	}
+	if err := store.DeleteBinding("conn-1"); err != nil {
+		t.Fatalf("delete binding: %v", err)
+	}
+	if _, ok := store.Binding("conn-1"); ok {
+		t.Fatalf("expected binding deleted")
+	}
+	if len(secrets) != 0 {
+		t.Fatalf("expected secrets deleted: %+v", secrets)
+	}
+}
