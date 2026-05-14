@@ -108,8 +108,9 @@ Adapter result states must be concrete typed enums, including:
 - During an active run, Connector stores the API-issued run-scoped MCP token as
   the binding's active credential and the stdio proxy prefers it over the stable
   pairing credential; terminal cleanup clears the active token.
-- Connector journals the active PersonaStack run id and native runtime run id in
-  binding state while the run is active and clears both on terminal cleanup.
+- Connector journals the active PersonaStack run id, assignment id, and native
+  runtime run id in binding state while the run is active and clears them on
+  terminal cleanup.
 - Native runtime config must not contain PersonaStack bearer tokens by default.
 - Streamable HTTP SSE responses may be long-lived; the stdio proxy must emit the
   first complete JSON-RPC SSE event back to stdio without waiting for stream EOF.

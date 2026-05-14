@@ -45,6 +45,7 @@ type Binding struct {
 	PersonaMCPURL        string
 	PersonaMCPToken      string
 	ActiveRunID          string
+	ActiveAssignmentID   string
 	ActiveNativeRunID    string
 	ActiveRunMCPToken    string
 	RuntimeKind          runtime.AdapterKind

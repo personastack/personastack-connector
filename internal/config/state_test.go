@@ -69,6 +69,7 @@ func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 		BridgePrivateKey:   "bridge-secret",
 		PersonaMCPToken:    "mcp-token",
 		ActiveRunID:        "run-1",
+		ActiveAssignmentID: "assignment-1",
 		ActiveRunMCPToken:  "run-mcp-token",
 		HasBridgeSecret:    true,
 		HasPersonaMCPToken: true,
@@ -87,10 +88,11 @@ func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected binding")
 	}
-	if loaded.BridgePrivateKey != "bridge-secret" || loaded.PersonaMCPToken != "mcp-token" || loaded.ActiveRunMCPToken != "run-mcp-token" {
+	if loaded.BridgePrivateKey != "bridge-secret" || loaded.PersonaMCPToken != "mcp-token" || loaded.ActiveAssignmentID != "assignment-1" || loaded.ActiveRunMCPToken != "run-mcp-token" {
 		t.Fatalf("expected keyring-backed secrets, got %+v", loaded)
 	}
 	loaded.ActiveRunID = ""
+	loaded.ActiveAssignmentID = ""
 	loaded.ActiveRunMCPToken = ""
 	loaded.HasActiveRunMCPToken = false
 	if err := store.SaveBinding(loaded); err != nil {

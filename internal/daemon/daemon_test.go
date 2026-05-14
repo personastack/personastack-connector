@@ -270,7 +270,8 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
 	runner := Runner{Store: &store}
 	frame := externalagentprotocol.Frame{
-		RunID: "run-1",
+		RunID:        "run-1",
+		AssignmentID: "assignment-1",
 		RunStart: &externalagentprotocol.RunStartPayload{
 			RunScopedMCPToken: "run-token",
 		},
@@ -279,7 +280,7 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 		t.Fatalf("activate run token: %v", err)
 	}
 	active, ok := store.Binding("conn-1")
-	if !ok || active.ActiveRunID != "run-1" || active.ActiveRunMCPToken != "run-token" || !active.HasActiveRunMCPToken {
+	if !ok || active.ActiveRunID != "run-1" || active.ActiveAssignmentID != "assignment-1" || active.ActiveRunMCPToken != "run-token" || !active.HasActiveRunMCPToken {
 		t.Fatalf("active token not stored: %+v", active)
 	}
 	if err := runner.recordNativeRunID(binding, "run-1", "native-1"); err != nil {
@@ -300,17 +301,18 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 		t.Fatalf("clear run token: %v", err)
 	}
 	cleared, ok := store.Binding("conn-1")
-	if !ok || cleared.ActiveRunID != "" || cleared.ActiveNativeRunID != "" || cleared.ActiveRunMCPToken != "" || cleared.HasActiveRunMCPToken {
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveNativeRunID != "" || cleared.ActiveRunMCPToken != "" || cleared.HasActiveRunMCPToken {
 		t.Fatalf("active token not cleared: %+v", cleared)
 	}
 }
 
 func TestActiveNativeRunIDForRunStartDeduplicatesRedelivery(t *testing.T) {
 	binding := config.Binding{
-		ConnectionID:      "conn-1",
-		PersonaID:         "persona-1",
-		ActiveRunID:       "run-1",
-		ActiveNativeRunID: "native-1",
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		ActiveRunID:        "run-1",
+		ActiveAssignmentID: "assignment-1",
+		ActiveNativeRunID:  "native-1",
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
 	runner := Runner{Store: &store}
@@ -330,13 +332,20 @@ func TestActiveNativeRunIDForRunStartDeduplicatesRedelivery(t *testing.T) {
 	if ok || nativeRunID != "" {
 		t.Fatalf("unexpected match for different run, got ok=%t native=%q", ok, nativeRunID)
 	}
+	frame.RunID = "run-1"
+	frame.AssignmentID = "assignment-2"
+	nativeRunID, ok = runner.activeNativeRunIDForRunStart(binding, frame)
+	if ok || nativeRunID != "" {
+		t.Fatalf("unexpected match for different assignment, got ok=%t native=%q", ok, nativeRunID)
+	}
 }
 
 func TestActiveRunConflictRejectsDifferentActiveRun(t *testing.T) {
 	binding := config.Binding{
-		ConnectionID: "conn-1",
-		PersonaID:    "persona-1",
-		ActiveRunID:  "run-1",
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		ActiveRunID:        "run-1",
+		ActiveAssignmentID: "assignment-1",
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
 	runner := Runner{Store: &store}
@@ -346,9 +355,13 @@ func TestActiveRunConflictRejectsDifferentActiveRun(t *testing.T) {
 		t.Fatalf("expected active run conflict, got conflict=%t active=%q", conflict, activeRunID)
 	}
 
-	activeRunID, conflict = runner.activeRunConflict(binding, externalagentprotocol.Frame{RunID: "run-1"})
+	activeRunID, conflict = runner.activeRunConflict(binding, externalagentprotocol.Frame{RunID: "run-1", AssignmentID: "assignment-1"})
 	if conflict || activeRunID != "" {
 		t.Fatalf("did not expect same-run conflict, got conflict=%t active=%q", conflict, activeRunID)
+	}
+	activeRunID, conflict = runner.activeRunConflict(binding, externalagentprotocol.Frame{RunID: "run-1", AssignmentID: "assignment-2"})
+	if !conflict || activeRunID != "run-1" {
+		t.Fatalf("expected assignment conflict, got conflict=%t active=%q", conflict, activeRunID)
 	}
 }
 

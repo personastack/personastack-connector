@@ -344,6 +344,9 @@ func (r Runner) activeNativeRunIDForRunStart(binding config.Binding, frame exter
 	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(frame.RunID) {
 		return "", false
 	}
+	if strings.TrimSpace(latest.ActiveAssignmentID) != strings.TrimSpace(frame.AssignmentID) {
+		return "", false
+	}
 	nativeRunID := strings.TrimSpace(latest.ActiveNativeRunID)
 	if nativeRunID == "" {
 		return "", false
@@ -363,7 +366,7 @@ func (r Runner) activeRunConflict(binding config.Binding, frame externalagentpro
 	if activeRunID == "" {
 		return "", false
 	}
-	if activeRunID == strings.TrimSpace(frame.RunID) {
+	if activeRunID == strings.TrimSpace(frame.RunID) && strings.TrimSpace(latest.ActiveAssignmentID) == strings.TrimSpace(frame.AssignmentID) {
 		return "", false
 	}
 	return activeRunID, true
@@ -395,6 +398,7 @@ func (r Runner) activateRunMCPToken(binding config.Binding, frame externalagentp
 	}
 	active := binding
 	active.ActiveRunID = strings.TrimSpace(frame.RunID)
+	active.ActiveAssignmentID = strings.TrimSpace(frame.AssignmentID)
 	active.ActiveRunMCPToken = token
 	active.HasActiveRunMCPToken = true
 	return writable.SaveBinding(active)
@@ -429,6 +433,7 @@ func (r Runner) clearRunMCPToken(binding config.Binding, runID string) error {
 		return nil
 	}
 	latest.ActiveRunID = ""
+	latest.ActiveAssignmentID = ""
 	latest.ActiveNativeRunID = ""
 	latest.ActiveRunMCPToken = ""
 	latest.HasActiveRunMCPToken = false
