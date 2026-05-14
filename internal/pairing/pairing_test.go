@@ -2,8 +2,11 @@ package pairing
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	goruntime "runtime"
+	"strings"
 	"testing"
 
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
@@ -21,6 +24,9 @@ func TestClientExchangeBuildsBinding(t *testing.T) {
 		}
 		if request.Code != "PAIR-1234" || request.RuntimeKind != externalagentprotocol.RuntimeKindOpenClaw || request.DevicePublicKey == "" || request.DeviceKeyProof == "" {
 			t.Fatalf("unexpected request: %+v", request)
+		}
+		if request.OS != goruntime.GOOS || request.Arch != goruntime.GOARCH {
+			t.Fatalf("missing platform metadata: %+v", request)
 		}
 		_ = json.NewEncoder(w).Encode(externalagentprotocol.PairingExchangeResponse{
 			PersonaID:              "persona-1",
@@ -53,5 +59,36 @@ func TestClientExchangeBuildsBinding(t *testing.T) {
 	}
 	if !result.Binding.HasPersonaMCPToken || result.Binding.PersonaMCPToken != "mcp-token-1" {
 		t.Fatalf("expected persona mcp token")
+	}
+}
+
+func TestClientExchangeSurfacesUnsupportedConnectorVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUpgradeRequired)
+		_ = json.NewEncoder(w).Encode(externalagentprotocol.PairingExchangeErrorResponse{
+			ErrorCode:               externalagentprotocol.PairingExchangeErrorUnsupportedConnectorVersion,
+			Message:                 "Connector version is unsupported. Update Connector and rerun the pairing command.",
+			MinimumConnectorVersion: "0.1.0",
+			UpdateCommand:           "personastack-connector update",
+		})
+	}))
+	defer server.Close()
+
+	_, err := Client{GatewayBaseURL: server.URL}.Exchange(t.Context(), Request{
+		Code:        "PAIR-1234",
+		RuntimeKind: runtime.AdapterKindHermes,
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var exchangeError ExchangeError
+	if !errors.As(err, &exchangeError) {
+		t.Fatalf("expected exchange error, got %T: %v", err, err)
+	}
+	if exchangeError.StatusCode != http.StatusUpgradeRequired || exchangeError.ErrorCode != externalagentprotocol.PairingExchangeErrorUnsupportedConnectorVersion {
+		t.Fatalf("unexpected exchange error: %+v", exchangeError)
+	}
+	if !strings.Contains(err.Error(), "personastack-connector update") {
+		t.Fatalf("missing update command: %v", err)
 	}
 }

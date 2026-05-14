@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -36,6 +37,28 @@ type Result struct {
 	Binding config.Binding
 }
 
+type ExchangeError struct {
+	StatusCode              int
+	ErrorCode               externalagentprotocol.PairingExchangeErrorCode
+	Message                 string
+	MinimumConnectorVersion string
+	UpdateCommand           string
+}
+
+func (e ExchangeError) Error() string {
+	message := strings.TrimSpace(e.Message)
+	if message == "" {
+		message = "pairing exchange failed"
+	}
+	if e.ErrorCode == "" {
+		return fmt.Sprintf("%s: status=%d", message, e.StatusCode)
+	}
+	if strings.TrimSpace(e.UpdateCommand) != "" {
+		return fmt.Sprintf("%s: %s (update: %s)", e.ErrorCode, message, strings.TrimSpace(e.UpdateCommand))
+	}
+	return fmt.Sprintf("%s: %s", e.ErrorCode, message)
+}
+
 func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 	code := strings.TrimSpace(request.Code)
 	if code == "" {
@@ -54,6 +77,8 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 		Code:                code,
 		RuntimeKind:         runtimeKind,
 		ConnectorVersion:    buildinfo.VersionString(),
+		OS:                  goruntime.GOOS,
+		Arch:                goruntime.GOARCH,
 		DevicePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
 		HostnameHash:        hostnameHash(),
 		GatewayWebsocketURL: websocketURL,
@@ -83,7 +108,17 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 300 {
-		return Result{}, fmt.Errorf("pairing exchange failed: status=%d", response.StatusCode)
+		var errorResponse externalagentprotocol.PairingExchangeErrorResponse
+		if err := json.NewDecoder(response.Body).Decode(&errorResponse); err != nil {
+			return Result{}, fmt.Errorf("pairing exchange failed: status=%d", response.StatusCode)
+		}
+		return Result{}, ExchangeError{
+			StatusCode:              response.StatusCode,
+			ErrorCode:               errorResponse.ErrorCode,
+			Message:                 errorResponse.Message,
+			MinimumConnectorVersion: errorResponse.MinimumConnectorVersion,
+			UpdateCommand:           errorResponse.UpdateCommand,
+		}
 	}
 	var decoded externalagentprotocol.PairingExchangeResponse
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
