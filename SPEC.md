@@ -151,6 +151,8 @@ Adapter result states must be concrete typed enums, including:
 - The binary must expose `personastack-connector version` so install flows and
   support diagnostics can verify the downloaded artifact.
 - WSL2 uses the Linux Connector inside the WSL2 environment.
+- Linux service installation prefers `systemd --user` and falls back to an XDG
+  autostart desktop entry when user systemd is unavailable.
 - iOS and Android are not Connector host targets in V1.
 - Release artifacts must be signed or checksummed before appearing in default
   setup UX.

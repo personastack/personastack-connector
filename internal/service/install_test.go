@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,11 +10,12 @@ import (
 
 type recordingRunner struct {
 	commands []string
+	err      error
 }
 
 func (runner *recordingRunner) Run(name string, args ...string) error {
 	runner.commands = append(runner.commands, name+" "+strings.Join(args, " "))
-	return nil
+	return runner.err
 }
 
 func TestInstallerWritesSystemdUserUnit(t *testing.T) {
@@ -40,6 +42,30 @@ func TestInstallerWritesSystemdUserUnit(t *testing.T) {
 	}
 	if len(runner.commands) != 2 || !strings.Contains(runner.commands[1], "enable --now") {
 		t.Fatalf("unexpected commands: %+v", runner.commands)
+	}
+}
+
+func TestInstallerFallsBackToLinuxAutostart(t *testing.T) {
+	homeDir := t.TempDir()
+	runner := &recordingRunner{err: errors.New("systemd unavailable")}
+	result, err := (Installer{
+		HomeDir:        homeDir,
+		ExecutablePath: "/opt/PersonaStack Connector/personastack-connector",
+		GOOS:           "linux",
+		Runner:         runner,
+	}).Install()
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	if result.Kind != "linux-autostart" {
+		t.Fatalf("kind = %q", result.Kind)
+	}
+	raw, err := os.ReadFile(filepath.Join(homeDir, ".config", "autostart", "personastack-connector.desktop"))
+	if err != nil {
+		t.Fatalf("read desktop entry: %v", err)
+	}
+	if !strings.Contains(string(raw), `Exec="/opt/PersonaStack Connector/personastack-connector" run --foreground`) {
+		t.Fatalf("unexpected desktop entry:\n%s", raw)
 	}
 }
 

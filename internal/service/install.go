@@ -116,12 +116,26 @@ WantedBy=default.target
 	}
 	runner := installer.runner()
 	if err := runner.Run("systemctl", "--user", "daemon-reload"); err != nil {
-		return InstallResult{}, fmt.Errorf("systemctl daemon-reload: %w", err)
+		return installer.installLinuxAutostart(homeDir, executablePath)
 	}
 	if err := runner.Run("systemctl", "--user", "enable", "--now", serviceName+".service"); err != nil {
-		return InstallResult{}, fmt.Errorf("systemctl enable: %w", err)
+		return installer.installLinuxAutostart(homeDir, executablePath)
 	}
 	return InstallResult{Kind: "systemd-user", Path: path}, nil
+}
+
+func (installer Installer) installLinuxAutostart(homeDir string, executablePath string) (InstallResult, error) {
+	path := filepath.Join(homeDir, ".config", "autostart", serviceName+".desktop")
+	entry := fmt.Sprintf(`[Desktop Entry]
+Type=Application
+Name=PersonaStack Connector
+Exec=%s run --foreground
+X-GNOME-Autostart-enabled=true
+`, desktopExecQuote(executablePath))
+	if err := writeOwnerOnly(path, []byte(entry)); err != nil {
+		return InstallResult{}, err
+	}
+	return InstallResult{Kind: "linux-autostart", Path: path}, nil
 }
 
 func (installer Installer) installWindowsTask(homeDir string, executablePath string) (InstallResult, error) {
@@ -187,6 +201,12 @@ func xmlEscape(value string) string {
 }
 
 func systemdQuote(value string) string {
+	escaped := strings.ReplaceAll(strings.TrimSpace(value), `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
+}
+
+func desktopExecQuote(value string) string {
 	escaped := strings.ReplaceAll(strings.TrimSpace(value), `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	return `"` + escaped + `"`
