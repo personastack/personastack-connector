@@ -10,8 +10,8 @@ external persona.
 
 - Pair a local machine to one or more API-owned external persona bindings.
 - Open authenticated outbound websocket sessions to `agent-gateway`.
-- Report runtime health, MCP configuration state, Connector version, native MCP
-  server/tool naming metadata, and wake probe results.
+- Report runtime health, MCP configuration state, Connector version, connection
+  generation, native MCP server/tool naming metadata, and wake probe results.
 - Receive API-composed run assignments from `agent-gateway`.
 - Dispatch fully composed prompts into the selected local runtime.
 - Stream or report local run events back through the Connector protocol.

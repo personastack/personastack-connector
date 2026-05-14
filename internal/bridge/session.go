@@ -92,6 +92,7 @@ func (s Session) HeartbeatFrame(state runtime.AdapterState, lastWakeProbeAt *tim
 		ConnectionStatus:       externalagentprotocol.ConnectionStatusBridgeConnected,
 		ReadinessStatus:        readinessForAdapterState(state),
 		RuntimeKind:            runtimeKindForAdapter(s.Binding.RuntimeKind),
+		ConnectionGeneration:   s.Binding.ConnectionGeneration,
 		NativeMCPServerName:    strings.TrimSpace(s.Binding.NativeMCPServer),
 		NativeMCPToolNamespace: strings.TrimSpace(s.Binding.NativeMCPNamespace),
 		NativeMCPToolPrefix:    nativeMCPToolPrefix(s.Binding.RuntimeKind, s.Binding.NativeMCPServer),

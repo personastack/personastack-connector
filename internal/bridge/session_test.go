@@ -76,7 +76,7 @@ func TestHeartbeatFrameReportsBuildMetadata(t *testing.T) {
 	session := testSession(t, publicKey, privateKey)
 
 	frame := session.HeartbeatFrame(runtime.AdapterStateReady, nil)
-	if frame.Heartbeat.ConnectorVersion != "v1.2.3" || frame.Heartbeat.GitCommit != "abc123" || frame.Heartbeat.ReleaseChannel != "test" {
+	if frame.Heartbeat.ConnectionGeneration != 5 || frame.Heartbeat.ConnectorVersion != "v1.2.3" || frame.Heartbeat.GitCommit != "abc123" || frame.Heartbeat.ReleaseChannel != "test" {
 		t.Fatalf("unexpected heartbeat metadata: %+v", frame.Heartbeat)
 	}
 	if frame.Heartbeat.NativeMCPServerName != "personastack-conn-1" || frame.Heartbeat.NativeMCPToolPrefix != "mcp_personastack-conn-1_" || frame.Heartbeat.NativeToolNamingRule != externalagentprotocol.NativeToolNamingRuleMCPServerPrefix {
