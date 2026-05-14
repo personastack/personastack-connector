@@ -163,7 +163,7 @@ func (cmd command) runRuntime(args []string) error {
 	}
 
 	for _, kind := range []runtime.AdapterKind{runtime.AdapterKindHermes, runtime.AdapterKindOpenClaw} {
-		detection := runtime.NewPlaceholderAdapter(kind).Detect()
+		detection := runtime.NewAdapter(kind).Detect()
 		fmt.Fprintf(cmd.stdout, "%s %s %s\n", detection.Kind, detection.State, detection.Note)
 	}
 	return nil

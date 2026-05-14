@@ -2,7 +2,10 @@ package runtime
 
 import (
 	"fmt"
+	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
 type AdapterKind int
@@ -92,6 +95,21 @@ type Adapter interface {
 	StartRun(assignmentID string, fullyComposedPrompt string) (string, error)
 	CancelRun(nativeRunID string) error
 	Diagnose() Detection
+}
+
+func NewAdapter(kind AdapterKind) Adapter {
+	switch kind {
+	case AdapterKindHermes:
+		return NewHermesAdapter(os.Getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), os.Getenv("HERMES_API_SERVER_KEY"))
+	case AdapterKindOpenClaw:
+		return NewOpenClawAdapter(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), os.Getenv("OPENCLAW_GATEWAY_TOKEN"))
+	default:
+		return NewPlaceholderAdapter(kind)
+	}
+}
+
+func defaultHTTPClient() *http.Client {
+	return &http.Client{Timeout: 10 * time.Second}
 }
 
 type PlaceholderAdapter struct {
