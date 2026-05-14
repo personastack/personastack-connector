@@ -22,12 +22,16 @@ jobs:
           cache: true
       - name: Test
         run: go test ./...
+      - name: Format
+        run: test -z "$(gofmt -l .)"
       - name: Race tests
         run: go test -race ./internal/bridge ./internal/daemon ./internal/mcp
       - name: Vet
         run: go vet ./...
       - name: Vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: License file
+        run: test -s LICENSE
 
   release:
     name: release
@@ -57,6 +61,12 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build release manifest
+        run: go run ./cmd/release-manifest --dist dist --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" --output "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json"
+      - name: Upload release manifest
+        run: gh release upload "$GITHUB_REF_NAME" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Attest artifacts
         uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:

@@ -155,7 +155,8 @@ Adapter result states must be concrete typed enums, including:
   requests and `main` pushes.
 - Tagged releases build GoReleaser archives for macOS/Linux/Windows plus Linux
   `.deb` and `.rpm` packages, publish checksum/SBOM artifacts to a draft GitHub
-  Release, and emit GitHub provenance attestations for `dist/*`.
+  Release, upload a machine-readable release manifest, and emit GitHub
+  provenance attestations for `dist/*`.
 - The binary must expose `personastack-connector version` so install flows and
   support diagnostics can verify the downloaded artifact.
 - WSL2 uses the Linux Connector inside the WSL2 environment.

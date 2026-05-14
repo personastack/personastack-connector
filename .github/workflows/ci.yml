@@ -23,12 +23,16 @@ jobs:
           cache: true
       - name: Test
         run: go test ./...
+      - name: Format
+        run: test -z "$(gofmt -l .)"
       - name: Race tests
         run: go test -race ./internal/bridge ./internal/daemon ./internal/mcp
       - name: Vet
         run: go vet ./...
       - name: Vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: License file
+        run: test -s LICENSE
 
   release-dry-run:
     name: release dry-run
@@ -58,3 +62,5 @@ jobs:
           distribution: goreleaser
           version: latest
           args: release --snapshot --clean --skip=publish
+      - name: Snapshot release manifest
+        run: go run ./cmd/release-manifest --dist dist --version snapshot --commit "$GITHUB_SHA" --output dist/personastack-connector_snapshot_release_manifest.json
