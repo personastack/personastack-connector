@@ -45,6 +45,53 @@ func TestInstallerWritesSystemdUserUnit(t *testing.T) {
 	}
 }
 
+func TestInstallerPlansServiceWithoutWritingFiles(t *testing.T) {
+	tests := []struct {
+		goos     string
+		wantKind string
+		wantPath string
+	}{
+		{
+			goos:     "darwin",
+			wantKind: "launchagent",
+			wantPath: filepath.Join("Library", "LaunchAgents", "ai.personastack.connector.plist"),
+		},
+		{
+			goos:     "linux",
+			wantKind: "systemd-user",
+			wantPath: filepath.Join(".config", "systemd", "user", "personastack-connector.service"),
+		},
+		{
+			goos:     "windows",
+			wantKind: "windows-scheduled-task",
+			wantPath: filepath.Join("AppData", "Local", "PersonaStack", "Connector", "install-task.ps1"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.goos, func(t *testing.T) {
+			homeDir := t.TempDir()
+			result, err := (Installer{
+				HomeDir:        homeDir,
+				ExecutablePath: "/opt/personastack-connector",
+				GOOS:           test.goos,
+			}).Plan()
+			if err != nil {
+				t.Fatalf("Plan() error = %v", err)
+			}
+			if result.Kind != test.wantKind {
+				t.Fatalf("kind = %q, want %q", result.Kind, test.wantKind)
+			}
+			if result.Path != filepath.Join(homeDir, test.wantPath) {
+				t.Fatalf("path = %q, want suffix %q", result.Path, test.wantPath)
+			}
+			if _, err := os.Stat(filepath.Dir(result.Path)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Plan() wrote service directory or stat failed: %v", err)
+			}
+		})
+	}
+}
+
 func TestInstallerFallsBackToLinuxAutostart(t *testing.T) {
 	homeDir := t.TempDir()
 	runner := &recordingRunner{err: errors.New("systemd unavailable")}

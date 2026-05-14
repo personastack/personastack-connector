@@ -25,6 +25,8 @@ browser-visible runtime state remain owned by `personastack-api`.
 - Race-sensitive validation: `go test -race ./internal/bridge ./internal/daemon ./internal/mcp`
 - Security validation: `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`
 - Release config validation: `go run github.com/goreleaser/goreleaser/v2@latest check`
+- Release artifact smoke: `./scripts/smoke-release-artifacts.sh dist <version>` or
+  `./scripts/smoke-release-artifacts.sh dist auto` for snapshot builds.
 - CI runs unit tests, formatting, targeted race tests, `go vet`,
   `govulncheck`, license-file validation, and a GoReleaser snapshot dry-run
   with Syft installed for SBOM generation.

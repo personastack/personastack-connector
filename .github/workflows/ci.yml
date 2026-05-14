@@ -62,5 +62,7 @@ jobs:
           distribution: goreleaser
           version: latest
           args: release --snapshot --clean --skip=publish
+      - name: Snapshot package smoke
+        run: ./scripts/smoke-release-artifacts.sh dist auto
       - name: Snapshot release manifest
         run: go run ./cmd/release-manifest --dist dist --version snapshot --commit "$GITHUB_SHA" --output dist/personastack-connector_snapshot_release_manifest.json

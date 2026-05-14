@@ -25,6 +25,7 @@ const usage = `Usage:
   personastack-connector mcp install
   personastack-connector mcp stdio --binding <connection_id>
   personastack-connector service install
+  personastack-connector service plan
   personastack-connector run --foreground
   personastack-connector unpair
   personastack-connector version
@@ -249,11 +250,19 @@ func (cmd command) runService(args []string) error {
 	if len(args) == 0 {
 		return errors.New("service requires a subcommand")
 	}
-	if args[0] != "install" {
+	if args[0] != "install" && args[0] != "plan" {
 		return fmt.Errorf("unknown service subcommand %q", args[0])
 	}
 	if len(args) != 1 {
-		return errors.New("service install accepts no arguments")
+		return fmt.Errorf("service %s accepts no arguments", args[0])
+	}
+	if args[0] == "plan" {
+		result, err := (service.Installer{}).Plan()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.stdout, "service plan kind=%s path=%s\n", result.Kind, result.Path)
+		return nil
 	}
 	result, err := (service.Installer{}).Install()
 	if err != nil {

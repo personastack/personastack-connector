@@ -61,6 +61,8 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Release package smoke
+        run: ./scripts/smoke-release-artifacts.sh dist "${GITHUB_REF_NAME#v}"
       - name: Build release manifest
         run: go run ./cmd/release-manifest --dist dist --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" --output "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json"
       - name: Upload release manifest

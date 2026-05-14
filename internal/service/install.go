@@ -35,6 +35,34 @@ type InstallResult struct {
 	Path string
 }
 
+func (installer Installer) Plan() (InstallResult, error) {
+	executablePath, err := installer.executablePath()
+	if err != nil {
+		return InstallResult{}, err
+	}
+	if strings.TrimSpace(executablePath) == "" {
+		return InstallResult{}, fmt.Errorf("resolve connector executable: empty path")
+	}
+	homeDir, err := installer.homeDir()
+	if err != nil {
+		return InstallResult{}, err
+	}
+	goos := strings.TrimSpace(installer.GOOS)
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	switch goos {
+	case "darwin":
+		return InstallResult{Kind: "launchagent", Path: filepath.Join(homeDir, "Library", "LaunchAgents", "ai.personastack.connector.plist")}, nil
+	case "linux":
+		return InstallResult{Kind: "systemd-user", Path: filepath.Join(homeDir, ".config", "systemd", "user", serviceName+".service")}, nil
+	case "windows":
+		return InstallResult{Kind: "windows-scheduled-task", Path: filepath.Join(homeDir, "AppData", "Local", "PersonaStack", "Connector", "install-task.ps1")}, nil
+	default:
+		return InstallResult{}, fmt.Errorf("unsupported service platform: %s", goos)
+	}
+}
+
 func (installer Installer) Install() (InstallResult, error) {
 	executablePath, err := installer.executablePath()
 	if err != nil {
