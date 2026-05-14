@@ -65,6 +65,10 @@ func (adapter HermesAdapter) Detect() Detection {
 	if len(missing) > 0 {
 		return Detection{Kind: AdapterKindHermes, State: AdapterStateCapabilityMissing, Note: strings.Join(missing, ",") + " missing"}
 	}
+	degraded := capabilities.degradedFallbackFeatures()
+	if len(degraded) > 0 {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateReady, Note: "Hermes API ready with degraded fallback: " + strings.Join(degraded, ",") + " missing"}
+	}
 	return Detection{Kind: AdapterKindHermes, State: AdapterStateReady, Note: "Hermes API ready"}
 }
 
@@ -318,6 +322,11 @@ func (capabilities hermesCapabilities) missingRequiredFeatures() []string {
 	if !capabilities.Features.RunStatus {
 		missing = append(missing, "run_status")
 	}
+	return missing
+}
+
+func (capabilities hermesCapabilities) degradedFallbackFeatures() []string {
+	missing := []string{}
 	if !capabilities.Features.RunEventsSSE {
 		missing = append(missing, "run_events_sse")
 	}

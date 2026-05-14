@@ -48,7 +48,29 @@ func TestHermesAdapterDetectRequiresRunLifecycleFeatures(t *testing.T) {
 	if detection.State != AdapterStateCapabilityMissing {
 		t.Fatalf("expected capability missing, got %+v", detection)
 	}
-	if detection.Note != "run_status,run_events_sse,run_stop missing" {
+	if detection.Note != "run_status missing" {
+		t.Fatalf("unexpected note: %q", detection.Note)
+	}
+}
+
+func TestHermesAdapterDetectReportsDegradedFallbacks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/v1/capabilities":
+			_, _ = w.Write([]byte(`{"features":{"run_submission":true,"run_status":true}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	detection := NewHermesAdapter(server.URL, "key-1").Detect()
+	if detection.State != AdapterStateReady {
+		t.Fatalf("expected ready with degraded fallback, got %+v", detection)
+	}
+	if detection.Note != "Hermes API ready with degraded fallback: run_events_sse,run_stop missing" {
 		t.Fatalf("unexpected note: %q", detection.Note)
 	}
 }

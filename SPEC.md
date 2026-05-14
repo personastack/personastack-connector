@@ -116,6 +116,8 @@ Adapter result states must be concrete typed enums, including:
 - Use Hermes `/v1/runs` when available.
 - Subscribe to Hermes run SSE events for terminal run observation and fall back
   to status polling only when events are unavailable.
+- Missing Hermes run SSE or stop features are degraded fallbacks, not hard
+  runtime failures, when run submission and run status are available.
 - Put API-rendered `fully_composed_prompt` in Hermes `input` by default.
 - Use Hermes `instructions` only when API provides explicit structured prompt
   fields.
