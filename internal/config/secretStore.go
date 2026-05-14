@@ -36,6 +36,30 @@ func storeBindingSecrets(binding Binding) (Binding, error) {
 		binding.PersonaMCPToken = ""
 		binding.HasPersonaMCPToken = true
 	}
+	if strings.TrimSpace(binding.OpenClawGatewayToken) != "" {
+		err := keyringSet(keyringService, bindingSecretKey(connectionID, "openclaw-gateway-token"), binding.OpenClawGatewayToken)
+		if err != nil {
+			return Binding{}, fmt.Errorf("store OpenClaw gateway token: %w", err)
+		}
+		binding.OpenClawGatewayToken = ""
+		binding.HasOpenClawToken = true
+	}
+	if strings.TrimSpace(binding.OpenClawPassword) != "" {
+		err := keyringSet(keyringService, bindingSecretKey(connectionID, "openclaw-password"), binding.OpenClawPassword)
+		if err != nil {
+			return Binding{}, fmt.Errorf("store OpenClaw password: %w", err)
+		}
+		binding.OpenClawPassword = ""
+		binding.HasOpenClawPassword = true
+	}
+	if strings.TrimSpace(binding.OpenClawDeviceToken) != "" {
+		err := keyringSet(keyringService, bindingSecretKey(connectionID, "openclaw-device-token"), binding.OpenClawDeviceToken)
+		if err != nil {
+			return Binding{}, fmt.Errorf("store OpenClaw device token: %w", err)
+		}
+		binding.OpenClawDeviceToken = ""
+		binding.HasOpenClawDevice = true
+	}
 	if strings.TrimSpace(binding.ActiveRunMCPToken) != "" {
 		err := keyringSet(keyringService, bindingSecretKey(connectionID, "active-run-mcp-token"), binding.ActiveRunMCPToken)
 		if err != nil {
@@ -67,6 +91,24 @@ func loadBindingSecrets(binding Binding) Binding {
 			binding.PersonaMCPToken = secret
 		}
 	}
+	if binding.HasOpenClawToken && strings.TrimSpace(binding.OpenClawGatewayToken) == "" {
+		secret, err := keyringGet(keyringService, bindingSecretKey(connectionID, "openclaw-gateway-token"))
+		if err == nil {
+			binding.OpenClawGatewayToken = secret
+		}
+	}
+	if binding.HasOpenClawPassword && strings.TrimSpace(binding.OpenClawPassword) == "" {
+		secret, err := keyringGet(keyringService, bindingSecretKey(connectionID, "openclaw-password"))
+		if err == nil {
+			binding.OpenClawPassword = secret
+		}
+	}
+	if binding.HasOpenClawDevice && strings.TrimSpace(binding.OpenClawDeviceToken) == "" {
+		secret, err := keyringGet(keyringService, bindingSecretKey(connectionID, "openclaw-device-token"))
+		if err == nil {
+			binding.OpenClawDeviceToken = secret
+		}
+	}
 	if binding.HasActiveRunMCPToken && strings.TrimSpace(binding.ActiveRunMCPToken) == "" {
 		secret, err := keyringGet(keyringService, bindingSecretKey(connectionID, "active-run-mcp-token"))
 		if err == nil {
@@ -83,6 +125,9 @@ func deleteBindingSecrets(binding Binding) {
 	}
 	_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "bridge-private-key"))
 	_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "persona-mcp-token"))
+	_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "openclaw-gateway-token"))
+	_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "openclaw-password"))
+	_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "openclaw-device-token"))
 	_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "active-run-mcp-token"))
 }
 

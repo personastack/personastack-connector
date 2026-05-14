@@ -121,6 +121,31 @@ func TestHermesAdapterStartRun(t *testing.T) {
 	}
 }
 
+func TestHermesAdapterRejectsNonLoopbackURL(t *testing.T) {
+	detection := NewHermesAdapter("http://192.0.2.10:8642", "key-1").Detect()
+	if detection.State != AdapterStateRuntimeMissing {
+		t.Fatalf("expected runtime missing, got %+v", detection)
+	}
+	if detection.Note != "Hermes API URL must be loopback" {
+		t.Fatalf("unexpected note: %q", detection.Note)
+	}
+	_, err := NewHermesAdapter("http://192.0.2.10:8642", "key-1").StartRun(RunRequest{FullyComposedPrompt: "prompt"})
+	if err == nil {
+		t.Fatalf("expected StartRun to reject non-loopback URL")
+	}
+}
+
+func TestHermesAdapterRejectsRedirectToNonLoopbackURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://192.0.2.10/health", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	detection := NewHermesAdapter(server.URL, "key-1").Detect()
+	if detection.State != AdapterStateRuntimeMissing {
+		t.Fatalf("expected runtime missing, got %+v", detection)
+	}
+}
+
 func TestHermesAdapterWaitRunUsesSSEEvents(t *testing.T) {
 	statusPolled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,5 +172,120 @@ func TestHermesAdapterWaitRunUsesSSEEvents(t *testing.T) {
 	}
 	if statusPolled {
 		t.Fatalf("status endpoint should not be polled after terminal SSE event")
+	}
+}
+
+func TestHermesAdapterWaitRunMapsTerminalStatuses(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   RunStatus
+		output string
+	}{
+		{name: "failed", status: "failed", want: RunStatusFailed, output: "boom"},
+		{name: "failed output fallback", status: "error", want: RunStatusFailed, output: "output-only"},
+		{name: "cancelled", status: "cancelled", want: RunStatusCancelled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/runs/hermes-run-1/events":
+					http.NotFound(w, r)
+				case "/v1/runs/hermes-run-1":
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"status": tt.status,
+						"error":  failedErrorForTest(tt.name, tt.output),
+						"output": tt.output,
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			result, err := NewHermesAdapter(server.URL, "key-1").WaitRun(context.Background(), "hermes-run-1")
+			if err != nil {
+				t.Fatalf("WaitRun() error = %v", err)
+			}
+			if result.Status != tt.want || result.Output != tt.output {
+				t.Fatalf("result = %+v", result)
+			}
+		})
+	}
+}
+
+func failedErrorForTest(name string, output string) string {
+	if name == "failed output fallback" {
+		return ""
+	}
+	return output
+}
+
+func TestHermesAdapterCancelRunWaitsForTerminalState(t *testing.T) {
+	stopped := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/stop":
+			stopped = true
+			w.WriteHeader(http.StatusAccepted)
+		case "/v1/runs/hermes-run-1/events":
+			http.NotFound(w, r)
+		case "/v1/runs/hermes-run-1":
+			if !stopped {
+				_, _ = w.Write([]byte(`{"status":"running"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"cancelled"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	if err := NewHermesAdapter(server.URL, "key-1").CancelRun("hermes-run-1"); err != nil {
+		t.Fatalf("CancelRun() error = %v", err)
+	}
+	if !stopped {
+		t.Fatalf("stop endpoint was not called")
+	}
+}
+
+func TestHermesAdapterCancelRunPollsStatusWhenEventsStayOpen(t *testing.T) {
+	statusPolled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/stop":
+			w.WriteHeader(http.StatusAccepted)
+		case "/v1/runs/hermes-run-1/events":
+			t.Fatalf("cancel should poll status directly instead of opening SSE")
+		case "/v1/runs/hermes-run-1":
+			statusPolled = true
+			_, _ = w.Write([]byte(`{"status":"cancelled"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	if err := NewHermesAdapter(server.URL, "key-1").CancelRun("hermes-run-1"); err != nil {
+		t.Fatalf("CancelRun() error = %v", err)
+	}
+	if !statusPolled {
+		t.Fatalf("status endpoint was not polled")
+	}
+}
+
+func TestHermesAdapterCancelRunIgnoresUnsupportedStopMissingStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/stop":
+			http.NotFound(w, r)
+		case "/v1/runs/hermes-run-1":
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	if err := NewHermesAdapter(server.URL, "key-1").CancelRun("hermes-run-1"); err != nil {
+		t.Fatalf("CancelRun() error = %v", err)
 	}
 }

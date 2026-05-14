@@ -145,7 +145,11 @@ func NewAdapter(kind AdapterKind) Adapter {
 	case AdapterKindHermes:
 		return NewHermesAdapter(os.Getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), os.Getenv("HERMES_API_SERVER_KEY"))
 	case AdapterKindOpenClaw:
-		return NewOpenClawAdapter(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), os.Getenv("OPENCLAW_GATEWAY_TOKEN"))
+		return NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), OpenClawAuth{
+			Token:       os.Getenv("OPENCLAW_GATEWAY_TOKEN"),
+			Password:    os.Getenv("OPENCLAW_GATEWAY_PASSWORD"),
+			DeviceToken: os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN"),
+		}, os.Getenv("OPENCLAW_AGENT_ID"))
 	default:
 		return NewPlaceholderAdapter(kind)
 	}

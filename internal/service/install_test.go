@@ -142,3 +142,29 @@ func TestInstallerWritesLaunchAgent(t *testing.T) {
 		t.Fatalf("unexpected commands: %+v", runner.commands)
 	}
 }
+
+func TestEnsureShimWritesStableUserExecutable(t *testing.T) {
+	homeDir := t.TempDir()
+	result, err := EnsureShim(homeDir, "/opt/PersonaStack Connector/personastack-connector", "linux")
+	if err != nil {
+		t.Fatalf("EnsureShim() error = %v", err)
+	}
+	wantPath := filepath.Join(homeDir, ".local", "bin", "personastack-connector")
+	if result.Path != wantPath {
+		t.Fatalf("path = %q, want %q", result.Path, wantPath)
+	}
+	raw, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("read shim: %v", err)
+	}
+	if !strings.Contains(string(raw), "exec '/opt/PersonaStack Connector/personastack-connector'") {
+		t.Fatalf("unexpected shim:\n%s", raw)
+	}
+	info, err := os.Stat(wantPath)
+	if err != nil {
+		t.Fatalf("stat shim: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("mode = %o, want 700", info.Mode().Perm())
+	}
+}

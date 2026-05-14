@@ -35,6 +35,43 @@ type InstallResult struct {
 	Path string
 }
 
+type ShimResult struct {
+	Path string
+}
+
+func EnsureShim(homeDir string, executablePath string, goos string) (ShimResult, error) {
+	executablePath = strings.TrimSpace(executablePath)
+	if executablePath == "" {
+		return ShimResult{}, fmt.Errorf("resolve connector executable: empty path")
+	}
+	homeDir = strings.TrimSpace(homeDir)
+	if homeDir == "" {
+		return ShimResult{}, fmt.Errorf("resolve home dir: empty path")
+	}
+	goos = strings.TrimSpace(goos)
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	switch goos {
+	case "darwin", "linux":
+		path := filepath.Join(homeDir, ".local", "bin", serviceName)
+		script := fmt.Sprintf("#!/bin/sh\nexec %s \"$@\"\n", shellQuote(executablePath))
+		if err := writeOwnerExecutable(path, []byte(script)); err != nil {
+			return ShimResult{}, err
+		}
+		return ShimResult{Path: path}, nil
+	case "windows":
+		path := filepath.Join(homeDir, "AppData", "Local", "PersonaStack", "Connector", serviceName+".cmd")
+		script := fmt.Sprintf("@echo off\r\n%q %%*\r\n", executablePath)
+		if err := writeOwnerOnly(path, []byte(script)); err != nil {
+			return ShimResult{}, err
+		}
+		return ShimResult{Path: path}, nil
+	default:
+		return ShimResult{}, fmt.Errorf("unsupported shim platform: %s", goos)
+	}
+}
+
 func (installer Installer) Plan() (InstallResult, error) {
 	executablePath, err := installer.executablePath()
 	if err != nil {
@@ -224,6 +261,16 @@ func writeOwnerOnly(path string, raw []byte) error {
 	return nil
 }
 
+func writeOwnerExecutable(path string, raw []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create service dir: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0o700); err != nil {
+		return fmt.Errorf("write service file: %w", err)
+	}
+	return nil
+}
+
 func xmlEscape(value string) string {
 	return html.EscapeString(strings.TrimSpace(value))
 }
@@ -238,4 +285,8 @@ func desktopExecQuote(value string) string {
 	escaped := strings.ReplaceAll(strings.TrimSpace(value), `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	return `"` + escaped + `"`
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(strings.TrimSpace(value), "'", "'\\''") + "'"
 }

@@ -64,15 +64,21 @@ func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 	path := t.TempDir() + "/state.json"
 	store := NewFileStore(path)
 	binding := Binding{
-		ConnectionID:       "conn-1",
-		PersonaID:          "persona-1",
-		BridgePrivateKey:   "bridge-secret",
-		PersonaMCPToken:    "mcp-token",
-		ActiveRunID:        "run-1",
-		ActiveAssignmentID: "assignment-1",
-		ActiveRunMCPToken:  "run-mcp-token",
-		HasBridgeSecret:    true,
-		HasPersonaMCPToken: true,
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		BridgePrivateKey:     "bridge-secret",
+		OpenClawGatewayToken: "openclaw-token",
+		OpenClawPassword:     "openclaw-password",
+		OpenClawDeviceToken:  "openclaw-device",
+		PersonaMCPToken:      "mcp-token",
+		ActiveRunID:          "run-1",
+		ActiveAssignmentID:   "assignment-1",
+		ActiveRunMCPToken:    "run-mcp-token",
+		HasBridgeSecret:      true,
+		HasOpenClawToken:     true,
+		HasOpenClawPassword:  true,
+		HasOpenClawDevice:    true,
+		HasPersonaMCPToken:   true,
 	}
 	if err := store.SaveBinding(binding); err != nil {
 		t.Fatalf("save binding: %v", err)
@@ -81,14 +87,14 @@ func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	if strings.Contains(string(raw), "bridge-secret") || strings.Contains(string(raw), "mcp-token") || strings.Contains(string(raw), "run-mcp-token") {
+	if strings.Contains(string(raw), "bridge-secret") || strings.Contains(string(raw), "mcp-token") || strings.Contains(string(raw), "run-mcp-token") || strings.Contains(string(raw), "openclaw-token") || strings.Contains(string(raw), "openclaw-password") || strings.Contains(string(raw), "openclaw-device") {
 		t.Fatalf("state file leaked secret: %s", string(raw))
 	}
 	loaded, ok := store.Binding("conn-1")
 	if !ok {
 		t.Fatalf("expected binding")
 	}
-	if loaded.BridgePrivateKey != "bridge-secret" || loaded.PersonaMCPToken != "mcp-token" || loaded.ActiveAssignmentID != "assignment-1" || loaded.ActiveRunMCPToken != "run-mcp-token" {
+	if loaded.BridgePrivateKey != "bridge-secret" || loaded.PersonaMCPToken != "mcp-token" || loaded.ActiveAssignmentID != "assignment-1" || loaded.ActiveRunMCPToken != "run-mcp-token" || loaded.OpenClawGatewayToken != "openclaw-token" || loaded.OpenClawPassword != "openclaw-password" || loaded.OpenClawDeviceToken != "openclaw-device" {
 		t.Fatalf("expected keyring-backed secrets, got %+v", loaded)
 	}
 	loaded.ActiveRunID = ""
@@ -135,16 +141,22 @@ func TestFileStoreDeleteBindingDeletesSecrets(t *testing.T) {
 		ConnectionID:         "conn-1",
 		PersonaID:            "persona-1",
 		BridgePrivateKey:     "bridge-secret",
+		OpenClawGatewayToken: "openclaw-token",
+		OpenClawPassword:     "openclaw-password",
+		OpenClawDeviceToken:  "openclaw-device",
 		PersonaMCPToken:      "mcp-token",
 		ActiveRunMCPToken:    "run-mcp-token",
 		HasBridgeSecret:      true,
+		HasOpenClawToken:     true,
+		HasOpenClawPassword:  true,
+		HasOpenClawDevice:    true,
 		HasPersonaMCPToken:   true,
 		HasActiveRunMCPToken: true,
 	}
 	if err := store.SaveBinding(binding); err != nil {
 		t.Fatalf("save binding: %v", err)
 	}
-	if len(secrets) != 3 {
+	if len(secrets) != 6 {
 		t.Fatalf("expected secrets before delete: %+v", secrets)
 	}
 	if err := store.DeleteBinding("conn-1"); err != nil {

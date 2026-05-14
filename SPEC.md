@@ -65,8 +65,11 @@ external persona.
 - `personastack-connector pair <code> --runtime hermes --configure-mcp`
 - `personastack-connector pair <code> --runtime openclaw --configure-mcp`
 - `personastack-connector status`
+- `personastack-connector status --repair`
 - `personastack-connector runtime detect`
+- `personastack-connector runtime repair`
 - `personastack-connector mcp install`
+- `personastack-connector mcp repair`
 - `personastack-connector mcp stdio --binding <connection_id>`
 - `personastack-connector run --foreground`
 - `personastack-connector unpair`
@@ -102,6 +105,8 @@ Adapter result states must be concrete typed enums, including:
 - Default to a Connector-owned per-binding stdio MCP proxy.
 - Native runtime config invokes
   `personastack-connector mcp stdio --binding <connection_id>`.
+- Native runtime config must point at the Connector's stable user shim path, not
+  a transient package or test executable path.
 - The stdio proxy loads PersonaStack MCP credentials from OS credential storage.
 - Heartbeat readiness treats MCP as verified only after the native config is
   present and a live PersonaStack MCP initialize/tools-list check succeeds.
@@ -138,6 +143,9 @@ Adapter result states must be concrete typed enums, including:
   MCP namespace as bounded non-secret Hermes run metadata.
 - Use Hermes `instructions` only when API provides explicit structured prompt
   fields.
+- Configure Hermes MCP through the top-level `mcp_servers` map with the
+  per-binding native MCP server name; config edits must be atomic and keep an
+  owner-only backup of the prior config.
 - Map Hermes native run events to Connector protocol run events.
 - Treat cancellation as best-effort until Hermes returns terminal state or the
   Connector cancellation timeout expires.

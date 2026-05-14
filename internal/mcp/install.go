@@ -1,14 +1,18 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	osruntime "runtime"
 	"strings"
 
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/runtime"
+	"github.com/personastack/personastack-connector/internal/service"
 	"gopkg.in/yaml.v3"
 )
 
@@ -32,17 +36,18 @@ type Installer struct {
 	Store          config.Store
 	HomeDir        string
 	ExecutablePath string
+	GOOS           string
 }
 
 func (installer Installer) InstallAll() ([]InstallResult, error) {
 	if installer.Store == nil {
 		return nil, fmt.Errorf("store required")
 	}
-	executablePath, err := installer.executablePath()
+	homeDir, err := installer.homeDir()
 	if err != nil {
 		return nil, err
 	}
-	homeDir, err := installer.homeDir()
+	executablePath, err := installer.executablePath(homeDir)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +116,20 @@ func VerifyBinding(homeDir string, binding config.Binding) VerifyResult {
 	return result
 }
 
+func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.Binding, client *http.Client) VerifyResult {
+	result := VerifyBinding(homeDir, binding)
+	if result.State != runtime.AdapterStateMCPRestartRequired {
+		return result
+	}
+	live := VerifyBindingLive(ctx, binding, client)
+	if !live.OK {
+		result.Note = live.Note
+		return result
+	}
+	result.Note = live.Note + "; native runtime restart may be required"
+	return result
+}
+
 func VerifyBindingInUserHome(binding config.Binding) VerifyResult {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -155,17 +174,17 @@ func upsertHermesServer(path string, server stdioServerConfig) error {
 			return fmt.Errorf("parse Hermes config: %w", err)
 		}
 	}
-	mcpNode := ensureMap(root, "mcp")
-	servers := ensureMap(mcpNode, "servers")
+	servers := ensureMap(root, "mcp_servers")
 	servers[server.Name] = map[string]any{
 		"command": server.Command,
 		"args":    server.Args,
 	}
+	removeLegacyNestedServer(root, server.Name)
 	output, err := yaml.Marshal(root)
 	if err != nil {
 		return fmt.Errorf("encode Hermes config: %w", err)
 	}
-	return writeOwnerOnly(path, output)
+	return writeOwnerOnlyAtomic(path, output)
 }
 
 func verifyHermesServer(path string, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
@@ -177,7 +196,11 @@ func verifyHermesServer(path string, serverName string, bindingID config.Connect
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return runtime.AdapterStateMCPConfigMissing, "parse Hermes config: " + err.Error()
 	}
-	return verifyServerMap(root, serverName, bindingID)
+	servers, ok := root["mcp_servers"].(map[string]any)
+	if !ok {
+		return runtime.AdapterStateMCPConfigMissing, "mcp_servers section missing"
+	}
+	return verifyNamedServerMap(servers, serverName, bindingID)
 }
 
 func upsertOpenClawServer(path string, server stdioServerConfig) error {
@@ -199,7 +222,7 @@ func upsertOpenClawServer(path string, server stdioServerConfig) error {
 		return fmt.Errorf("encode OpenClaw config: %w", err)
 	}
 	output = append(output, '\n')
-	return writeOwnerOnly(path, output)
+	return writeOwnerOnlyAtomic(path, output)
 }
 
 func verifyOpenClawServer(path string, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
@@ -223,6 +246,10 @@ func verifyServerMap(root map[string]any, serverName string, bindingID config.Co
 	if !ok {
 		return runtime.AdapterStateMCPConfigMissing, "mcp servers section missing"
 	}
+	return verifyNamedServerMap(servers, serverName, bindingID)
+}
+
+func verifyNamedServerMap(servers map[string]any, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
 	server, ok := servers[serverName].(map[string]any)
 	if !ok {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP server missing"
@@ -234,7 +261,7 @@ func verifyServerMap(root map[string]any, serverName string, bindingID config.Co
 	if !serverArgsMatchBinding(server["args"], bindingID) {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP binding argument missing"
 	}
-	return runtime.AdapterStateMCPVerified, "PersonaStack MCP config present; runtime restart may be required"
+	return runtime.AdapterStateMCPRestartRequired, "PersonaStack MCP config present; live verification required"
 }
 
 func serverArgsMatchBinding(value any, bindingID config.ConnectionID) bool {
@@ -271,26 +298,107 @@ func ensureMap(parent map[string]any, key string) map[string]any {
 	return created
 }
 
-func writeOwnerOnly(path string, raw []byte) error {
+func removeLegacyNestedServer(root map[string]any, serverName string) {
+	mcpNode, ok := root["mcp"].(map[string]any)
+	if !ok {
+		return
+	}
+	servers, ok := mcpNode["servers"].(map[string]any)
+	if !ok {
+		return
+	}
+	delete(servers, serverName)
+	if len(servers) == 0 {
+		delete(mcpNode, "servers")
+	}
+	if len(mcpNode) == 0 {
+		delete(root, "mcp")
+	}
+}
+
+func writeOwnerOnlyAtomic(path string, raw []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		return fmt.Errorf("write config: %w", err)
+	existing, readErr := os.ReadFile(path)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		return fmt.Errorf("read config for backup: %w", readErr)
 	}
+	if readErr == nil {
+		backupPath := path + ".personastack.bak"
+		if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+			if err := writeFileAtomic(backupPath, existing, 0o600); err != nil {
+				return fmt.Errorf("write config backup: %w", err)
+			}
+		} else if err != nil {
+			return fmt.Errorf("stat config backup: %w", err)
+		}
+	}
+	return writeFileAtomic(path, raw, 0o600)
+}
+
+func writeFileAtomic(path string, raw []byte, mode os.FileMode) error {
+	temp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tempPath := temp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err := temp.Chmod(mode); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("secure temp config: %w", err)
+	}
+	if _, err := temp.Write(raw); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err := replaceFile(tempPath, path); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+	cleanup = false
 	return nil
 }
 
-func (installer Installer) executablePath() (string, error) {
+func replaceFile(tempPath string, path string) error {
+	if osruntime.GOOS != "windows" {
+		return os.Rename(tempPath, path)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(tempPath, path)
+}
+
+func (installer Installer) executablePath(homeDir string) (string, error) {
 	value := strings.TrimSpace(installer.ExecutablePath)
 	if value != "" {
-		return value, nil
+		shim, err := service.EnsureShim(homeDir, value, installer.GOOS)
+		if err != nil {
+			return "", err
+		}
+		return shim.Path, nil
 	}
 	path, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("resolve connector executable: %w", err)
 	}
-	return path, nil
+	goos := strings.TrimSpace(installer.GOOS)
+	if goos == "" {
+		goos = osruntime.GOOS
+	}
+	shim, err := service.EnsureShim(homeDir, path, goos)
+	if err != nil {
+		return "", err
+	}
+	return shim.Path, nil
 }
 
 func (installer Installer) homeDir() (string, error) {

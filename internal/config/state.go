@@ -42,6 +42,10 @@ type Binding struct {
 	BridgePublicKey      string
 	NativeMCPServer      string
 	NativeMCPNamespace   string
+	OpenClawAgentID      string
+	OpenClawGatewayToken string
+	OpenClawPassword     string
+	OpenClawDeviceToken  string
 	PersonaMCPURL        string
 	PersonaMCPToken      string
 	ActiveRunID          string
@@ -51,6 +55,9 @@ type Binding struct {
 	RuntimeKind          runtime.AdapterKind
 	ReadinessState       runtime.AdapterState
 	HasBridgeSecret      bool
+	HasOpenClawToken     bool
+	HasOpenClawPassword  bool
+	HasOpenClawDevice    bool
 	HasPersonaMCPToken   bool
 	HasActiveRunMCPToken bool
 }

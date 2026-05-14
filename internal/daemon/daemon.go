@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -107,7 +108,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	if accepted.MessageType != externalagentprotocol.FrameTypeConnectAccepted {
 		return fmt.Errorf("connector rejected: %s", accepted.MessageType)
 	}
-	adapter := runtime.NewAdapter(binding.RuntimeKind)
+	adapter := r.adapterForBinding(binding)
 	detection := r.bindingReadiness(adapter, binding)
 	heartbeat := session.HeartbeatFrame(detection.State, nil)
 	if err := writeFrame(heartbeat); err != nil {
@@ -460,22 +461,59 @@ func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding
 	if detection.State != runtime.AdapterStateReady {
 		return detection
 	}
-	verify := mcp.VerifyBindingInUserHome(binding)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		detection.State = runtime.AdapterStateMCPConfigMissing
+		detection.Note = "resolve home dir: " + err.Error()
+		return detection
+	}
+	verifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	verify := mcp.VerifyBindingWithLive(verifyCtx, homeDir, binding, nil)
 	detection.State = verify.State
 	detection.Note = verify.Note
 	if verify.State != runtime.AdapterStateMCPVerified {
 		return detection
 	}
-	verifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	live := mcp.VerifyBindingLive(verifyCtx, binding, nil)
-	if !live.OK {
-		detection.State = runtime.AdapterStateMCPConfigMissing
-		detection.Note = live.Note
-		return detection
-	}
-	detection.Note = live.Note
 	return detection
+}
+
+func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
+	if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
+		return runtime.NewAdapter(binding.RuntimeKind)
+	}
+	adapter := runtime.NewOpenClawAdapterWithAuth(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{
+		Token:       firstNonEmpty(binding.OpenClawGatewayToken, getenv("OPENCLAW_GATEWAY_TOKEN")),
+		Password:    firstNonEmpty(binding.OpenClawPassword, getenv("OPENCLAW_GATEWAY_PASSWORD")),
+		DeviceToken: firstNonEmpty(binding.OpenClawDeviceToken, getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")),
+	}, binding.OpenClawAgentID)
+	adapter.DeviceTokenSink = func(deviceToken string) error {
+		writable, ok := r.Store.(config.WritableStore)
+		if !ok {
+			return nil
+		}
+		latest, ok := r.Store.Binding(binding.ConnectionID)
+		if !ok {
+			return nil
+		}
+		latest.OpenClawDeviceToken = strings.TrimSpace(deviceToken)
+		latest.HasOpenClawDevice = latest.OpenClawDeviceToken != ""
+		return writable.SaveBinding(latest)
+	}
+	return adapter
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func getenv(key string) string {
+	return strings.TrimSpace(os.Getenv(key))
 }
 
 func canStartRunWithReadiness(state runtime.AdapterState) bool {

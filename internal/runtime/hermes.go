@@ -5,14 +5,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
 const defaultHermesURL = "http://127.0.0.1:8642"
+const defaultHermesCancelWait = 15 * time.Second
 
 type HermesAdapter struct {
 	BaseURL string
@@ -32,10 +36,13 @@ func (adapter HermesAdapter) Kind() AdapterKind {
 }
 
 func (adapter HermesAdapter) Detect() Detection {
+	if err := adapter.validateLoopbackBaseURL(); err != nil {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeMissing, Note: err.Error()}
+	}
 	client := adapter.client()
 	resp, err := client.Get(adapter.BaseURL + "/health")
 	if err != nil {
-		return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeMissing, Note: err.Error()}
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeMissing, Note: "Hermes API unavailable"}
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode >= 300 {
@@ -110,6 +117,9 @@ func (adapter HermesAdapter) VerifyMCP(bindingID string) (AdapterState, error) {
 }
 
 func (adapter HermesAdapter) StartRun(request RunRequest) (string, error) {
+	if err := adapter.validateLoopbackBaseURL(); err != nil {
+		return "", err
+	}
 	body := map[string]any{
 		"input":                strings.TrimSpace(request.FullyComposedPrompt),
 		"session_id":           strings.TrimSpace(firstNonEmpty(request.RunID, request.AssignmentID)),
@@ -150,6 +160,9 @@ func (adapter HermesAdapter) StartRun(request RunRequest) (string, error) {
 }
 
 func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
+	if err := adapter.validateLoopbackBaseURL(); err != nil {
+		return RunResult{}, err
+	}
 	trimmedRunID := strings.TrimSpace(nativeRunID)
 	if trimmedRunID == "" {
 		return RunResult{}, fmt.Errorf("native run id required")
@@ -159,22 +172,7 @@ func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (R
 	} else if terminal {
 		return result, nil
 	}
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		result, terminal, err := adapter.runStatus(ctx, trimmedRunID)
-		if err != nil {
-			return RunResult{}, err
-		}
-		if terminal {
-			return result, nil
-		}
-		select {
-		case <-ctx.Done():
-			return RunResult{}, ctx.Err()
-		case <-ticker.C:
-		}
-	}
+	return adapter.waitRunStatus(ctx, trimmedRunID)
 }
 
 func (adapter HermesAdapter) waitRunEvents(ctx context.Context, nativeRunID string) (RunResult, bool, error) {
@@ -295,7 +293,7 @@ func (adapter HermesAdapter) runStatus(ctx context.Context, nativeRunID string) 
 	case "completed", "succeeded", "success":
 		return RunResult{Status: RunStatusSucceeded, Output: strings.TrimSpace(decoded.Output)}, true, nil
 	case "failed", "error":
-		return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(decoded.Error)}, true, nil
+		return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(firstNonEmpty(decoded.Error, decoded.Output))}, true, nil
 	case "cancelled", "canceled":
 		return RunResult{Status: RunStatusCancelled}, true, nil
 	default:
@@ -303,7 +301,33 @@ func (adapter HermesAdapter) runStatus(ctx context.Context, nativeRunID string) 
 	}
 }
 
+func (adapter HermesAdapter) waitRunStatus(ctx context.Context, nativeRunID string) (RunResult, error) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		result, terminal, err := adapter.runStatus(ctx, nativeRunID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if terminal {
+			return result, nil
+		}
+		select {
+		case <-ctx.Done():
+			return RunResult{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (adapter HermesAdapter) CancelRun(nativeRunID string) error {
+	if err := adapter.validateLoopbackBaseURL(); err != nil {
+		return err
+	}
+	trimmedRunID := strings.TrimSpace(nativeRunID)
+	if trimmedRunID == "" {
+		return fmt.Errorf("native run id required")
+	}
 	req, err := http.NewRequest(http.MethodPost, adapter.BaseURL+"/v1/runs/"+strings.TrimSpace(nativeRunID)+"/stop", nil)
 	if err != nil {
 		return err
@@ -316,8 +340,18 @@ func (adapter HermesAdapter) CancelRun(nativeRunID string) error {
 		return fmt.Errorf("Hermes stop: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
+	unsupportedStop := resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNotImplemented || resp.StatusCode == http.StatusMethodNotAllowed
+	if resp.StatusCode >= 300 && !unsupportedStop {
 		return fmt.Errorf("Hermes stop status %d", resp.StatusCode)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultHermesCancelWait)
+	defer cancel()
+	_, err = adapter.waitRunStatus(ctx, trimmedRunID)
+	if unsupportedStop && err != nil {
+		return nil
+	}
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		return err
 	}
 	return nil
 }
@@ -327,10 +361,52 @@ func (adapter HermesAdapter) Diagnose() Detection {
 }
 
 func (adapter HermesAdapter) client() *http.Client {
-	if adapter.Client != nil {
-		return adapter.Client
+	checkRedirect := func(req *http.Request, via []*http.Request) error {
+		if err := validateHermesLoopbackURL(req.URL); err != nil {
+			return err
+		}
+		return nil
 	}
-	return defaultHTTPClient()
+	if adapter.Client != nil {
+		copied := *adapter.Client
+		copied.CheckRedirect = checkRedirect
+		return &copied
+	}
+	client := defaultHTTPClient()
+	client.CheckRedirect = checkRedirect
+	return client
+}
+
+func (adapter HermesAdapter) validateLoopbackBaseURL() error {
+	parsed, err := url.Parse(strings.TrimSpace(adapter.BaseURL))
+	if err != nil {
+		return fmt.Errorf("parse Hermes API URL: %w", err)
+	}
+	return validateHermesLoopbackURL(parsed)
+}
+
+func validateHermesLoopbackURL(parsed *url.URL) error {
+	if parsed.Scheme != "http" {
+		return fmt.Errorf("Hermes API URL must use http loopback")
+	}
+	host := parsed.Hostname()
+	if host == "localhost" {
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			return fmt.Errorf("resolve Hermes API host: %w", err)
+		}
+		for _, ip := range ips {
+			if !ip.IsLoopback() {
+				return fmt.Errorf("Hermes API URL must be loopback")
+			}
+		}
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("Hermes API URL must be loopback")
+	}
+	return nil
 }
 
 type hermesCapabilities struct {

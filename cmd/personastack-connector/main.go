@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/buildinfo"
@@ -20,9 +21,11 @@ import (
 
 const usage = `Usage:
   personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--configure-mcp]
-  personastack-connector status
+  personastack-connector status [--repair]
   personastack-connector runtime detect
+  personastack-connector runtime repair
   personastack-connector mcp install
+  personastack-connector mcp repair
   personastack-connector mcp stdio --binding <connection_id>
   personastack-connector service install
   personastack-connector service plan
@@ -78,7 +81,7 @@ func (cmd command) Run(ctx context.Context, args []string) error {
 	case "pair":
 		return cmd.runPair(args[1:])
 	case "status":
-		return cmd.runStatus(args[1:])
+		return cmd.runStatus(ctx, args[1:])
 	case "runtime":
 		return cmd.runRuntime(args[1:])
 	case "mcp":
@@ -105,7 +108,7 @@ func (cmd command) runPair(args []string) error {
 	flags.SetOutput(cmd.stderr)
 
 	runtimeValue := flags.String("runtime", "auto", "runtime adapter")
-	configureMCP := flags.Bool("configure-mcp", false, "configure native runtime MCP")
+	configureMCP := flags.Bool("configure-mcp", true, "configure native runtime MCP")
 	gateway := flags.String("gateway", externalagentprotocol.DefaultGatewayBaseURL, "PersonaStack gateway URL")
 
 	err := flags.Parse(args)
@@ -139,23 +142,29 @@ func (cmd command) runPair(args []string) error {
 	if err := writable.SaveBinding(result.Binding); err != nil {
 		return err
 	}
-	if *configureMCP {
-		if _, err := (mcp.Installer{Store: cmd.store}).InstallAll(); err != nil {
-			return err
-		}
-	}
-	serviceResult, err := (service.Installer{}).Install()
+	repairResults, err := cmd.repairSetup(*configureMCP)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.stdout, "service installed kind=%s path=%s\n", serviceResult.Kind, serviceResult.Path)
+	for _, repairResult := range repairResults {
+		fmt.Fprintln(cmd.stdout, repairResult)
+	}
 	fmt.Fprintf(cmd.stdout, "paired persona=%s connection=%s runtime=%s configure_mcp=%t\n", result.Binding.PersonaID, result.Binding.ConnectionID, result.Binding.RuntimeKind, *configureMCP)
 	return nil
 }
 
-func (cmd command) runStatus(args []string) error {
-	if len(args) != 0 {
-		return errors.New("status accepts no arguments")
+func (cmd command) runStatus(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("status", flag.ContinueOnError)
+	flags.SetOutput(cmd.stderr)
+
+	repair := flags.Bool("repair", false, "repair local connector setup")
+
+	err := flags.Parse(args)
+	if err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("status accepts flags only")
 	}
 
 	bindings := cmd.store.ListBindings()
@@ -163,9 +172,25 @@ func (cmd command) runStatus(args []string) error {
 		fmt.Fprintln(cmd.stdout, "no bindings")
 		return nil
 	}
+	if *repair {
+		results, err := cmd.repairSetup(true)
+		if err != nil {
+			return err
+		}
+		for _, result := range results {
+			fmt.Fprintln(cmd.stdout, result)
+		}
+	}
 
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
 	for _, binding := range bindings {
-		fmt.Fprintf(cmd.stdout, "%s persona=%s runtime=%s state=%s\n", binding.ConnectionID, binding.PersonaID, binding.RuntimeKind, binding.ReadinessState)
+		verifyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		verify := mcp.VerifyBindingWithLive(verifyCtx, homeDir, binding, nil)
+		cancel()
+		fmt.Fprintf(cmd.stdout, "%s persona=%s runtime=%s state=%s mcp=%s mcp_note=%q\n", binding.ConnectionID, binding.PersonaID, binding.RuntimeKind, binding.ReadinessState, verify.State, verify.Note)
 	}
 	return nil
 }
@@ -181,6 +206,19 @@ func (cmd command) runVersion(args []string) error {
 func (cmd command) runRuntime(args []string) error {
 	if len(args) == 0 {
 		return errors.New("runtime requires a subcommand")
+	}
+	if args[0] == "repair" {
+		if len(args) != 1 {
+			return errors.New("runtime repair accepts no arguments")
+		}
+		results, err := cmd.repairSetup(true)
+		if err != nil {
+			return err
+		}
+		for _, result := range results {
+			fmt.Fprintln(cmd.stdout, result)
+		}
+		return nil
 	}
 	if args[0] != "detect" {
 		return fmt.Errorf("unknown runtime subcommand %q", args[0])
@@ -204,6 +242,8 @@ func (cmd command) runMCP(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "install":
 		return cmd.runMCPInstall(args[1:])
+	case "repair":
+		return cmd.runMCPRepair(args[1:])
 	case "stdio":
 		return cmd.runMCPStdio(ctx, args[1:])
 	default:
@@ -215,12 +255,26 @@ func (cmd command) runMCPInstall(args []string) error {
 	if len(args) != 0 {
 		return errors.New("mcp install accepts no arguments")
 	}
-	results, err := (mcp.Installer{Store: cmd.store}).InstallAll()
+	results, err := cmd.installMCP()
 	if err != nil {
 		return err
 	}
 	for _, result := range results {
-		fmt.Fprintf(cmd.stdout, "installed mcp binding=%s runtime=%s server=%s path=%s\n", result.ConnectionID, result.Runtime, result.ServerName, result.Path)
+		fmt.Fprintln(cmd.stdout, result)
+	}
+	return nil
+}
+
+func (cmd command) runMCPRepair(args []string) error {
+	if len(args) != 0 {
+		return errors.New("mcp repair accepts no arguments")
+	}
+	results, err := cmd.installMCP()
+	if err != nil {
+		return err
+	}
+	for _, result := range results {
+		fmt.Fprintln(cmd.stdout, result)
 	}
 	return nil
 }
@@ -270,6 +324,35 @@ func (cmd command) runService(args []string) error {
 	}
 	fmt.Fprintf(cmd.stdout, "service installed kind=%s path=%s\n", result.Kind, result.Path)
 	return nil
+}
+
+func (cmd command) repairSetup(configureMCP bool) ([]string, error) {
+	var results []string
+	if configureMCP {
+		mcpResults, err := cmd.installMCP()
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, mcpResults...)
+	}
+	serviceResult, err := (service.Installer{}).Install()
+	if err != nil {
+		return nil, err
+	}
+	results = append(results, fmt.Sprintf("service installed kind=%s path=%s", serviceResult.Kind, serviceResult.Path))
+	return results, nil
+}
+
+func (cmd command) installMCP() ([]string, error) {
+	results, err := (mcp.Installer{Store: cmd.store}).InstallAll()
+	if err != nil {
+		return nil, err
+	}
+	lines := make([]string, 0, len(results))
+	for _, result := range results {
+		lines = append(lines, fmt.Sprintf("installed mcp binding=%s runtime=%s server=%s path=%s", result.ConnectionID, result.Runtime, result.ServerName, result.Path))
+	}
+	return lines, nil
 }
 
 func (cmd command) runDaemon(ctx context.Context, args []string) error {
