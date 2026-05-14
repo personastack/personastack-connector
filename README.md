@@ -22,9 +22,11 @@ browser-visible runtime state remain owned by `personastack-api`.
 ## Build and Release
 
 - Local validation: `go test ./...`
+- Race-sensitive validation: `go test -race ./internal/bridge ./internal/daemon ./internal/mcp`
+- Security validation: `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`
 - Release config validation: `go run github.com/goreleaser/goreleaser/v2@latest check`
-- CI runs unit tests plus a GoReleaser snapshot dry-run with Syft installed for
-  SBOM generation.
+- CI runs unit tests, targeted race tests, `go vet`, `govulncheck`, and a
+  GoReleaser snapshot dry-run with Syft installed for SBOM generation.
 - Tagged `v*` releases publish draft GitHub Releases under
   `personastack/personastack-connector` with archives, Linux packages,
   checksums, SBOMs, and provenance attestations.
