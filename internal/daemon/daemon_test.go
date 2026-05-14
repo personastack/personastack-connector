@@ -51,6 +51,24 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 			t.Fatalf("read heartbeat: %v", err)
 		}
 		seenHeartbeat <- heartbeat
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "probe-msg-1",
+			MessageType:  externalagentprotocol.FrameTypeWakeProbe,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now(),
+			WakeProbe: &externalagentprotocol.WakeProbePayload{
+				ProbeID:    "probe-1",
+				DeadlineAt: time.Now().Add(time.Second),
+			},
+		})
+		var wakeAck externalagentprotocol.Frame
+		if err := conn.ReadJSON(&wakeAck); err != nil {
+			t.Fatalf("read wake ack: %v", err)
+		}
+		if wakeAck.MessageType != externalagentprotocol.FrameTypeWakeProbeAccepted {
+			t.Fatalf("unexpected wake ack: %+v", wakeAck)
+		}
 	}))
 	defer server.Close()
 
