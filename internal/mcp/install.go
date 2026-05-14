@@ -19,6 +19,15 @@ type InstallResult struct {
 	ServerName   string
 }
 
+type VerifyResult struct {
+	ConnectionID config.ConnectionID
+	Runtime      runtime.AdapterKind
+	Path         string
+	ServerName   string
+	State        runtime.AdapterState
+	Note         string
+}
+
 type Installer struct {
 	Store          config.Store
 	HomeDir        string
@@ -74,6 +83,47 @@ func installBinding(homeDir string, executablePath string, binding config.Bindin
 	}
 }
 
+func VerifyBinding(homeDir string, binding config.Binding) VerifyResult {
+	serverName := strings.TrimSpace(binding.NativeMCPServer)
+	if serverName == "" {
+		serverName = "personastack-" + strings.TrimSpace(string(binding.ConnectionID))
+	}
+	result := VerifyResult{
+		ConnectionID: binding.ConnectionID,
+		Runtime:      binding.RuntimeKind,
+		ServerName:   serverName,
+		State:        runtime.AdapterStateMCPConfigMissing,
+	}
+	if strings.TrimSpace(binding.PersonaMCPURL) == "" || strings.TrimSpace(binding.PersonaMCPToken) == "" {
+		result.Note = "PersonaStack MCP credential missing"
+		return result
+	}
+	switch binding.RuntimeKind {
+	case runtime.AdapterKindHermes:
+		result.Path = filepath.Join(homeDir, ".hermes", "config.yaml")
+		result.State, result.Note = verifyHermesServer(result.Path, serverName, binding.ConnectionID)
+	case runtime.AdapterKindOpenClaw:
+		result.Path = filepath.Join(homeDir, ".openclaw", "config.json")
+		result.State, result.Note = verifyOpenClawServer(result.Path, serverName, binding.ConnectionID)
+	default:
+		result.Note = "unsupported runtime for mcp verification"
+	}
+	return result
+}
+
+func VerifyBindingInUserHome(binding config.Binding) VerifyResult {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return VerifyResult{
+			ConnectionID: binding.ConnectionID,
+			Runtime:      binding.RuntimeKind,
+			State:        runtime.AdapterStateMCPConfigMissing,
+			Note:         "resolve home dir: " + err.Error(),
+		}
+	}
+	return VerifyBinding(homeDir, binding)
+}
+
 type stdioServerConfig struct {
 	Name    string   `json:"-"`
 	Command string   `json:"command" yaml:"command"`
@@ -118,6 +168,18 @@ func upsertHermesServer(path string, server stdioServerConfig) error {
 	return writeOwnerOnly(path, output)
 }
 
+func verifyHermesServer(path string, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
+	root := map[string]any{}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return runtime.AdapterStateMCPConfigMissing, err.Error()
+	}
+	if err := yaml.Unmarshal(raw, &root); err != nil {
+		return runtime.AdapterStateMCPConfigMissing, "parse Hermes config: " + err.Error()
+	}
+	return verifyServerMap(root, serverName, bindingID)
+}
+
 func upsertOpenClawServer(path string, server stdioServerConfig) error {
 	root := map[string]any{}
 	raw, err := os.ReadFile(path)
@@ -138,6 +200,54 @@ func upsertOpenClawServer(path string, server stdioServerConfig) error {
 	}
 	output = append(output, '\n')
 	return writeOwnerOnly(path, output)
+}
+
+func verifyOpenClawServer(path string, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
+	root := map[string]any{}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return runtime.AdapterStateMCPConfigMissing, err.Error()
+	}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return runtime.AdapterStateMCPConfigMissing, "parse OpenClaw config: " + err.Error()
+	}
+	return verifyServerMap(root, serverName, bindingID)
+}
+
+func verifyServerMap(root map[string]any, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
+	mcpNode, ok := root["mcp"].(map[string]any)
+	if !ok {
+		return runtime.AdapterStateMCPConfigMissing, "mcp section missing"
+	}
+	servers, ok := mcpNode["servers"].(map[string]any)
+	if !ok {
+		return runtime.AdapterStateMCPConfigMissing, "mcp servers section missing"
+	}
+	server, ok := servers[serverName].(map[string]any)
+	if !ok {
+		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP server missing"
+	}
+	if !serverArgsContainBinding(server["args"], bindingID) {
+		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP binding argument missing"
+	}
+	return runtime.AdapterStateMCPVerified, "PersonaStack MCP config present; runtime restart may be required"
+}
+
+func serverArgsContainBinding(value any, bindingID config.ConnectionID) bool {
+	target := strings.TrimSpace(string(bindingID))
+	if target == "" {
+		return false
+	}
+	values, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range values {
+		if strings.TrimSpace(fmt.Sprint(item)) == target {
+			return true
+		}
+	}
+	return false
 }
 
 func ensureMap(parent map[string]any, key string) map[string]any {

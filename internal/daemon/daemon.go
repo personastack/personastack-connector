@@ -10,6 +10,7 @@ import (
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/bridge"
 	"github.com/personastack/personastack-connector/internal/config"
+	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
 
@@ -101,7 +102,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		return fmt.Errorf("connector rejected: %s", accepted.MessageType)
 	}
 	adapter := runtime.NewAdapter(binding.RuntimeKind)
-	detection := adapter.Detect()
+	detection := r.bindingReadiness(adapter, binding)
 	heartbeat := session.HeartbeatFrame(detection.State, nil)
 	if err := writeFrame(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
@@ -116,7 +117,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			case <-heartbeatStop:
 				return
 			case <-ticker.C:
-				state := adapter.Detect().State
+				state := r.bindingReadiness(adapter, binding).State
 				_ = writeFrame(session.HeartbeatFrame(state, nil))
 			}
 		}
@@ -180,6 +181,17 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			}
 		}
 	}
+}
+
+func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding) runtime.Detection {
+	detection := adapter.Detect()
+	if detection.State != runtime.AdapterStateReady {
+		return detection
+	}
+	verify := mcp.VerifyBindingInUserHome(binding)
+	detection.State = verify.State
+	detection.Note = verify.Note
+	return detection
 }
 
 func (r Runner) reconnectMin() time.Duration {

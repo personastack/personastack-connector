@@ -65,3 +65,28 @@ func TestInstallerWritesOpenClawStdioServer(t *testing.T) {
 		t.Fatalf("unexpected server: %+v", server)
 	}
 }
+
+func TestVerifyBindingRequiresCredentialAndInstalledServer(t *testing.T) {
+	homeDir := t.TempDir()
+	binding := config.Binding{
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		RuntimeKind:        runtime.AdapterKindHermes,
+		NativeMCPServer:    "personastack-conn-1",
+		PersonaMCPURL:      "https://mcp.personastack.ai/mcp",
+		PersonaMCPToken:    "token-1",
+		HasPersonaMCPToken: true,
+	}
+	missing := VerifyBinding(homeDir, binding)
+	if missing.State != runtime.AdapterStateMCPConfigMissing {
+		t.Fatalf("missing.State = %s", missing.State)
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	if _, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector"}).InstallAll(); err != nil {
+		t.Fatalf("InstallAll() error = %v", err)
+	}
+	verified := VerifyBinding(homeDir, binding)
+	if verified.State != runtime.AdapterStateMCPVerified {
+		t.Fatalf("verified.State = %s note=%s", verified.State, verified.Note)
+	}
+}
