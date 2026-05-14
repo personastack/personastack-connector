@@ -203,7 +203,11 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.RunCancel == nil {
 				continue
 			}
-			if err := adapter.CancelRun(frame.RunID); err != nil {
+			nativeRunID, err := r.nativeRunIDForCancel(binding, frame.RunID)
+			if err != nil {
+				return err
+			}
+			if err := adapter.CancelRun(nativeRunID); err != nil {
 				return fmt.Errorf("cancel local run: %w", err)
 			}
 		}
@@ -262,6 +266,21 @@ func (r Runner) clearRunMCPToken(binding config.Binding, runID string) error {
 	latest.ActiveRunMCPToken = ""
 	latest.HasActiveRunMCPToken = false
 	return writable.SaveBinding(latest)
+}
+
+func (r Runner) nativeRunIDForCancel(binding config.Binding, runID string) (string, error) {
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok {
+		return "", fmt.Errorf("binding %s not found", binding.ConnectionID)
+	}
+	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(runID) {
+		return "", fmt.Errorf("run %s is not active", strings.TrimSpace(runID))
+	}
+	nativeRunID := strings.TrimSpace(latest.ActiveNativeRunID)
+	if nativeRunID == "" {
+		return "", fmt.Errorf("native run id missing for run %s", strings.TrimSpace(runID))
+	}
+	return nativeRunID, nil
 }
 
 func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding) runtime.Detection {

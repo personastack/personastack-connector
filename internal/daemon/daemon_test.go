@@ -224,6 +224,13 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 	if !ok || active.ActiveNativeRunID != "native-1" {
 		t.Fatalf("native run id not stored: %+v", active)
 	}
+	nativeRunID, err := runner.nativeRunIDForCancel(binding, "run-1")
+	if err != nil {
+		t.Fatalf("native run id for cancel: %v", err)
+	}
+	if nativeRunID != "native-1" {
+		t.Fatalf("native run id for cancel = %q", nativeRunID)
+	}
 	if err := runner.clearRunMCPToken(binding, "run-1"); err != nil {
 		t.Fatalf("clear run token: %v", err)
 	}
