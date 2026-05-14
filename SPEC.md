@@ -102,6 +102,10 @@ Adapter result states must be concrete typed enums, including:
 - Native runtime config must not contain PersonaStack bearer tokens by default.
 - Streamable HTTP SSE responses may be long-lived; the stdio proxy must emit the
   first complete JSON-RPC SSE event back to stdio without waiting for stream EOF.
+- After MCP initialization completes, the stdio proxy must open the Streamable
+  HTTP GET session stream, forward JSON-RPC SSE `data:` payloads to stdio as
+  JSON lines, ignore non-JSON readiness/keepalive events, and reconnect with
+  `Last-Event-ID` when the stream closes.
 - Loopback HTTP MCP proxying is a fallback only and must use loopback binding,
   random port selection, a high-entropy local token, and owner-only local config
   permissions.
