@@ -17,7 +17,7 @@ func TestHermesAdapterDetectsRunSubmission(t *testing.T) {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			_, _ = w.Write([]byte(`{"features":{"run_submission":true}}`))
+			_, _ = w.Write([]byte(`{"features":{"run_submission":true,"run_status":true,"run_events_sse":true,"run_stop":true}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -27,6 +27,28 @@ func TestHermesAdapterDetectsRunSubmission(t *testing.T) {
 	detection := NewHermesAdapter(server.URL, "key-1").Detect()
 	if detection.State != AdapterStateReady {
 		t.Fatalf("expected ready, got %+v", detection)
+	}
+}
+
+func TestHermesAdapterDetectRequiresRunLifecycleFeatures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/v1/capabilities":
+			_, _ = w.Write([]byte(`{"features":{"run_submission":true}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	detection := NewHermesAdapter(server.URL, "key-1").Detect()
+	if detection.State != AdapterStateCapabilityMissing {
+		t.Fatalf("expected capability missing, got %+v", detection)
+	}
+	if detection.Note != "run_status,run_events_sse,run_stop missing" {
+		t.Fatalf("unexpected note: %q", detection.Note)
 	}
 }
 

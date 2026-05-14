@@ -42,6 +42,31 @@ func (adapter OpenClawAdapter) Detect() Detection {
 	if err := conn.WriteJSON(openClawRequest{ID: "detect-1", Method: "health"}); err != nil {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: err.Error()}
 	}
+	var health openClawResponse
+	if err := conn.ReadJSON(&health); err != nil {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: err.Error()}
+	}
+	if health.Error != "" {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: health.Error}
+	}
+	if err := conn.WriteJSON(openClawRequest{ID: "detect-2", Method: "hello", Params: map[string]any{"client": "personastack-connector", "protocol_min": 1, "protocol_max": 1}}); err != nil {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}
+	}
+	var hello openClawResponse
+	if err := conn.ReadJSON(&hello); err != nil {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}
+	}
+	if hello.Error != "" {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: hello.Error}
+	}
+	features, err := openClawFeaturesFromResult(hello.Result)
+	if err != nil {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}
+	}
+	missing := features.missingRequiredMethods()
+	if len(missing) > 0 {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: strings.Join(missing, ",") + " missing"}
+	}
 	return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateReady, Note: "OpenClaw Gateway reachable"}
 }
 
@@ -180,4 +205,53 @@ type openClawRunResult struct {
 	Status string `json:"status"`
 	Output string `json:"output"`
 	Error  string `json:"error"`
+}
+
+type openClawFeatures struct {
+	methods map[string]struct{}
+}
+
+func openClawFeaturesFromResult(raw json.RawMessage) (openClawFeatures, error) {
+	var envelope struct {
+		Features struct {
+			Methods any `json:"methods"`
+		} `json:"features"`
+	}
+	if len(raw) == 0 {
+		return openClawFeatures{}, fmt.Errorf("features missing")
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return openClawFeatures{}, err
+	}
+	methods := map[string]struct{}{}
+	switch value := envelope.Features.Methods.(type) {
+	case []any:
+		for _, entry := range value {
+			method := strings.TrimSpace(fmt.Sprint(entry))
+			if method != "" {
+				methods[method] = struct{}{}
+			}
+		}
+	case map[string]any:
+		for key, rawEnabled := range value {
+			enabled, ok := rawEnabled.(bool)
+			if ok && enabled {
+				methods[strings.TrimSpace(key)] = struct{}{}
+			}
+		}
+	default:
+		return openClawFeatures{}, fmt.Errorf("features.methods missing")
+	}
+	return openClawFeatures{methods: methods}, nil
+}
+
+func (features openClawFeatures) missingRequiredMethods() []string {
+	required := []string{"health", "status", "agents.list", "agent", "agent.wait", "sessions.abort"}
+	missing := []string{}
+	for _, method := range required {
+		if _, ok := features.methods[method]; !ok {
+			missing = append(missing, method)
+		}
+	}
+	return missing
 }

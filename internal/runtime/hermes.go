@@ -59,8 +59,9 @@ func (adapter HermesAdapter) Detect() Detection {
 	if err := json.NewDecoder(resp.Body).Decode(&capabilities); err != nil {
 		return Detection{Kind: AdapterKindHermes, State: AdapterStateCapabilityMissing, Note: err.Error()}
 	}
-	if !capabilities.Features.RunSubmission {
-		return Detection{Kind: AdapterKindHermes, State: AdapterStateCapabilityMissing, Note: "run_submission missing"}
+	missing := capabilities.missingRequiredFeatures()
+	if len(missing) > 0 {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateCapabilityMissing, Note: strings.Join(missing, ",") + " missing"}
 	}
 	return Detection{Kind: AdapterKindHermes, State: AdapterStateReady, Note: "Hermes API ready"}
 }
@@ -202,7 +203,27 @@ func (adapter HermesAdapter) client() *http.Client {
 type hermesCapabilities struct {
 	Features struct {
 		RunSubmission bool `json:"run_submission"`
+		RunStatus     bool `json:"run_status"`
+		RunEventsSSE  bool `json:"run_events_sse"`
+		RunStop       bool `json:"run_stop"`
 	} `json:"features"`
+}
+
+func (capabilities hermesCapabilities) missingRequiredFeatures() []string {
+	missing := []string{}
+	if !capabilities.Features.RunSubmission {
+		missing = append(missing, "run_submission")
+	}
+	if !capabilities.Features.RunStatus {
+		missing = append(missing, "run_status")
+	}
+	if !capabilities.Features.RunEventsSSE {
+		missing = append(missing, "run_events_sse")
+	}
+	if !capabilities.Features.RunStop {
+		missing = append(missing, "run_stop")
+	}
+	return missing
 }
 
 type hermesRunResponse struct {
