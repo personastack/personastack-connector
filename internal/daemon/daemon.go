@@ -272,6 +272,18 @@ func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding
 	verify := mcp.VerifyBindingInUserHome(binding)
 	detection.State = verify.State
 	detection.Note = verify.Note
+	if verify.State != runtime.AdapterStateMCPVerified {
+		return detection
+	}
+	verifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	live := mcp.VerifyBindingLive(verifyCtx, binding, nil)
+	if !live.OK {
+		detection.State = runtime.AdapterStateMCPConfigMissing
+		detection.Note = live.Note
+		return detection
+	}
+	detection.Note = live.Note
 	return detection
 }
 

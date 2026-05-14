@@ -143,20 +143,23 @@ func readSSEJSONPayloads(body io.Reader) ([]byte, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var output bytes.Buffer
 	var eventData []string
-	flush := func() {
+	flush := func() bool {
 		if len(eventData) == 0 {
-			return
+			return false
 		}
 		if output.Len() > 0 {
 			output.WriteByte('\n')
 		}
 		output.WriteString(strings.Join(eventData, "\n"))
 		eventData = nil
+		return true
 	}
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
-			flush()
+			if flush() {
+				return output.Bytes(), nil
+			}
 			continue
 		}
 		if strings.HasPrefix(line, "data:") {

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/personastack/personastack-connector/internal/config"
 )
@@ -131,6 +132,80 @@ func TestStdioProxyDecodesSSEJSONPayload(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"ok":true`) {
 		t.Fatalf("unexpected stdout: %s", stdout.String())
+	}
+}
+
+func TestStdioProxyReturnsAfterFirstLongLivedSSEEvent(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte(`data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}` + "\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-release
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "token-1",
+	}}})
+	done := make(chan error, 1)
+	go func() {
+		var stdout bytes.Buffer
+		err := NewStdioProxy(store).Serve(context.Background(), "conn-1", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &stdout, &bytes.Buffer{})
+		if err == nil && !strings.Contains(stdout.String(), `"ok":true`) {
+			err = errors.New("missing first SSE payload")
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("Serve() did not return after first SSE event")
+	}
+}
+
+func TestVerifyBindingLiveChecksInitializeAndToolsList(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var message rpcMessage
+		if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		methods = append(methods, message.Method)
+		w.Header().Set("Content-Type", "application/json")
+		switch message.Method {
+		case "initialize":
+			w.Header().Set("MCP-Session-Id", "session-1")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{}}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`))
+		default:
+			t.Fatalf("unexpected method: %s", message.Method)
+		}
+	}))
+	defer server.Close()
+	result := VerifyBindingLive(context.Background(), config.Binding{
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "token-1",
+	}, server.Client())
+	if !result.OK {
+		t.Fatalf("VerifyBindingLive() = %+v", result)
+	}
+	if strings.Join(methods, ",") != "initialize,notifications/initialized,tools/list" {
+		t.Fatalf("methods = %v", methods)
 	}
 }
 
