@@ -77,6 +77,21 @@ func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
 	if err := conn.WriteJSON(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
+	heartbeatStop := make(chan struct{})
+	defer close(heartbeatStop)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatStop:
+				return
+			case <-ticker.C:
+				state := adapter.Detect().State
+				_ = conn.WriteJSON(session.HeartbeatFrame(state, nil))
+			}
+		}
+	}()
 	for {
 		var frame externalagentprotocol.Frame
 		if err := conn.ReadJSON(&frame); err != nil {
