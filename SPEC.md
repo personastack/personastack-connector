@@ -91,7 +91,10 @@ Adapter result states must be concrete typed enums, including:
 - Default to a Connector-owned per-binding stdio MCP proxy.
 - Native runtime config invokes
   `personastack-connector mcp stdio --binding <connection_id>`.
-- The stdio proxy loads the PersonaStack MCP token from OS credential storage.
+- The stdio proxy loads PersonaStack MCP credentials from OS credential storage.
+- During an active run, Connector stores the API-issued run-scoped MCP token as
+  the binding's active credential and the stdio proxy prefers it over the stable
+  pairing credential; terminal cleanup clears the active token.
 - Native runtime config must not contain PersonaStack bearer tokens by default.
 - Loopback HTTP MCP proxying is a fallback only and must use loopback binding,
   random port selection, a high-entropy local token, and owner-only local config

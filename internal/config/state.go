@@ -43,10 +43,13 @@ type Binding struct {
 	NativeMCPNamespace   string
 	PersonaMCPURL        string
 	PersonaMCPToken      string
+	ActiveRunID          string
+	ActiveRunMCPToken    string
 	RuntimeKind          runtime.AdapterKind
 	ReadinessState       runtime.AdapterState
 	HasBridgeSecret      bool
 	HasPersonaMCPToken   bool
+	HasActiveRunMCPToken bool
 }
 
 type State struct {

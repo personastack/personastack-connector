@@ -10,8 +10,9 @@ import (
 const keyringService = "personastack-connector"
 
 var (
-	keyringGet = keyring.Get
-	keyringSet = keyring.Set
+	keyringGet    = keyring.Get
+	keyringSet    = keyring.Set
+	keyringDelete = keyring.Delete
 )
 
 func storeBindingSecrets(binding Binding) (Binding, error) {
@@ -35,6 +36,17 @@ func storeBindingSecrets(binding Binding) (Binding, error) {
 		binding.PersonaMCPToken = ""
 		binding.HasPersonaMCPToken = true
 	}
+	if strings.TrimSpace(binding.ActiveRunMCPToken) != "" {
+		err := keyringSet(keyringService, bindingSecretKey(connectionID, "active-run-mcp-token"), binding.ActiveRunMCPToken)
+		if err != nil {
+			return Binding{}, fmt.Errorf("store active run mcp token: %w", err)
+		}
+		binding.ActiveRunMCPToken = ""
+		binding.HasActiveRunMCPToken = true
+	}
+	if !binding.HasActiveRunMCPToken {
+		_ = keyringDelete(keyringService, bindingSecretKey(connectionID, "active-run-mcp-token"))
+	}
 	return binding, nil
 }
 
@@ -53,6 +65,12 @@ func loadBindingSecrets(binding Binding) Binding {
 		secret, err := keyringGet(keyringService, bindingSecretKey(connectionID, "persona-mcp-token"))
 		if err == nil {
 			binding.PersonaMCPToken = secret
+		}
+	}
+	if binding.HasActiveRunMCPToken && strings.TrimSpace(binding.ActiveRunMCPToken) == "" {
+		secret, err := keyringGet(keyringService, bindingSecretKey(connectionID, "active-run-mcp-token"))
+		if err == nil {
+			binding.ActiveRunMCPToken = secret
 		}
 	}
 	return binding

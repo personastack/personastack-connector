@@ -50,7 +50,7 @@ func (proxy StdioProxy) Serve(ctx context.Context, bindingID config.ConnectionID
 		return fmt.Errorf("mcp stdio binding %q: %w", bindingID, ErrMissingBinding)
 	}
 	mcpURL := strings.TrimSpace(binding.PersonaMCPURL)
-	token := strings.TrimSpace(binding.PersonaMCPToken)
+	token := mcpTokenForBinding(binding)
 	if mcpURL == "" || token == "" {
 		return fmt.Errorf("mcp stdio binding %q: %w", bindingID, ErrMissingMCPToken)
 	}
@@ -83,6 +83,13 @@ func (proxy StdioProxy) Serve(ctx context.Context, bindingID config.ConnectionID
 		return fmt.Errorf("read mcp stdio: %w", err)
 	}
 	return nil
+}
+
+func mcpTokenForBinding(binding config.Binding) string {
+	if token := strings.TrimSpace(binding.ActiveRunMCPToken); token != "" {
+		return token
+	}
+	return strings.TrimSpace(binding.PersonaMCPToken)
 }
 
 func (proxy StdioProxy) forward(ctx context.Context, mcpURL string, token string, payload []byte, session *stdioProxySession) ([]byte, error) {

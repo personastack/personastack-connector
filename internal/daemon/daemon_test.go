@@ -117,3 +117,29 @@ func TestCanStartRunWithReadiness(t *testing.T) {
 		}
 	}
 }
+
+func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
+	binding := config.Binding{ConnectionID: "conn-1", PersonaID: "persona-1", PersonaMCPToken: "stable-token"}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	runner := Runner{Store: &store}
+	frame := externalagentprotocol.Frame{
+		RunID: "run-1",
+		RunStart: &externalagentprotocol.RunStartPayload{
+			RunScopedMCPToken: "run-token",
+		},
+	}
+	if err := runner.activateRunMCPToken(binding, frame); err != nil {
+		t.Fatalf("activate run token: %v", err)
+	}
+	active, ok := store.Binding("conn-1")
+	if !ok || active.ActiveRunID != "run-1" || active.ActiveRunMCPToken != "run-token" || !active.HasActiveRunMCPToken {
+		t.Fatalf("active token not stored: %+v", active)
+	}
+	if err := runner.clearRunMCPToken(binding, "run-1"); err != nil {
+		t.Fatalf("clear run token: %v", err)
+	}
+	cleared, ok := store.Binding("conn-1")
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveRunMCPToken != "" || cleared.HasActiveRunMCPToken {
+		t.Fatalf("active token not cleared: %+v", cleared)
+	}
+}

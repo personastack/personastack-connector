@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -146,8 +147,16 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
+			if err := r.activateRunMCPToken(binding, frame); err != nil {
+				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+				if writeErr := writeFrame(failed); writeErr != nil {
+					return fmt.Errorf("write run mcp token failure: %w", writeErr)
+				}
+				continue
+			}
 			nativeRunID, err := adapter.StartRun(frame.AssignmentID, frame.RunStart.FullyComposedPrompt)
 			if err != nil {
+				_ = r.clearRunMCPToken(binding, frame.RunID)
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run failure: %w", writeErr)
@@ -161,6 +170,9 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				return fmt.Errorf("write run started: %w", err)
 			}
 			go func(frame externalagentprotocol.Frame, nativeRunID string) {
+				defer func() {
+					_ = r.clearRunMCPToken(binding, frame.RunID)
+				}()
 				result, err := adapter.WaitRun(ctx, nativeRunID)
 				if err != nil {
 					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
@@ -188,6 +200,43 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			}
 		}
 	}
+}
+
+func (r Runner) activateRunMCPToken(binding config.Binding, frame externalagentprotocol.Frame) error {
+	token := ""
+	if frame.RunStart != nil {
+		token = strings.TrimSpace(frame.RunStart.RunScopedMCPToken)
+	}
+	if token == "" {
+		return fmt.Errorf("run scoped mcp token required")
+	}
+	writable, ok := r.Store.(config.WritableStore)
+	if !ok {
+		return fmt.Errorf("writable connector store required")
+	}
+	active := binding
+	active.ActiveRunID = strings.TrimSpace(frame.RunID)
+	active.ActiveRunMCPToken = token
+	active.HasActiveRunMCPToken = true
+	return writable.SaveBinding(active)
+}
+
+func (r Runner) clearRunMCPToken(binding config.Binding, runID string) error {
+	writable, ok := r.Store.(config.WritableStore)
+	if !ok {
+		return nil
+	}
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(runID) {
+		return nil
+	}
+	latest.ActiveRunID = ""
+	latest.ActiveRunMCPToken = ""
+	latest.HasActiveRunMCPToken = false
+	return writable.SaveBinding(latest)
 }
 
 func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding) runtime.Detection {
