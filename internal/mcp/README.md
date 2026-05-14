@@ -1,6 +1,9 @@
 # mcp
 
-`mcp` owns local PersonaStack MCP proxy entry points.
+`mcp` owns local PersonaStack MCP proxy entry points and native runtime MCP
+configuration.
 
-The v1 scaffold validates binding lookup and exposes a stdio placeholder. It
-does not authenticate to PersonaStack MCP or proxy traffic yet.
+`mcp install` writes native Hermes/OpenClaw config that launches
+`personastack-connector mcp stdio --binding <connection_id>`. The stdio proxy
+still needs API-issued PersonaStack MCP credentials before it can forward real
+MCP traffic.

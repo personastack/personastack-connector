@@ -130,6 +130,11 @@ func (cmd command) runPair(args []string) error {
 	if err := writable.SaveBinding(result.Binding); err != nil {
 		return err
 	}
+	if *configureMCP {
+		if _, err := (mcp.Installer{Store: cmd.store}).InstallAll(); err != nil {
+			return err
+		}
+	}
 	fmt.Fprintf(cmd.stdout, "paired persona=%s connection=%s runtime=%s configure_mcp=%t\n", result.Binding.PersonaID, result.Binding.ConnectionID, result.Binding.RuntimeKind, *configureMCP)
 	return nil
 }
@@ -188,7 +193,13 @@ func (cmd command) runMCPInstall(args []string) error {
 	if len(args) != 0 {
 		return errors.New("mcp install accepts no arguments")
 	}
-	fmt.Fprintln(cmd.stdout, "mcp install scaffold: native runtime config is not implemented")
+	results, err := (mcp.Installer{Store: cmd.store}).InstallAll()
+	if err != nil {
+		return err
+	}
+	for _, result := range results {
+		fmt.Fprintf(cmd.stdout, "installed mcp binding=%s runtime=%s server=%s path=%s\n", result.ConnectionID, result.Runtime, result.ServerName, result.Path)
+	}
 	return nil
 }
 
