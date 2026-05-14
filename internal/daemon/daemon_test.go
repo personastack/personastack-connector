@@ -331,3 +331,40 @@ func TestActiveNativeRunIDForRunStartDeduplicatesRedelivery(t *testing.T) {
 		t.Fatalf("unexpected match for different run, got ok=%t native=%q", ok, nativeRunID)
 	}
 }
+
+func TestCommandFrameCacheReplaysRepliesAndSuppressesSideEffects(t *testing.T) {
+	cache := newCommandFrameCache()
+	request := externalagentprotocol.Frame{
+		MessageID:    "msg-1",
+		MessageType:  externalagentprotocol.FrameTypeWakeProbe,
+		ConnectionID: "conn-1",
+		PersonaID:    "persona-1",
+	}
+	reply := externalagentprotocol.Frame{
+		MessageID:    "msg-1",
+		MessageType:  externalagentprotocol.FrameTypeWakeProbeAccepted,
+		ConnectionID: "conn-1",
+		PersonaID:    "persona-1",
+	}
+
+	if _, ok := cache.cachedReply(request); ok {
+		t.Fatalf("unexpected cached reply before store")
+	}
+	cache.storeReply(request, reply)
+	cached, ok := cache.cachedReply(request)
+	if !ok || cached.MessageType != externalagentprotocol.FrameTypeWakeProbeAccepted {
+		t.Fatalf("unexpected cached reply: ok=%t frame=%+v", ok, cached)
+	}
+	if !cache.seen(request) {
+		t.Fatalf("stored reply should mark command as seen")
+	}
+
+	cancel := externalagentprotocol.Frame{MessageID: "cancel-1", MessageType: externalagentprotocol.FrameTypeRunCancel}
+	if cache.seen(cancel) {
+		t.Fatalf("cancel should not be seen before mark")
+	}
+	cache.mark(cancel)
+	if !cache.seen(cancel) {
+		t.Fatalf("cancel should be seen after mark")
+	}
+}

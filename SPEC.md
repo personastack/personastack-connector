@@ -48,6 +48,9 @@ external persona.
 - Redelivered `run.start` frames for the currently active run id must reuse the
   journaled native run id and resend accepted/started frames instead of starting
   a second local runtime run.
+- Duplicate command `message_id` values within one websocket session must be
+  idempotent: waitable commands replay the cached reply and side-effect-only
+  commands are not re-applied.
 - Native runtime run ids are local correlation values and are not PersonaStack
   run authority.
 - A `token.revoked` bridge frame deletes the local binding, clears OS credential

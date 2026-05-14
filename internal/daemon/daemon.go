@@ -128,6 +128,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			}
 		}
 	}()
+	commandCache := newCommandFrameCache()
 	for {
 		var frame externalagentprotocol.Frame
 		if err := conn.ReadJSON(&frame); err != nil {
@@ -138,15 +139,31 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.WakeProbe == nil {
 				continue
 			}
-			if err := writeFrame(session.WakeProbeAcceptedFrame(frame.WakeProbe.ProbeID)); err != nil {
+			if cached, ok := commandCache.cachedReply(frame); ok {
+				if err := writeFrame(cached); err != nil {
+					return fmt.Errorf("write cached wake probe ack: %w", err)
+				}
+				continue
+			}
+			accepted := session.WakeProbeAcceptedFrame(frame.WakeProbe.ProbeID)
+			commandCache.storeReply(frame, accepted)
+			if err := writeFrame(accepted); err != nil {
 				return fmt.Errorf("write wake probe ack: %w", err)
 			}
 		case externalagentprotocol.FrameTypeRunStart:
 			if frame.RunStart == nil {
 				continue
 			}
+			if cached, ok := commandCache.cachedReply(frame); ok {
+				if err := writeFrame(cached); err != nil {
+					return fmt.Errorf("write cached run response: %w", err)
+				}
+				continue
+			}
 			if nativeRunID, ok := r.activeNativeRunIDForRunStart(binding, frame); ok {
-				if err := writeFrame(session.RunAcceptedFrame(frame, nativeRunID)); err != nil {
+				accepted := session.RunAcceptedFrame(frame, nativeRunID)
+				commandCache.storeReply(frame, accepted)
+				if err := writeFrame(accepted); err != nil {
 					return fmt.Errorf("write redelivered run accepted: %w", err)
 				}
 				if err := writeFrame(session.RunStartedFrame(frame, nativeRunID)); err != nil {
@@ -156,6 +173,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			}
 			if readiness := r.bindingReadiness(adapter, binding); !canStartRunWithReadiness(readiness.State) {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
+				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run readiness failure: %w", writeErr)
 				}
@@ -163,6 +181,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			}
 			if err := r.activateRunMCPToken(binding, frame); err != nil {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run mcp token failure: %w", writeErr)
 				}
@@ -172,6 +191,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err != nil {
 				_ = r.clearRunMCPToken(binding, frame.RunID)
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run failure: %w", writeErr)
 				}
@@ -180,12 +200,15 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := r.recordNativeRunID(binding, frame.RunID, nativeRunID); err != nil {
 				_ = r.clearRunMCPToken(binding, frame.RunID)
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run journal failure: %w", writeErr)
 				}
 				continue
 			}
-			if err := writeFrame(session.RunAcceptedFrame(frame, nativeRunID)); err != nil {
+			accepted := session.RunAcceptedFrame(frame, nativeRunID)
+			commandCache.storeReply(frame, accepted)
+			if err := writeFrame(accepted); err != nil {
 				return fmt.Errorf("write run accepted: %w", err)
 			}
 			if err := writeFrame(session.RunStartedFrame(frame, nativeRunID)); err != nil {
@@ -217,6 +240,10 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.RunCancel == nil {
 				continue
 			}
+			if commandCache.seen(frame) {
+				continue
+			}
+			commandCache.mark(frame)
 			nativeRunID, err := r.nativeRunIDForCancel(binding, frame.RunID)
 			if err != nil {
 				return err
@@ -228,12 +255,67 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.TokenRevoked == nil {
 				continue
 			}
+			if commandCache.seen(frame) {
+				continue
+			}
+			commandCache.mark(frame)
 			if err := r.revokeBinding(binding, adapter, frame.TokenRevoked.Reason); err != nil {
 				return err
 			}
 			return nil
 		}
 	}
+}
+
+type commandFrameCache struct {
+	replies map[string]externalagentprotocol.Frame
+	seenIDs map[string]struct{}
+}
+
+func newCommandFrameCache() *commandFrameCache {
+	return &commandFrameCache{
+		replies: map[string]externalagentprotocol.Frame{},
+		seenIDs: map[string]struct{}{},
+	}
+}
+
+func (cache *commandFrameCache) key(frame externalagentprotocol.Frame) string {
+	return strings.TrimSpace(frame.MessageID)
+}
+
+func (cache *commandFrameCache) cachedReply(frame externalagentprotocol.Frame) (externalagentprotocol.Frame, bool) {
+	key := cache.key(frame)
+	if key == "" {
+		return externalagentprotocol.Frame{}, false
+	}
+	reply, ok := cache.replies[key]
+	return reply, ok
+}
+
+func (cache *commandFrameCache) storeReply(frame externalagentprotocol.Frame, reply externalagentprotocol.Frame) {
+	key := cache.key(frame)
+	if key == "" {
+		return
+	}
+	cache.replies[key] = reply
+	cache.seenIDs[key] = struct{}{}
+}
+
+func (cache *commandFrameCache) seen(frame externalagentprotocol.Frame) bool {
+	key := cache.key(frame)
+	if key == "" {
+		return false
+	}
+	_, ok := cache.seenIDs[key]
+	return ok
+}
+
+func (cache *commandFrameCache) mark(frame externalagentprotocol.Frame) {
+	key := cache.key(frame)
+	if key == "" {
+		return
+	}
+	cache.seenIDs[key] = struct{}{}
 }
 
 func (r Runner) activeNativeRunIDForRunStart(binding config.Binding, frame externalagentprotocol.Frame) (string, bool) {
