@@ -41,6 +41,8 @@ type Binding struct {
 	BridgePublicKey      string
 	NativeMCPServer      string
 	NativeMCPNamespace   string
+	PersonaMCPURL        string
+	PersonaMCPToken      string
 	RuntimeKind          runtime.AdapterKind
 	ReadinessState       runtime.AdapterState
 	HasBridgeSecret      bool

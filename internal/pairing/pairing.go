@@ -101,10 +101,12 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
 		NativeMCPServer:      strings.TrimSpace(decoded.NativeMCPServerName),
 		NativeMCPNamespace:   strings.TrimSpace(decoded.NativeMCPToolNamespace),
+		PersonaMCPURL:        strings.TrimSpace(decoded.PersonaMCPURL),
+		PersonaMCPToken:      strings.TrimSpace(decoded.PersonaMCPToken),
 		RuntimeKind:          request.RuntimeKind,
 		ReadinessState:       runtime.AdapterStateRuntimeMissing,
 		HasBridgeSecret:      true,
-		HasPersonaMCPToken:   false,
+		HasPersonaMCPToken:   strings.TrimSpace(decoded.PersonaMCPToken) != "",
 	}}, nil
 }
 

@@ -5,5 +5,5 @@ configuration.
 
 `mcp install` writes native Hermes/OpenClaw config that launches
 `personastack-connector mcp stdio --binding <connection_id>`. The stdio proxy
-still needs API-issued PersonaStack MCP credentials before it can forward real
-MCP traffic.
+loads the paired binding's PersonaStack MCP URL/token and forwards newline
+delimited JSON-RPC requests to the PersonaStack MCP endpoint with bearer auth.

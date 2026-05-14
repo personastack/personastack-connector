@@ -31,6 +31,8 @@ func TestClientExchangeBuildsBinding(t *testing.T) {
 			GatewayWebsocketURL:    "ws://example/v1/external-agent/ws",
 			NativeMCPServerName:    "personastack-conn-1",
 			NativeMCPToolNamespace: "personastack",
+			PersonaMCPURL:          "https://mcp.personastack.ai/mcp",
+			PersonaMCPToken:        "mcp-token-1",
 		})
 	}))
 	defer server.Close()
@@ -48,5 +50,8 @@ func TestClientExchangeBuildsBinding(t *testing.T) {
 	}
 	if result.Binding.BridgePrivateKey == "" || result.Binding.BridgePublicKey == "" {
 		t.Fatalf("expected bridge key material")
+	}
+	if !result.Binding.HasPersonaMCPToken || result.Binding.PersonaMCPToken != "mcp-token-1" {
+		t.Fatalf("expected persona mcp token")
 	}
 }
