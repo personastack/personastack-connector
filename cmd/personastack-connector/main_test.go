@@ -20,10 +20,22 @@ func TestRunHelp(t *testing.T) {
 	}
 
 	output := stdout.String()
-	for _, want := range []string{"pair <code>", "runtime detect", "mcp stdio --binding", "run --foreground"} {
+	for _, want := range []string{"pair <code>", "runtime detect", "mcp stdio --binding", "run --foreground", "version"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("help output missing %q: %s", want, output)
 		}
+	}
+}
+
+func TestRunVersion(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := Run(context.Background(), []string{"version"}, strings.NewReader(""), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "personastack-connector version=") {
+		t.Fatalf("unexpected version output: %s", stdout.String())
 	}
 }
 

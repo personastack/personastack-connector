@@ -143,6 +143,13 @@ Adapter result states must be concrete typed enums, including:
 ## Packaging
 
 - V1 release targets are macOS, Linux, and native Windows.
+- GitHub Actions must run unit tests and a GoReleaser snapshot dry-run on pull
+  requests and `main` pushes.
+- Tagged releases build GoReleaser archives for macOS/Linux/Windows plus Linux
+  `.deb` and `.rpm` packages, publish checksum/SBOM artifacts to a draft GitHub
+  Release, and emit GitHub provenance attestations for `dist/*`.
+- The binary must expose `personastack-connector version` so install flows and
+  support diagnostics can verify the downloaded artifact.
 - WSL2 uses the Linux Connector inside the WSL2 environment.
 - iOS and Android are not Connector host targets in V1.
 - Release artifacts must be signed or checksummed before appearing in default

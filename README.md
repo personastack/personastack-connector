@@ -18,3 +18,13 @@ into the selected runtime.
 
 Shared product state, pairing state, run admission, PromptStack rendering, and
 browser-visible runtime state remain owned by `personastack-api`.
+
+## Build and Release
+
+- Local validation: `go test ./...`
+- Release config validation: `go run github.com/goreleaser/goreleaser/v2@latest check`
+- CI runs unit tests plus a GoReleaser snapshot dry-run with Syft installed for
+  SBOM generation.
+- Tagged `v*` releases publish draft GitHub Releases under
+  `personastack/personastack-connector` with archives, Linux packages,
+  checksums, SBOMs, and provenance attestations.

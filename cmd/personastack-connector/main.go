@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
+	"github.com/personastack/personastack-connector/internal/buildinfo"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/daemon"
 	"github.com/personastack/personastack-connector/internal/mcp"
@@ -26,6 +27,7 @@ const usage = `Usage:
   personastack-connector service install
   personastack-connector run --foreground
   personastack-connector unpair
+  personastack-connector version
 `
 
 type command struct {
@@ -86,6 +88,8 @@ func (cmd command) Run(ctx context.Context, args []string) error {
 		return cmd.runDaemon(ctx, args[1:])
 	case "unpair":
 		return cmd.runUnpair(args[1:])
+	case "version":
+		return cmd.runVersion(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -162,6 +166,14 @@ func (cmd command) runStatus(args []string) error {
 	for _, binding := range bindings {
 		fmt.Fprintf(cmd.stdout, "%s persona=%s runtime=%s state=%s\n", binding.ConnectionID, binding.PersonaID, binding.RuntimeKind, binding.ReadinessState)
 	}
+	return nil
+}
+
+func (cmd command) runVersion(args []string) error {
+	if len(args) != 0 {
+		return errors.New("version accepts no arguments")
+	}
+	fmt.Fprintf(cmd.stdout, "personastack-connector version=%s commit=%s channel=%s\n", buildinfo.VersionString(), buildinfo.GitCommitString(), buildinfo.ReleaseChannelString())
 	return nil
 }
 

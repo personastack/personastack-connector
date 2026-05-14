@@ -39,7 +39,28 @@ archives:
       {{- .Arch }}
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
+
+nfpms:
+  - id: linux-packages
+    ids:
+      - personastack-connector
+    package_name: personastack-connector
+    vendor: PersonaStack
+    homepage: https://personastack.ai
+    maintainer: PersonaStack <security@personastack.ai>
+    description: User-installed Connector for PersonaStack external personas.
+    license: Proprietary
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/local/bin
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/personastack-connector/README.md
+      - src: SPEC.md
+        dst: /usr/share/doc/personastack-connector/SPEC.md
 
 checksum:
   name_template: personastack-connector_{{ .Version }}_checksums.txt
