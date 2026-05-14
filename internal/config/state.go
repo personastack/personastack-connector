@@ -24,14 +24,15 @@ func (kind ExternalAgentKind) String() string {
 }
 
 type Binding struct {
-	ConnectionID       ConnectionID
-	PersonaID          PersonaID
-	ExternalAgentKind  ExternalAgentKind
-	NativeMCPServer    string
-	RuntimeKind        runtime.AdapterKind
-	ReadinessState     runtime.AdapterState
-	HasBridgeSecret    bool
-	HasPersonaMCPToken bool
+	ConnectionID         ConnectionID
+	PersonaID            PersonaID
+	ExternalAgentKind    ExternalAgentKind
+	ConnectionGeneration int64
+	NativeMCPServer      string
+	RuntimeKind          runtime.AdapterKind
+	ReadinessState       runtime.AdapterState
+	HasBridgeSecret      bool
+	HasPersonaMCPToken   bool
 }
 
 type State struct {
