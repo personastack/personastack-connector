@@ -195,7 +195,14 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
-			nativeRunID, err := adapter.StartRun(frame.AssignmentID, frame.RunStart.FullyComposedPrompt)
+			nativeRunID, err := adapter.StartRun(runtime.RunRequest{
+				RunID:                  frame.RunID,
+				AssignmentID:           frame.AssignmentID,
+				FullyComposedPrompt:    frame.RunStart.FullyComposedPrompt,
+				NativeMCPServerName:    frame.RunStart.NativeMCPServerName,
+				NativeMCPToolNamespace: frame.RunStart.NativeMCPToolNamespace,
+				Metadata:               frame.RunStart.Metadata,
+			})
 			if err != nil {
 				_ = r.clearRunMCPToken(binding, frame.RunID)
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())

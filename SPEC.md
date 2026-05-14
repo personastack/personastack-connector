@@ -130,6 +130,8 @@ Adapter result states must be concrete typed enums, including:
 - Missing Hermes run SSE or stop features are degraded fallbacks, not hard
   runtime failures, when run submission and run status are available.
 - Put API-rendered `fully_composed_prompt` in Hermes `input` by default.
+- Include PersonaStack run id, assignment id, native MCP server name, and native
+  MCP namespace as bounded non-secret Hermes run metadata.
 - Use Hermes `instructions` only when API provides explicit structured prompt
   fields.
 - Map Hermes native run events to Connector protocol run events.
@@ -143,6 +145,8 @@ Adapter result states must be concrete typed enums, including:
 - Use Gateway `agent`, `agent.wait`, and `sessions.abort` for full support.
 - Put API-rendered `fully_composed_prompt` in `agent.params.message`.
 - Use PersonaStack assignment id as the OpenClaw idempotency key/native run id.
+- Include PersonaStack run id, assignment id, native MCP server name, and native
+  MCP namespace in OpenClaw `agent` params as bounded non-secret metadata.
 - Verify MCP by effective tool visibility or controlled wake probe, not config
   write success alone.
 

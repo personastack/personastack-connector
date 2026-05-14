@@ -92,18 +92,27 @@ func TestHermesAdapterStartRun(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		var body map[string]string
+		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
-		if body["conversation"] != "assignment-1" || body["input"] != "prompt" {
+		metadata, ok := body["metadata"].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata missing: %+v", body)
+		}
+		if body["session_id"] != "run-1" || body["conversation"] != "assignment-1" || body["input"] != "prompt" || body["native_mcp_server"] != "personastack-conn-1" || metadata["personastack_run_id"] != "run-1" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
 		_, _ = w.Write([]byte(`{"id":"hermes-run-1"}`))
 	}))
 	defer server.Close()
 
-	runID, err := NewHermesAdapter(server.URL, "key-1").StartRun("assignment-1", "prompt")
+	runID, err := NewHermesAdapter(server.URL, "key-1").StartRun(RunRequest{
+		RunID:               "run-1",
+		AssignmentID:        "assignment-1",
+		FullyComposedPrompt: "prompt",
+		NativeMCPServerName: "personastack-conn-1",
+	})
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}

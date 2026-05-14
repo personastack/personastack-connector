@@ -93,10 +93,38 @@ type Adapter interface {
 	Detect() Detection
 	ConfigureMCP(bindingID string) error
 	VerifyMCP(bindingID string) (AdapterState, error)
-	StartRun(assignmentID string, fullyComposedPrompt string) (string, error)
+	StartRun(RunRequest) (string, error)
 	WaitRun(ctx context.Context, nativeRunID string) (RunResult, error)
 	CancelRun(nativeRunID string) error
 	Diagnose() Detection
+}
+
+type RunRequest struct {
+	RunID                  string
+	AssignmentID           string
+	FullyComposedPrompt    string
+	NativeMCPServerName    string
+	NativeMCPToolNamespace string
+	Metadata               map[string]string
+}
+
+func runMetadata(request RunRequest) map[string]string {
+	metadata := map[string]string{}
+	for key, value := range request.Metadata {
+		trimmedKey := strings.TrimSpace(key)
+		trimmedValue := strings.TrimSpace(value)
+		if trimmedKey == "" || trimmedValue == "" {
+			continue
+		}
+		metadata[trimmedKey] = trimmedValue
+	}
+	if strings.TrimSpace(request.RunID) != "" {
+		metadata["personastack_run_id"] = strings.TrimSpace(request.RunID)
+	}
+	if strings.TrimSpace(request.AssignmentID) != "" {
+		metadata["personastack_assignment_id"] = strings.TrimSpace(request.AssignmentID)
+	}
+	return metadata
 }
 
 type RunResult struct {
@@ -155,7 +183,7 @@ func (adapter PlaceholderAdapter) VerifyMCP(bindingID string) (AdapterState, err
 	return AdapterStateMCPConfigMissing, fmt.Errorf("%s MCP verification is not implemented", adapter.kind)
 }
 
-func (adapter PlaceholderAdapter) StartRun(assignmentID string, fullyComposedPrompt string) (string, error) {
+func (adapter PlaceholderAdapter) StartRun(RunRequest) (string, error) {
 	return "", fmt.Errorf("%s run dispatch is not implemented", adapter.kind)
 }
 

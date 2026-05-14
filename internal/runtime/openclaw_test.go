@@ -122,11 +122,27 @@ func TestOpenClawAdapterStartRunUsesAgentMethod(t *testing.T) {
 		if request.Method != "agent" || request.ID != "assignment-1" {
 			t.Fatalf("unexpected request: %+v", request)
 		}
+		params, ok := request.Params.(map[string]any)
+		if !ok {
+			t.Fatalf("unexpected params: %+v", request.Params)
+		}
+		metadata, ok := params["metadata"].(map[string]any)
+		if !ok {
+			t.Fatalf("missing metadata: %+v", params)
+		}
+		if params["message"] != "prompt" || params["idempotencyKey"] != "assignment-1" || params["runId"] != "run-1" || params["nativeMcpServerName"] != "personastack-conn-1" || metadata["personastack_run_id"] != "run-1" {
+			t.Fatalf("unexpected params: %+v", params)
+		}
 		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"accepted":true}`)})
 	}))
 	defer server.Close()
 
-	runID, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StartRun("assignment-1", "prompt")
+	runID, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StartRun(RunRequest{
+		RunID:               "run-1",
+		AssignmentID:        "assignment-1",
+		FullyComposedPrompt: "prompt",
+		NativeMCPServerName: "personastack-conn-1",
+	})
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}

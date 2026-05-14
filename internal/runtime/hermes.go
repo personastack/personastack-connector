@@ -109,10 +109,14 @@ func (adapter HermesAdapter) VerifyMCP(bindingID string) (AdapterState, error) {
 	return AdapterStateMCPConfigMissing, fmt.Errorf("Hermes MCP verification is not implemented")
 }
 
-func (adapter HermesAdapter) StartRun(assignmentID string, fullyComposedPrompt string) (string, error) {
-	body := map[string]string{
-		"input":        fullyComposedPrompt,
-		"conversation": assignmentID,
+func (adapter HermesAdapter) StartRun(request RunRequest) (string, error) {
+	body := map[string]any{
+		"input":                strings.TrimSpace(request.FullyComposedPrompt),
+		"session_id":           strings.TrimSpace(firstNonEmpty(request.RunID, request.AssignmentID)),
+		"conversation":         strings.TrimSpace(request.AssignmentID),
+		"native_mcp_server":    strings.TrimSpace(request.NativeMCPServerName),
+		"native_mcp_namespace": strings.TrimSpace(request.NativeMCPToolNamespace),
+		"metadata":             runMetadata(request),
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {

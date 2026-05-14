@@ -104,18 +104,23 @@ func (adapter OpenClawAdapter) VerifyMCP(bindingID string) (AdapterState, error)
 	return AdapterStateMCPConfigMissing, fmt.Errorf("OpenClaw MCP verification is not implemented")
 }
 
-func (adapter OpenClawAdapter) StartRun(assignmentID string, fullyComposedPrompt string) (string, error) {
+func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 	conn, err := adapter.dial(context.Background())
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
+	assignmentID := strings.TrimSpace(runRequest.AssignmentID)
 	request := openClawRequest{
-		ID:     strings.TrimSpace(assignmentID),
+		ID:     assignmentID,
 		Method: "agent",
-		Params: map[string]string{
-			"message":        fullyComposedPrompt,
-			"idempotencyKey": strings.TrimSpace(assignmentID),
+		Params: map[string]any{
+			"message":                strings.TrimSpace(runRequest.FullyComposedPrompt),
+			"idempotencyKey":         assignmentID,
+			"runId":                  strings.TrimSpace(firstNonEmpty(runRequest.RunID, assignmentID)),
+			"nativeMcpServerName":    strings.TrimSpace(runRequest.NativeMCPServerName),
+			"nativeMcpToolNamespace": strings.TrimSpace(runRequest.NativeMCPToolNamespace),
+			"metadata":               runMetadata(runRequest),
 		},
 	}
 	if err := conn.WriteJSON(request); err != nil {
