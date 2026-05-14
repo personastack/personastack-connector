@@ -89,15 +89,19 @@ func (s Session) ConnectFrame(nonce string) (externalagentprotocol.Frame, error)
 func (s Session) HeartbeatFrame(state runtime.AdapterState, lastWakeProbeAt *time.Time) externalagentprotocol.Frame {
 	frame := s.baseFrame(externalagentprotocol.FrameTypeHeartbeat, s.now())
 	frame.Heartbeat = &externalagentprotocol.HeartbeatPayload{
-		ConnectionStatus: externalagentprotocol.ConnectionStatusBridgeConnected,
-		ReadinessStatus:  readinessForAdapterState(state),
-		RuntimeKind:      runtimeKindForAdapter(s.Binding.RuntimeKind),
-		ConnectorVersion: buildinfo.VersionString(),
-		GitCommit:        buildinfo.GitCommitString(),
-		OS:               stdruntime.GOOS,
-		Arch:             stdruntime.GOARCH,
-		ReleaseChannel:   buildinfo.ReleaseChannelString(),
-		LastWakeProbeAt:  lastWakeProbeAt,
+		ConnectionStatus:       externalagentprotocol.ConnectionStatusBridgeConnected,
+		ReadinessStatus:        readinessForAdapterState(state),
+		RuntimeKind:            runtimeKindForAdapter(s.Binding.RuntimeKind),
+		NativeMCPServerName:    strings.TrimSpace(s.Binding.NativeMCPServer),
+		NativeMCPToolNamespace: strings.TrimSpace(s.Binding.NativeMCPNamespace),
+		NativeMCPToolPrefix:    nativeMCPToolPrefix(s.Binding.RuntimeKind, s.Binding.NativeMCPServer),
+		NativeToolNamingRule:   nativeToolNamingRule(s.Binding.RuntimeKind),
+		ConnectorVersion:       buildinfo.VersionString(),
+		GitCommit:              buildinfo.GitCommitString(),
+		OS:                     stdruntime.GOOS,
+		Arch:                   stdruntime.GOARCH,
+		ReleaseChannel:         buildinfo.ReleaseChannelString(),
+		LastWakeProbeAt:        lastWakeProbeAt,
 	}
 	return frame
 }
@@ -190,6 +194,28 @@ func runtimeKindForAdapter(kind runtime.AdapterKind) externalagentprotocol.Runti
 	default:
 		return externalagentprotocol.RuntimeKindHermes
 	}
+}
+
+func nativeToolNamingRule(kind runtime.AdapterKind) externalagentprotocol.NativeToolNamingRule {
+	switch kind {
+	case runtime.AdapterKindHermes:
+		return externalagentprotocol.NativeToolNamingRuleMCPServerPrefix
+	case runtime.AdapterKindOpenClaw:
+		return externalagentprotocol.NativeToolNamingRuleRuntimeEffectiveCatalog
+	default:
+		return externalagentprotocol.NativeToolNamingRuleUnknown
+	}
+}
+
+func nativeMCPToolPrefix(kind runtime.AdapterKind, serverName string) string {
+	if kind != runtime.AdapterKindHermes {
+		return ""
+	}
+	trimmed := strings.TrimSpace(serverName)
+	if trimmed == "" {
+		return ""
+	}
+	return "mcp_" + trimmed + "_"
 }
 
 func readinessForAdapterState(state runtime.AdapterState) externalagentprotocol.ReadinessStatus {

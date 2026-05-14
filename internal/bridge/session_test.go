@@ -79,6 +79,9 @@ func TestHeartbeatFrameReportsBuildMetadata(t *testing.T) {
 	if frame.Heartbeat.ConnectorVersion != "v1.2.3" || frame.Heartbeat.GitCommit != "abc123" || frame.Heartbeat.ReleaseChannel != "test" {
 		t.Fatalf("unexpected heartbeat metadata: %+v", frame.Heartbeat)
 	}
+	if frame.Heartbeat.NativeMCPServerName != "personastack-conn-1" || frame.Heartbeat.NativeMCPToolPrefix != "mcp_personastack-conn-1_" || frame.Heartbeat.NativeToolNamingRule != externalagentprotocol.NativeToolNamingRuleMCPServerPrefix {
+		t.Fatalf("unexpected native mcp metadata: %+v", frame.Heartbeat)
+	}
 	if frame.Heartbeat.OS == "" || frame.Heartbeat.Arch == "" {
 		t.Fatalf("expected os/arch metadata: %+v", frame.Heartbeat)
 	}
@@ -91,6 +94,8 @@ func testSession(t *testing.T, publicKey ed25519.PublicKey, privateKey ed25519.P
 		PersonaID:            "persona-1",
 		ConnectionGeneration: 5,
 		RuntimeKind:          runtime.AdapterKindHermes,
+		NativeMCPServer:      "personastack-conn-1",
+		NativeMCPNamespace:   "personastack",
 	}, Credential{
 		ID:         "cred-1",
 		PrivateKey: privateKey,
