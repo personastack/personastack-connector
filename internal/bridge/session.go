@@ -4,16 +4,16 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	stdruntime "runtime"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
+	"github.com/personastack/personastack-connector/internal/buildinfo"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
-
-const connectorVersion = "0.1.0-dev"
 
 type Credential struct {
 	ID         string
@@ -72,7 +72,7 @@ func (s Session) ConnectFrame(nonce string) (externalagentprotocol.Frame, error)
 	now := s.now()
 	connect := externalagentprotocol.ConnectPayload{
 		ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
-		ConnectorVersion:     connectorVersion,
+		ConnectorVersion:     buildinfo.VersionString(),
 		RuntimeKind:          runtimeKindForAdapter(s.Binding.RuntimeKind),
 		ConnectionGeneration: s.Binding.ConnectionGeneration,
 		DevicePublicKey:      base64.StdEncoding.EncodeToString(s.Credential.PublicKey),
@@ -92,7 +92,11 @@ func (s Session) HeartbeatFrame(state runtime.AdapterState, lastWakeProbeAt *tim
 		ConnectionStatus: externalagentprotocol.ConnectionStatusBridgeConnected,
 		ReadinessStatus:  readinessForAdapterState(state),
 		RuntimeKind:      runtimeKindForAdapter(s.Binding.RuntimeKind),
-		ConnectorVersion: connectorVersion,
+		ConnectorVersion: buildinfo.VersionString(),
+		GitCommit:        buildinfo.GitCommitString(),
+		OS:               stdruntime.GOOS,
+		Arch:             stdruntime.GOARCH,
+		ReleaseChannel:   buildinfo.ReleaseChannelString(),
 		LastWakeProbeAt:  lastWakeProbeAt,
 	}
 	return frame

@@ -24,9 +24,10 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.gitCommit={{ .Commit }}
-      - -X main.buildDate={{ .Date }}
+      - -X github.com/personastack/personastack-connector/internal/buildinfo.Version={{ .Version }}
+      - -X github.com/personastack/personastack-connector/internal/buildinfo.GitCommit={{ .Commit }}
+      - -X github.com/personastack/personastack-connector/internal/buildinfo.BuildDate={{ .Date }}
+      - -X github.com/personastack/personastack-connector/internal/buildinfo.ReleaseChannel=stable
 
 archives:
   - id: default

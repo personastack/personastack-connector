@@ -16,11 +16,10 @@ import (
 	"time"
 
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
+	"github.com/personastack/personastack-connector/internal/buildinfo"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
-
-const connectorVersion = "0.1.0-dev"
 
 type Client struct {
 	GatewayBaseURL string
@@ -54,7 +53,7 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 	payload := externalagentprotocol.PairingExchangeRequest{
 		Code:                code,
 		RuntimeKind:         runtimeKind,
-		ConnectorVersion:    connectorVersion,
+		ConnectorVersion:    buildinfo.VersionString(),
 		DevicePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
 		HostnameHash:        hostnameHash(),
 		GatewayWebsocketURL: websocketURL,

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
+	"github.com/personastack/personastack-connector/internal/buildinfo"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
@@ -53,6 +54,33 @@ func TestRunAcceptedFrameCorrelatesRequestMessageID(t *testing.T) {
 	frame := session.RunAcceptedFrame(request, "native-1")
 	if frame.MessageID != "request-1" || frame.RunAccepted.NativeRunID != "native-1" {
 		t.Fatalf("unexpected frame: %+v", frame)
+	}
+}
+
+func TestHeartbeatFrameReportsBuildMetadata(t *testing.T) {
+	oldVersion := buildinfo.Version
+	oldCommit := buildinfo.GitCommit
+	oldChannel := buildinfo.ReleaseChannel
+	buildinfo.Version = "v1.2.3"
+	buildinfo.GitCommit = "abc123"
+	buildinfo.ReleaseChannel = "test"
+	t.Cleanup(func() {
+		buildinfo.Version = oldVersion
+		buildinfo.GitCommit = oldCommit
+		buildinfo.ReleaseChannel = oldChannel
+	})
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session := testSession(t, publicKey, privateKey)
+
+	frame := session.HeartbeatFrame(runtime.AdapterStateReady, nil)
+	if frame.Heartbeat.ConnectorVersion != "v1.2.3" || frame.Heartbeat.GitCommit != "abc123" || frame.Heartbeat.ReleaseChannel != "test" {
+		t.Fatalf("unexpected heartbeat metadata: %+v", frame.Heartbeat)
+	}
+	if frame.Heartbeat.OS == "" || frame.Heartbeat.Arch == "" {
+		t.Fatalf("expected os/arch metadata: %+v", frame.Heartbeat)
 	}
 }
 
