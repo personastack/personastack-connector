@@ -49,7 +49,13 @@ func (adapter OpenClawAdapter) Detect() Detection {
 	if health.Error != "" {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: health.Error}
 	}
-	if err := conn.WriteJSON(openClawRequest{ID: "detect-2", Method: "hello", Params: map[string]any{"client": "personastack-connector", "protocol_min": 1, "protocol_max": 1}}); err != nil {
+	if detection, failed := adapter.probeOpenClawMethod(conn, "detect-2", "status"); failed {
+		return detection
+	}
+	if detection, failed := adapter.probeOpenClawMethod(conn, "detect-3", "agents.list"); failed {
+		return detection
+	}
+	if err := conn.WriteJSON(openClawRequest{ID: "detect-4", Method: "hello", Params: map[string]any{"client": "personastack-connector", "protocol_min": 1, "protocol_max": 1}}); err != nil {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}
 	}
 	var hello openClawResponse
@@ -68,6 +74,20 @@ func (adapter OpenClawAdapter) Detect() Detection {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: strings.Join(missing, ",") + " missing"}
 	}
 	return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateReady, Note: "OpenClaw Gateway reachable"}
+}
+
+func (adapter OpenClawAdapter) probeOpenClawMethod(conn *websocket.Conn, requestID string, method string) (Detection, bool) {
+	if err := conn.WriteJSON(openClawRequest{ID: requestID, Method: method}); err != nil {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}, true
+	}
+	var response openClawResponse
+	if err := conn.ReadJSON(&response); err != nil {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}, true
+	}
+	if response.Error != "" {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: response.Error}, true
+	}
+	return Detection{}, false
 }
 
 func (adapter OpenClawAdapter) ConfigureMCP(bindingID string) error {

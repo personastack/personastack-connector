@@ -30,6 +30,22 @@ func TestOpenClawAdapterDetectRequiresGatewayFeatures(t *testing.T) {
 			t.Fatalf("expected health, got %+v", health)
 		}
 		_ = conn.WriteJSON(openClawResponse{ID: health.ID, Result: json.RawMessage(`{"ok":true}`)})
+		var status openClawRequest
+		if err := conn.ReadJSON(&status); err != nil {
+			t.Fatalf("read status: %v", err)
+		}
+		if status.Method != "status" {
+			t.Fatalf("expected status, got %+v", status)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: status.ID, Result: json.RawMessage(`{"ok":true}`)})
+		var agents openClawRequest
+		if err := conn.ReadJSON(&agents); err != nil {
+			t.Fatalf("read agents.list: %v", err)
+		}
+		if agents.Method != "agents.list" {
+			t.Fatalf("expected agents.list, got %+v", agents)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: agents.ID, Result: json.RawMessage(`{"agents":[]}`)})
 		var hello openClawRequest
 		if err := conn.ReadJSON(&hello); err != nil {
 			t.Fatalf("read hello: %v", err)
@@ -60,6 +76,16 @@ func TestOpenClawAdapterDetectRejectsMissingFeature(t *testing.T) {
 			t.Fatalf("read health: %v", err)
 		}
 		_ = conn.WriteJSON(openClawResponse{ID: health.ID, Result: json.RawMessage(`{"ok":true}`)})
+		var status openClawRequest
+		if err := conn.ReadJSON(&status); err != nil {
+			t.Fatalf("read status: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: status.ID, Result: json.RawMessage(`{"ok":true}`)})
+		var agents openClawRequest
+		if err := conn.ReadJSON(&agents); err != nil {
+			t.Fatalf("read agents.list: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: agents.ID, Result: json.RawMessage(`{"agents":[]}`)})
 		var hello openClawRequest
 		if err := conn.ReadJSON(&hello); err != nil {
 			t.Fatalf("read hello: %v", err)

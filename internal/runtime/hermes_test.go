@@ -9,10 +9,18 @@ import (
 )
 
 func TestHermesAdapterDetectsRunSubmission(t *testing.T) {
+	probedDetailedHealth := false
+	probedModels := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/health/detailed":
+			probedDetailedHealth = true
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/v1/models":
+			probedModels = true
+			_, _ = w.Write([]byte(`{"data":[]}`))
 		case "/v1/capabilities":
 			if r.Header.Get("Authorization") != "Bearer key-1" {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -28,6 +36,9 @@ func TestHermesAdapterDetectsRunSubmission(t *testing.T) {
 	detection := NewHermesAdapter(server.URL, "key-1").Detect()
 	if detection.State != AdapterStateReady {
 		t.Fatalf("expected ready, got %+v", detection)
+	}
+	if !probedDetailedHealth || !probedModels {
+		t.Fatalf("expected detailed health and models probes")
 	}
 }
 

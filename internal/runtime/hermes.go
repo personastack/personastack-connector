@@ -44,6 +44,12 @@ func (adapter HermesAdapter) Detect() Detection {
 	if adapter.APIKey == "" {
 		return Detection{Kind: AdapterKindHermes, State: AdapterStateAuthMissing, Note: "HERMES_API_SERVER_KEY is required"}
 	}
+	if detection, failed := adapter.probeOptionalAuthenticatedEndpoint("/health/detailed"); failed {
+		return detection
+	}
+	if detection, failed := adapter.probeOptionalAuthenticatedEndpoint("/v1/models"); failed {
+		return detection
+	}
 	req, _ := http.NewRequest(http.MethodGet, adapter.BaseURL+"/v1/capabilities", nil)
 	req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
 	resp, err = client.Do(req)
@@ -70,6 +76,23 @@ func (adapter HermesAdapter) Detect() Detection {
 		return Detection{Kind: AdapterKindHermes, State: AdapterStateReady, Note: "Hermes API ready with degraded fallback: " + strings.Join(degraded, ",") + " missing"}
 	}
 	return Detection{Kind: AdapterKindHermes, State: AdapterStateReady, Note: "Hermes API ready"}
+}
+
+func (adapter HermesAdapter) probeOptionalAuthenticatedEndpoint(path string) (Detection, bool) {
+	req, err := http.NewRequest(http.MethodGet, adapter.BaseURL+path, nil)
+	if err != nil {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateCapabilityMissing, Note: err.Error()}, true
+	}
+	req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
+	resp, err := adapter.client().Do(req)
+	if err != nil {
+		return Detection{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateAuthMissing, Note: "Hermes API key rejected"}, true
+	}
+	return Detection{}, false
 }
 
 func (adapter HermesAdapter) ConfigureMCP(bindingID string) error {
