@@ -104,6 +104,8 @@ Adapter result states must be concrete typed enums, including:
 
 - Probe Hermes on `http://127.0.0.1:8642`.
 - Use Hermes `/v1/runs` when available.
+- Subscribe to Hermes run SSE events for terminal run observation and fall back
+  to status polling only when events are unavailable.
 - Put API-rendered `fully_composed_prompt` in Hermes `input` by default.
 - Use Hermes `instructions` only when API provides explicit structured prompt
   fields.

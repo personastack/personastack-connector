@@ -1,10 +1,12 @@
 package runtime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -120,6 +122,11 @@ func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (R
 	if trimmedRunID == "" {
 		return RunResult{}, fmt.Errorf("native run id required")
 	}
+	if result, terminal, err := adapter.waitRunEvents(ctx, trimmedRunID); err != nil {
+		return RunResult{}, err
+	} else if terminal {
+		return result, nil
+	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -136,6 +143,100 @@ func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (R
 		case <-ticker.C:
 		}
 	}
+}
+
+func (adapter HermesAdapter) waitRunEvents(ctx context.Context, nativeRunID string) (RunResult, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, adapter.BaseURL+"/v1/runs/"+strings.TrimSpace(nativeRunID)+"/events", nil)
+	if err != nil {
+		return RunResult{}, false, err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	if adapter.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
+	}
+	resp, err := adapter.client().Do(req)
+	if err != nil {
+		return RunResult{}, false, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNotImplemented || resp.StatusCode == http.StatusMethodNotAllowed {
+		return RunResult{}, false, nil
+	}
+	if resp.StatusCode >= 300 {
+		return RunResult{}, false, fmt.Errorf("Hermes run events status %d", resp.StatusCode)
+	}
+	result, terminal, err := readHermesRunEvents(resp.Body)
+	if err != nil {
+		return RunResult{}, false, err
+	}
+	return result, terminal, nil
+}
+
+func readHermesRunEvents(body io.Reader) (RunResult, bool, error) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var data []string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			if result, terminal := hermesRunEventResult(strings.Join(data, "\n")); terminal {
+				return result, true, nil
+			}
+			data = nil
+			continue
+		}
+		if after, ok := strings.CutPrefix(line, "data:"); ok {
+			data = append(data, strings.TrimSpace(after))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return RunResult{}, false, fmt.Errorf("read Hermes run events: %w", err)
+	}
+	if result, terminal := hermesRunEventResult(strings.Join(data, "\n")); terminal {
+		return result, true, nil
+	}
+	return RunResult{}, false, nil
+}
+
+func hermesRunEventResult(raw string) (RunResult, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "[DONE]" {
+		return RunResult{}, false
+	}
+	var event hermesRunEvent
+	if err := json.Unmarshal([]byte(trimmed), &event); err != nil {
+		return RunResult{}, false
+	}
+	if len(event.Data) > 0 {
+		var nested hermesRunEvent
+		if err := json.Unmarshal(event.Data, &nested); err == nil {
+			event = mergeHermesRunEvents(event, nested)
+		}
+	}
+	status := strings.ToLower(strings.TrimSpace(firstNonEmpty(event.Status, event.Type, event.Event)))
+	switch status {
+	case "run.completed", "completed", "succeeded", "success":
+		return RunResult{Status: RunStatusSucceeded, Output: strings.TrimSpace(event.Output)}, true
+	case "run.failed", "failed", "error":
+		return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(firstNonEmpty(event.Error, event.Output))}, true
+	case "run.cancelled", "run.canceled", "cancelled", "canceled":
+		return RunResult{Status: RunStatusCancelled}, true
+	default:
+		return RunResult{}, false
+	}
+}
+
+func mergeHermesRunEvents(parent hermesRunEvent, child hermesRunEvent) hermesRunEvent {
+	if strings.TrimSpace(parent.Status) == "" {
+		parent.Status = child.Status
+	}
+	if strings.TrimSpace(parent.Output) == "" {
+		parent.Output = child.Output
+	}
+	if strings.TrimSpace(parent.Error) == "" {
+		parent.Error = child.Error
+	}
+	return parent
 }
 
 func (adapter HermesAdapter) runStatus(ctx context.Context, nativeRunID string) (RunResult, bool, error) {
@@ -230,8 +331,26 @@ type hermesRunResponse struct {
 	ID string `json:"id"`
 }
 
+type hermesRunEvent struct {
+	Type   string          `json:"type"`
+	Event  string          `json:"event"`
+	Status string          `json:"status"`
+	Output string          `json:"output"`
+	Error  string          `json:"error"`
+	Data   json.RawMessage `json:"data"`
+}
+
 type hermesRunStatusResponse struct {
 	Status string `json:"status"`
 	Output string `json:"output"`
 	Error  string `json:"error"`
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

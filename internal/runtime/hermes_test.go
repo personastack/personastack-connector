@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -75,5 +76,34 @@ func TestHermesAdapterStartRun(t *testing.T) {
 	}
 	if runID != "hermes-run-1" {
 		t.Fatalf("run id = %q", runID)
+	}
+}
+
+func TestHermesAdapterWaitRunUsesSSEEvents(t *testing.T) {
+	statusPolled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: message\n"))
+			_, _ = w.Write([]byte(`data: {"type":"run.completed","output":"done"}` + "\n\n"))
+		case "/v1/runs/hermes-run-1":
+			statusPolled = true
+			_, _ = w.Write([]byte(`{"status":"completed","output":"polled"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewHermesAdapter(server.URL, "key-1").WaitRun(context.Background(), "hermes-run-1")
+	if err != nil {
+		t.Fatalf("wait run: %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if statusPolled {
+		t.Fatalf("status endpoint should not be polled after terminal SSE event")
 	}
 }
