@@ -142,10 +142,11 @@ func (adapter HermesAdapter) StartRun(request RunRequest) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(decoded.ID) == "" {
+	nativeRunID := strings.TrimSpace(firstNonEmpty(decoded.RunID, decoded.ID))
+	if nativeRunID == "" {
 		return "", fmt.Errorf("Hermes response missing run id")
 	}
-	return strings.TrimSpace(decoded.ID), nil
+	return nativeRunID, nil
 }
 
 func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
@@ -364,7 +365,8 @@ func (capabilities hermesCapabilities) degradedFallbackFeatures() []string {
 }
 
 type hermesRunResponse struct {
-	ID string `json:"id"`
+	ID    string `json:"id"`
+	RunID string `json:"run_id"`
 }
 
 type hermesRunEvent struct {

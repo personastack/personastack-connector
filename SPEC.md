@@ -126,6 +126,9 @@ Adapter result states must be concrete typed enums, including:
 
 - Probe Hermes on `http://127.0.0.1:8642`.
 - Use Hermes `/v1/runs` when available.
+- Hermes run submission may return `run_id` or `id`; Connector treats the
+  returned value as the Hermes native run id and never sends the PersonaStack
+  run id as a caller-supplied native id.
 - Subscribe to Hermes run SSE events for terminal run observation and fall back
   to status polling only when events are unavailable.
 - Missing Hermes run SSE or stop features are degraded fallbacks, not hard

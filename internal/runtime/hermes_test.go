@@ -103,7 +103,7 @@ func TestHermesAdapterStartRun(t *testing.T) {
 		if body["session_id"] != "run-1" || body["conversation"] != "assignment-1" || body["input"] != "prompt" || body["native_mcp_server"] != "personastack-conn-1" || metadata["personastack_run_id"] != "run-1" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
-		_, _ = w.Write([]byte(`{"id":"hermes-run-1"}`))
+		_, _ = w.Write([]byte(`{"run_id":"hermes-run-1"}`))
 	}))
 	defer server.Close()
 
