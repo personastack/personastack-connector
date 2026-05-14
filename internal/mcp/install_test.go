@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/personastack/personastack-connector/internal/config"
@@ -18,6 +19,7 @@ func TestInstallerWritesHermesStdioServer(t *testing.T) {
 		PersonaID:       "persona-1",
 		RuntimeKind:     runtime.AdapterKindHermes,
 		NativeMCPServer: "personastack-conn-1",
+		PersonaMCPToken: "secret-mcp-token",
 	}}})
 	results, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector"}).InstallAll()
 	if err != nil {
@@ -38,6 +40,13 @@ func TestInstallerWritesHermesStdioServer(t *testing.T) {
 	if server["command"] != "/usr/local/bin/personastack-connector" {
 		t.Fatalf("unexpected server: %+v", server)
 	}
+	args, ok := server["args"].([]any)
+	if !ok || len(args) != 4 || args[0] != "mcp" || args[1] != "stdio" || args[2] != "--binding" || args[3] != "conn-1" {
+		t.Fatalf("unexpected args: %+v", server["args"])
+	}
+	if strings.Contains(string(raw), "secret-mcp-token") {
+		t.Fatalf("Hermes config contains MCP bearer token: %s", string(raw))
+	}
 }
 
 func TestInstallerWritesOpenClawStdioServer(t *testing.T) {
@@ -47,6 +56,7 @@ func TestInstallerWritesOpenClawStdioServer(t *testing.T) {
 		PersonaID:       "persona-2",
 		RuntimeKind:     runtime.AdapterKindOpenClaw,
 		NativeMCPServer: "personastack-conn-2",
+		PersonaMCPToken: "secret-mcp-token",
 	}}})
 	_, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/opt/personastack-connector"}).InstallAll()
 	if err != nil {
@@ -63,6 +73,13 @@ func TestInstallerWritesOpenClawStdioServer(t *testing.T) {
 	server := root["mcp"].(map[string]any)["servers"].(map[string]any)["personastack-conn-2"].(map[string]any)
 	if server["command"] != "/opt/personastack-connector" {
 		t.Fatalf("unexpected server: %+v", server)
+	}
+	args, ok := server["args"].([]any)
+	if !ok || len(args) != 4 || args[0] != "mcp" || args[1] != "stdio" || args[2] != "--binding" || args[3] != "conn-2" {
+		t.Fatalf("unexpected args: %+v", server["args"])
+	}
+	if strings.Contains(string(raw), "secret-mcp-token") {
+		t.Fatalf("OpenClaw config contains MCP bearer token: %s", string(raw))
 	}
 }
 
