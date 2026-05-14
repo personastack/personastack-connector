@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -93,6 +95,86 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 	heartbeat := <-seenHeartbeat
 	if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat || heartbeat.ConnectionID != "conn-1" {
 		t.Fatalf("unexpected heartbeat: %+v", heartbeat)
+	}
+}
+
+func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	connectionCount := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		if connectFrame.MessageType != externalagentprotocol.FrameTypeConnect || connectFrame.ConnectionID != "conn-1" {
+			t.Fatalf("unexpected connect frame: %+v", connectFrame)
+		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ConnectionGeneration: 1,
+				HeartbeatSeconds:     15,
+			},
+		})
+		var heartbeat externalagentprotocol.Frame
+		if err := conn.ReadJSON(&heartbeat); err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat {
+			t.Fatalf("unexpected heartbeat: %+v", heartbeat)
+		}
+		connectionCount <- struct{}{}
+	}))
+	defer server.Close()
+
+	path := t.TempDir() + "/state.json"
+	raw, err := json.Marshal(config.State{Bindings: []config.Binding{{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ConnectionGeneration: 1,
+		GatewayWebsocketURL:  "ws" + server.URL[len("http"):],
+		BridgeCredentialID:   "cred-1",
+		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:          runtime.AdapterKindHermes,
+	}}})
+	if err != nil {
+		t.Fatalf("encode state: %v", err)
+	}
+	err = os.WriteFile(path, raw, 0o600)
+	if err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithCancel(t.Context())
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- (Runner{Store: config.NewFileStore(path), ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx)
+		}()
+		select {
+		case <-connectionCount:
+			cancel()
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatalf("timeout waiting for restart connection %d", i+1)
+		}
+		if err := <-errCh; err != nil {
+			t.Fatalf("run foreground restart %d: %v", i+1, err)
+		}
 	}
 }
 
