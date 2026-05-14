@@ -332,6 +332,26 @@ func TestActiveNativeRunIDForRunStartDeduplicatesRedelivery(t *testing.T) {
 	}
 }
 
+func TestActiveRunConflictRejectsDifferentActiveRun(t *testing.T) {
+	binding := config.Binding{
+		ConnectionID: "conn-1",
+		PersonaID:    "persona-1",
+		ActiveRunID:  "run-1",
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	runner := Runner{Store: &store}
+
+	activeRunID, conflict := runner.activeRunConflict(binding, externalagentprotocol.Frame{RunID: "run-2"})
+	if !conflict || activeRunID != "run-1" {
+		t.Fatalf("expected active run conflict, got conflict=%t active=%q", conflict, activeRunID)
+	}
+
+	activeRunID, conflict = runner.activeRunConflict(binding, externalagentprotocol.Frame{RunID: "run-1"})
+	if conflict || activeRunID != "" {
+		t.Fatalf("did not expect same-run conflict, got conflict=%t active=%q", conflict, activeRunID)
+	}
+}
+
 func TestCommandFrameCacheReplaysRepliesAndSuppressesSideEffects(t *testing.T) {
 	cache := newCommandFrameCache()
 	request := externalagentprotocol.Frame{

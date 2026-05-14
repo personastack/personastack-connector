@@ -171,6 +171,14 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
+			if activeRunID, conflict := r.activeRunConflict(binding, frame); conflict {
+				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external persona already has active run "+activeRunID)
+				commandCache.storeReply(frame, failed)
+				if writeErr := writeFrame(failed); writeErr != nil {
+					return fmt.Errorf("write active run conflict: %w", writeErr)
+				}
+				continue
+			}
 			if readiness := r.bindingReadiness(adapter, binding); !canStartRunWithReadiness(readiness.State) {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
 				commandCache.storeReply(frame, failed)
@@ -334,6 +342,24 @@ func (r Runner) activeNativeRunIDForRunStart(binding config.Binding, frame exter
 		return "", false
 	}
 	return nativeRunID, true
+}
+
+func (r Runner) activeRunConflict(binding config.Binding, frame externalagentprotocol.Frame) (string, bool) {
+	if r.Store == nil {
+		return "", false
+	}
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok {
+		return "", false
+	}
+	activeRunID := strings.TrimSpace(latest.ActiveRunID)
+	if activeRunID == "" {
+		return "", false
+	}
+	if activeRunID == strings.TrimSpace(frame.RunID) {
+		return "", false
+	}
+	return activeRunID, true
 }
 
 func (r Runner) revokeBinding(binding config.Binding, adapter runtime.Adapter, reason string) error {
