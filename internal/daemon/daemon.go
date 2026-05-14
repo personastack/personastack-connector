@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -22,8 +23,19 @@ func (r Runner) RunForeground(ctx context.Context) error {
 	if len(bindings) == 0 {
 		return fmt.Errorf("no paired bindings")
 	}
+	errs := make(chan error, len(bindings))
+	var wg sync.WaitGroup
 	for _, binding := range bindings {
-		if err := r.runBinding(ctx, binding); err != nil {
+		wg.Add(1)
+		go func(binding config.Binding) {
+			defer wg.Done()
+			errs <- r.runBinding(ctx, binding)
+		}(binding)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
 			return err
 		}
 	}
@@ -59,11 +71,12 @@ func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
 	if accepted.MessageType != externalagentprotocol.FrameTypeConnectAccepted {
 		return fmt.Errorf("connector rejected: %s", accepted.MessageType)
 	}
-	heartbeat := session.HeartbeatFrame(runtime.AdapterStateRuntimeMissing, nil)
+	adapter := runtime.NewAdapter(binding.RuntimeKind)
+	detection := adapter.Detect()
+	heartbeat := session.HeartbeatFrame(detection.State, nil)
 	if err := conn.WriteJSON(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
-	adapter := runtime.NewAdapter(binding.RuntimeKind)
 	for {
 		var frame externalagentprotocol.Frame
 		if err := conn.ReadJSON(&frame); err != nil {
