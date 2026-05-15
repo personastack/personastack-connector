@@ -10,6 +10,8 @@ external persona.
 
 - Pair a local machine to one or more API-owned external persona bindings.
 - Open authenticated outbound websocket sessions to `agent-gateway`.
+- Negotiate a bounded Connector websocket protocol version with `agent-gateway`
+  and reject connect responses that advertise an unsupported version.
 - Report runtime health, MCP configuration state, Connector version, connection
   generation, native MCP server/tool naming metadata, and wake probe results.
 - Receive API-composed run assignments from `agent-gateway`.
@@ -55,6 +57,18 @@ external persona.
   commands are not re-applied.
 - Native runtime run ids are local correlation values and are not PersonaStack
   run authority.
+- A new websocket session must advance the stored connection generation so
+  reconnects use a fresh owner generation without inventing a second binding.
+- If the Connector reconnects while a run is still locally active, it must
+  replay the accepted and started state for that run before waiting for the
+  next dispatch.
+- A draining `server.draining` hint should start an overlapped replacement
+  websocket attempt before the old websocket closes when possible, and the old
+  websocket must stay usable until the drain deadline expires or the
+  replacement is established.
+- Connection status should stay wakeable through a short owner-transfer grace
+  window while the old owner remains connected or the replacement owner has
+  authenticated but not yet completed wakeability probes.
 - A `token.revoked` bridge frame deletes the local binding, clears OS credential
   storage for bridge/MCP/active-run secrets, best-effort cancels the active
   native run when one is journaled, and stops reconnecting that binding.
@@ -82,7 +96,9 @@ runtime setup as usable.
 
 The V1 Connector does not expose a local HTTP UI/control listener. CLI control
 is local process execution and native MCP uses stdio; any future local control
-server must bind loopback only.
+server must bind loopback only. If a tray/menu surface is added, it is only an
+optional convenience mirror for status, repair, logs, and pairing, and it must
+not be required for headless Linux.
 
 ## Runtime Adapters
 
@@ -195,6 +211,9 @@ Adapter result states must be concrete typed enums, including:
   `.deb` and `.rpm` packages, publish checksum/SBOM artifacts to a draft GitHub
   Release, upload a machine-readable release manifest plus manifest checksum,
   and emit GitHub provenance attestations for `dist/*`.
+- Tagged releases also publish cosign-bundled signatures for the checksum file
+  and the release manifest, so install guidance can verify the manifest bundle
+  before it recommends any download command.
 - The binary must expose `personastack-connector version` so install flows and
   support diagnostics can verify the downloaded artifact.
 - V1 signed distribution channels are GitHub Release archives for macOS,
@@ -206,8 +225,8 @@ Adapter result states must be concrete typed enums, including:
 - Linux service installation prefers `systemd --user` and falls back to an XDG
   autostart desktop entry when user systemd is unavailable.
 - iOS and Android are not Connector host targets in V1.
-- Release artifacts must be signed or checksummed before appearing in default
-  setup UX.
+- Default setup must verify the signed release manifest and checksum bundle
+  before it recommends an install command.
 - Release workflow validation must check repo tag/environment protection policy
   through GitHub CLI metadata when available and fail closed when the release
   environment lacks required reviewers.

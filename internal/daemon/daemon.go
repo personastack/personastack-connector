@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/bridge"
@@ -22,6 +25,8 @@ type Runner struct {
 	ReconnectMin time.Duration
 	ReconnectMax time.Duration
 }
+
+var errConnectorDraining = errors.New("connector draining")
 
 func (r Runner) RunForeground(ctx context.Context) error {
 	bindings := r.Store.ListBindings()
@@ -48,29 +53,52 @@ func (r Runner) RunForeground(ctx context.Context) error {
 }
 
 func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
+	return r.runBindingLoop(ctx, binding, false)
+}
+
+func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding, freshGeneration bool) error {
 	connectionID := binding.ConnectionID
 	backoff := r.reconnectMin()
+	firstAttempt := true
 	for {
 		latest, ok := r.Store.Binding(connectionID)
 		if !ok {
 			return nil
 		}
-		credential, err := bridge.CredentialFromBinding(latest)
+		current := latest
+		if freshGeneration || !firstAttempt {
+			current.ConnectionGeneration++
+			if current.ConnectionGeneration <= 0 {
+				current.ConnectionGeneration = 1
+			}
+			writable, ok := r.Store.(config.WritableStore)
+			if !ok {
+				return fmt.Errorf("writable connector store required")
+			}
+			if err := writable.SaveBinding(current); err != nil {
+				return err
+			}
+		}
+		firstAttempt = false
+		credential, err := bridge.CredentialFromBinding(current)
 		if err != nil {
 			return err
 		}
-		session, err := bridge.NewSession(latest, credential)
+		session, err := bridge.NewSession(current, credential)
 		if err != nil {
 			return err
 		}
-		err = r.runBindingSession(ctx, latest, session)
+		err = r.runBindingSession(ctx, current, session)
 		if ctx.Err() != nil {
+			return nil
+		}
+		if errors.Is(err, errConnectorDraining) {
 			return nil
 		}
 		if err == nil {
 			backoff = r.reconnectMin()
 		}
-		timer := time.NewTimer(backoff)
+		timer := time.NewTimer(jitterDuration(backoff))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -108,11 +136,21 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	if accepted.MessageType != externalagentprotocol.FrameTypeConnectAccepted {
 		return fmt.Errorf("connector rejected: %s", accepted.MessageType)
 	}
+	if accepted.ConnectAccepted == nil {
+		return fmt.Errorf("connect response payload required")
+	}
+	if !externalagentprotocol.ProtocolVersionSupported(accepted.ConnectAccepted.ProtocolVersion) {
+		return fmt.Errorf("unsupported protocol version: %s", accepted.ConnectAccepted.ProtocolVersion)
+	}
 	adapter := r.adapterForBinding(binding)
 	detection := r.bindingReadiness(adapter, binding)
-	heartbeat := session.HeartbeatFrame(detection.State, nil)
+	_ = r.recordHeartbeat(binding.ConnectionID, r.now())
+	heartbeat := session.HeartbeatFrame(detection.State, r.lastWakeProbeAt(binding.ConnectionID))
 	if err := writeFrame(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
+	}
+	if err := r.replayActiveRun(binding, session, writeFrame); err != nil {
+		return err
 	}
 	heartbeatStop := make(chan struct{})
 	defer close(heartbeatStop)
@@ -124,18 +162,47 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			case <-heartbeatStop:
 				return
 			case <-ticker.C:
+				_ = r.recordHeartbeat(binding.ConnectionID, r.now())
 				state := r.bindingReadiness(adapter, binding).State
-				_ = writeFrame(session.HeartbeatFrame(state, nil))
+				_ = writeFrame(session.HeartbeatFrame(state, r.lastWakeProbeAt(binding.ConnectionID)))
 			}
 		}
 	}()
+	draining := false
+	drainOnce := sync.Once{}
 	commandCache := newCommandFrameCache()
 	for {
 		var frame externalagentprotocol.Frame
 		if err := conn.ReadJSON(&frame); err != nil {
+			if draining {
+				return errConnectorDraining
+			}
 			return nil
 		}
 		switch frame.MessageType {
+		case externalagentprotocol.FrameTypeServerDraining:
+			if frame.ServerDraining == nil {
+				continue
+			}
+			draining = true
+			drainOnce.Do(func() {
+				go func() {
+					_ = r.runBindingLoop(ctx, binding, true)
+				}()
+			})
+			if deadline := frame.ServerDraining.DeadlineAt; !deadline.IsZero() {
+				go func(deadline time.Time) {
+					timer := time.NewTimer(time.Until(deadline))
+					defer timer.Stop()
+					select {
+					case <-ctx.Done():
+						return
+					case <-timer.C:
+						_ = conn.Close()
+					}
+				}(deadline.UTC())
+			}
+			continue
 		case externalagentprotocol.FrameTypeWakeProbe:
 			if frame.WakeProbe == nil {
 				continue
@@ -146,6 +213,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
+			_ = r.recordWakeProbe(binding.ConnectionID, r.now())
 			accepted := session.WakeProbeAcceptedFrame(frame.WakeProbe.ProbeID)
 			commandCache.storeReply(frame, accepted)
 			if err := writeFrame(accepted); err != nil {
@@ -314,6 +382,13 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	}
 }
 
+func (r Runner) now() time.Time {
+	if r.Now != nil {
+		return r.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 type commandFrameCache struct {
 	replies map[string]externalagentprotocol.Frame
 	seenIDs map[string]struct{}
@@ -421,6 +496,33 @@ func (r Runner) activeRunConflict(binding config.Binding, frame externalagentpro
 	return activeRunID, true
 }
 
+func (r Runner) replayActiveRun(binding config.Binding, session bridge.Session, writeFrame func(externalagentprotocol.Frame) error) error {
+	if r.Store == nil {
+		return nil
+	}
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(latest.ActiveRunID) == "" || strings.TrimSpace(latest.ActiveAssignmentID) == "" || strings.TrimSpace(latest.ActiveNativeRunID) == "" {
+		return nil
+	}
+	accepted := session.RunAcceptedFrame(externalagentprotocol.Frame{
+		MessageID:    uuid.NewString(),
+		RunID:        latest.ActiveRunID,
+		AssignmentID: latest.ActiveAssignmentID,
+	}, latest.ActiveNativeRunID)
+	if err := writeFrame(accepted); err != nil {
+		return err
+	}
+	started := session.RunStartedFrame(externalagentprotocol.Frame{
+		MessageID:    uuid.NewString(),
+		RunID:        latest.ActiveRunID,
+		AssignmentID: latest.ActiveAssignmentID,
+	}, latest.ActiveNativeRunID, time.Time{})
+	return writeFrame(started)
+}
+
 func (r Runner) revokeBinding(binding config.Binding, adapter runtime.Adapter, reason string) error {
 	latest, ok := r.Store.Binding(binding.ConnectionID)
 	if ok && strings.TrimSpace(latest.ActiveNativeRunID) != "" {
@@ -487,6 +589,41 @@ func (r Runner) clearRunMCPToken(binding config.Binding, runID string) error {
 	latest.ActiveRunMCPToken = ""
 	latest.HasActiveRunMCPToken = false
 	return writable.SaveBinding(latest)
+}
+
+func (r Runner) recordHeartbeat(connectionID config.ConnectionID, at time.Time) error {
+	writable, ok := r.Store.(config.WritableStore)
+	if !ok {
+		return nil
+	}
+	latest, ok := r.Store.Binding(connectionID)
+	if !ok {
+		return nil
+	}
+	latest.LastHeartbeatAt = at.UTC()
+	return writable.SaveBinding(latest)
+}
+
+func (r Runner) recordWakeProbe(connectionID config.ConnectionID, at time.Time) error {
+	writable, ok := r.Store.(config.WritableStore)
+	if !ok {
+		return nil
+	}
+	latest, ok := r.Store.Binding(connectionID)
+	if !ok {
+		return nil
+	}
+	latest.LastWakeProbeAt = at.UTC()
+	return writable.SaveBinding(latest)
+}
+
+func (r Runner) lastWakeProbeAt(connectionID config.ConnectionID) *time.Time {
+	latest, ok := r.Store.Binding(connectionID)
+	if !ok || latest.LastWakeProbeAt.IsZero() {
+		return nil
+	}
+	value := latest.LastWakeProbeAt.UTC()
+	return &value
 }
 
 func (r Runner) nativeRunIDForCancel(binding config.Binding, runID string) (string, error) {
@@ -587,4 +724,18 @@ func minDuration(a time.Duration, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+func jitterDuration(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	if base < 100*time.Millisecond {
+		return base
+	}
+	half := base / 2
+	if half <= 0 {
+		return base
+	}
+	return half + time.Duration(rand.Int63n(int64(base-half)+1))
 }

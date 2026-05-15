@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
+	"github.com/personastack/personastack-connector/internal/bridge"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/runtime"
@@ -91,7 +92,10 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
 		RuntimeKind:          runtime.AdapterKindHermes,
 	}
-	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	store := config.NewFileStore(t.TempDir() + "/state.json")
+	if err := store.SaveBinding(binding); err != nil {
+		t.Fatalf("save binding: %v", err)
+	}
 	if err := (Runner{Store: store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx); err != nil {
 		t.Fatalf("run foreground: %v", err)
 	}
@@ -106,7 +110,8 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	connectionCount := make(chan struct{}, 2)
+	heartbeatCount := make(chan externalagentprotocol.Frame, 2)
+	wakeProbeCount := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -139,7 +144,32 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 		if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat {
 			t.Fatalf("unexpected heartbeat: %+v", heartbeat)
 		}
-		connectionCount <- struct{}{}
+		if heartbeat.Heartbeat == nil {
+			t.Fatalf("missing heartbeat payload: %+v", heartbeat)
+		}
+		if heartbeat.Heartbeat.ConnectionStatus != externalagentprotocol.ConnectionStatusBridgeConnected {
+			t.Fatalf("expected connected heartbeat, got %+v", heartbeat.Heartbeat)
+		}
+		heartbeatCount <- heartbeat
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "probe-msg-1",
+			MessageType:  externalagentprotocol.FrameTypeWakeProbe,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now(),
+			WakeProbe: &externalagentprotocol.WakeProbePayload{
+				ProbeID:    "probe-1",
+				DeadlineAt: time.Now().Add(time.Second),
+			},
+		})
+		var wakeAck externalagentprotocol.Frame
+		if err := conn.ReadJSON(&wakeAck); err != nil {
+			t.Fatalf("read wake ack: %v", err)
+		}
+		if wakeAck.MessageType != externalagentprotocol.FrameTypeWakeProbeAccepted {
+			t.Fatalf("unexpected wake ack: %+v", wakeAck)
+		}
+		wakeProbeCount <- wakeAck.MessageID
 	}))
 	defer server.Close()
 
@@ -152,7 +182,10 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 		BridgeCredentialID:   "cred-1",
 		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
 		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
+		NativeMCPServer:      "personastack-conn-1",
+		NativeMCPNamespace:   "personastack",
 		RuntimeKind:          runtime.AdapterKindHermes,
+		ReadinessState:       runtime.AdapterStateReady,
 	}}})
 	if err != nil {
 		t.Fatalf("encode state: %v", err)
@@ -169,7 +202,13 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 			errCh <- (Runner{Store: config.NewFileStore(path), ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx)
 		}()
 		select {
-		case <-connectionCount:
+		case <-heartbeatCount:
+			select {
+			case <-wakeProbeCount:
+			case <-time.After(2 * time.Second):
+				cancel()
+				t.Fatalf("timeout waiting for wake probe ack on restart %d", i+1)
+			}
 			cancel()
 		case <-time.After(2 * time.Second):
 			cancel()
@@ -770,6 +809,223 @@ func TestActiveNativeRunIDForRunStartDeduplicatesRedelivery(t *testing.T) {
 	nativeRunID, ok = runner.activeNativeRunIDForRunStart(binding, frame)
 	if ok || nativeRunID != "" {
 		t.Fatalf("unexpected match for different assignment, got ok=%t native=%q", ok, nativeRunID)
+	}
+}
+
+func TestRunnerReplaysActiveRunOnReconnect(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session, err := bridge.NewSession(config.Binding{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		RuntimeKind:          runtime.AdapterKindHermes,
+		NativeMCPServer:      "personastack-conn-1",
+		NativeMCPNamespace:   "personastack",
+		ConnectionGeneration: 2,
+	}, bridge.Credential{
+		ID:         "cred-1",
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+	})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ActiveRunID:          "run-1",
+		ActiveAssignmentID:   "assignment-1",
+		ActiveNativeRunID:    "native-1",
+		ConnectionGeneration: 2,
+	}}})
+	runner := Runner{Store: &store}
+	frames := make([]externalagentprotocol.Frame, 0, 2)
+	if err := runner.replayActiveRun(config.Binding{ConnectionID: "conn-1"}, session, func(frame externalagentprotocol.Frame) error {
+		frames = append(frames, frame)
+		return nil
+	}); err != nil {
+		t.Fatalf("replay active run: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("unexpected replay frames: %+v", frames)
+	}
+	if frames[0].MessageType != externalagentprotocol.FrameTypeRunAccepted || frames[0].RunAccepted == nil || frames[0].RunAccepted.NativeRunID != "native-1" {
+		t.Fatalf("unexpected accepted replay: %+v", frames[0])
+	}
+	if frames[1].MessageType != externalagentprotocol.FrameTypeRunStarted || frames[1].RunStarted == nil || frames[1].RunStarted.NativeRunID != "native-1" {
+		t.Fatalf("unexpected started replay: %+v", frames[1])
+	}
+}
+
+func TestRunnerReconnectsWithFreshGenerationAfterDrainHint(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("HERMES_API_SERVER_KEY", "hermes-key-1")
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+
+	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer mcp-token-1" {
+			t.Fatalf("unexpected mcp authorization: %q", got)
+		}
+		var request struct {
+			Method string `json:"method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode mcp request: %v", err)
+		}
+		switch request.Method {
+		case "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"personastack-connector","version":"test"}}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+		case "tools/list":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`))
+		default:
+			t.Fatalf("unexpected mcp method: %s", request.Method)
+		}
+	}))
+	defer mcpServer.Close()
+
+	err = os.MkdirAll(filepath.Join(homeDir, ".hermes"), 0o700)
+	if err != nil {
+		t.Fatalf("create hermes config dir: %v", err)
+	}
+	err = os.WriteFile(filepath.Join(homeDir, ".hermes", "config.yaml"), []byte(
+		"mcp_servers:\n"+
+			"  personastack-conn-1:\n"+
+			"    command: /opt/personastack-connector\n"+
+			"    args:\n"+
+			"      - mcp\n"+
+			"      - stdio\n"+
+			"      - --binding\n"+
+			"      - conn-1\n",
+	), 0o600)
+	if err != nil {
+		t.Fatalf("write hermes config: %v", err)
+	}
+
+	hermesServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/health/detailed", "/v1/models":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/v1/capabilities":
+			_, _ = w.Write([]byte(`{"features":{"run_submission":true,"run_status":true,"run_events_sse":true,"run_stop":true}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer hermesServer.Close()
+	t.Setenv("PERSONASTACK_CONNECTOR_HERMES_URL", hermesServer.URL)
+
+	connectGenerations := make(chan int64, 2)
+	firstHandshakeDone := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		if connectFrame.MessageType != externalagentprotocol.FrameTypeConnect {
+			t.Fatalf("unexpected connect frame: %+v", connectFrame)
+		}
+		connectGenerations <- connectFrame.Connect.ConnectionGeneration
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		}); err != nil {
+			t.Fatalf("write connect accepted: %v", err)
+		}
+
+		var heartbeat externalagentprotocol.Frame
+		if err := conn.ReadJSON(&heartbeat); err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat || heartbeat.Heartbeat == nil {
+			t.Fatalf("unexpected heartbeat: %+v", heartbeat)
+		}
+		if connectFrame.Connect.ConnectionGeneration == 1 {
+			firstHandshakeDone <- struct{}{}
+			if err := conn.WriteJSON(externalagentprotocol.Frame{
+				MessageType:  externalagentprotocol.FrameTypeServerDraining,
+				PersonaID:    "persona-1",
+				ConnectionID: "conn-1",
+				SentAt:       time.Now().UTC(),
+				ServerDraining: &externalagentprotocol.ServerDrainingPayload{
+					DeadlineAt: time.Now().UTC().Add(500 * time.Millisecond),
+					Reason:     "agent-gateway draining",
+				},
+			}); err != nil {
+				t.Fatalf("write draining hint: %v", err)
+			}
+			time.Sleep(75 * time.Millisecond)
+			return
+		}
+		cancel()
+	}))
+	defer gateway.Close()
+
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ConnectionGeneration: 1,
+		GatewayWebsocketURL:  "ws" + gateway.URL[len("http"):],
+		BridgeCredentialID:   "cred-1",
+		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
+		NativeMCPServer:      "personastack-conn-1",
+		NativeMCPNamespace:   "personastack",
+		PersonaMCPURL:        mcpServer.URL,
+		PersonaMCPToken:      "mcp-token-1",
+		RuntimeKind:          runtime.AdapterKindHermes,
+		HasBridgeSecret:      true,
+		HasPersonaMCPToken:   true,
+	}}})
+	keyring.MockInit()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx)
+	}()
+	select {
+	case <-firstHandshakeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for drain handshake")
+	}
+	firstGeneration := <-connectGenerations
+	secondGeneration := <-connectGenerations
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run foreground: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+	if firstGeneration != 1 || secondGeneration != 2 {
+		t.Fatalf("unexpected reconnect generations: first=%d second=%d", firstGeneration, secondGeneration)
 	}
 }
 

@@ -70,15 +70,17 @@ func NewSession(binding config.Binding, credential Credential) (Session, error) 
 
 func (s Session) ConnectFrame(nonce string) (externalagentprotocol.Frame, error) {
 	now := s.now()
+	protocolVersions := externalagentprotocol.SupportedProtocolVersions()
 	connect := externalagentprotocol.ConnectPayload{
-		ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
-		ConnectorVersion:     buildinfo.VersionString(),
-		RuntimeKind:          runtimeKindForAdapter(s.Binding.RuntimeKind),
-		ConnectionGeneration: s.Binding.ConnectionGeneration,
-		DevicePublicKey:      base64.StdEncoding.EncodeToString(s.Credential.PublicKey),
-		CredentialID:         strings.TrimSpace(s.Credential.ID),
-		CredentialProofNonce: strings.TrimSpace(nonce),
-		CredentialProofUnix:  now.Unix(),
+		ProtocolVersion:           protocolVersions[0],
+		SupportedProtocolVersions: protocolVersions,
+		ConnectorVersion:          buildinfo.VersionString(),
+		RuntimeKind:               runtimeKindForAdapter(s.Binding.RuntimeKind),
+		ConnectionGeneration:      s.Binding.ConnectionGeneration,
+		DevicePublicKey:           base64.StdEncoding.EncodeToString(s.Credential.PublicKey),
+		CredentialID:              strings.TrimSpace(s.Credential.ID),
+		CredentialProofNonce:      strings.TrimSpace(nonce),
+		CredentialProofUnix:       now.Unix(),
 	}
 	frame := s.baseFrame(externalagentprotocol.FrameTypeConnect, now)
 	frame.Connect = &connect
