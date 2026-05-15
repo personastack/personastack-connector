@@ -143,6 +143,36 @@ func TestInstallerWritesLaunchAgent(t *testing.T) {
 	}
 }
 
+func TestInstallerWritesWindowsScheduledTask(t *testing.T) {
+	homeDir := t.TempDir()
+	runner := &recordingRunner{}
+	result, err := (Installer{
+		HomeDir:        homeDir,
+		ExecutablePath: `C:\Program Files\PersonaStack\personastack-connector.exe`,
+		GOOS:           "windows",
+		Runner:         runner,
+	}).Install()
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	if result.Kind != "windows-scheduled-task" {
+		t.Fatalf("kind = %q", result.Kind)
+	}
+	raw, err := os.ReadFile(filepath.Join(homeDir, "AppData", "Local", "PersonaStack", "Connector", "install-task.ps1"))
+	if err != nil {
+		t.Fatalf("read task script: %v", err)
+	}
+	if !strings.Contains(string(raw), `Register-ScheduledTask -TaskName "PersonaStack Connector"`) {
+		t.Fatalf("unexpected task script:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), `-RestartCount 999`) || !strings.Contains(string(raw), `Start-ScheduledTask -TaskName "PersonaStack Connector"`) {
+		t.Fatalf("missing restart persistence in task script:\n%s", raw)
+	}
+	if len(runner.commands) != 1 || !strings.Contains(runner.commands[0], "powershell.exe -NoProfile -ExecutionPolicy Bypass -File") {
+		t.Fatalf("unexpected commands: %+v", runner.commands)
+	}
+}
+
 func TestEnsureShimWritesStableUserExecutable(t *testing.T) {
 	homeDir := t.TempDir()
 	result, err := EnsureShim(homeDir, "/opt/PersonaStack Connector/personastack-connector", "linux")

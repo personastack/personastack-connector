@@ -57,6 +57,32 @@ func TestOpenClawAdapterDetectRequiresGatewayFeatures(t *testing.T) {
 	}
 }
 
+func TestOpenClawAdapterRejectsUnsupportedProtocolVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(openClawResponse{Type: "connect.challenge"})
+		var connect openClawRequest
+		if err := conn.ReadJSON(&connect); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{Type: "hello-ok", Result: json.RawMessage(`{"protocol":2,"role":"operator","scopes":["operator.read","operator.write"],"features":{"methods":["health","status","agents.list","agent","agent.wait","sessions.abort"]}}`)})
+	}))
+	defer server.Close()
+
+	detection := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").Detect()
+	if detection.State != AdapterStateCapabilityMissing {
+		t.Fatalf("expected capability missing, got %+v", detection)
+	}
+	if !strings.Contains(detection.Note, "unsupported") {
+		t.Fatalf("unexpected note: %q", detection.Note)
+	}
+}
+
 func TestOpenClawAdapterDetectRejectsMissingFeature(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -651,6 +677,55 @@ func TestOpenClawAdapterAcceptsResHelloPayload(t *testing.T) {
 	detection := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").Detect()
 	if detection.State != AdapterStateReady {
 		t.Fatalf("expected ready, got %+v", detection)
+	}
+}
+
+func TestOpenClawAdapterVerifyMCPCatalogUsesLiveCatalogNames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read tools.catalog: %v", err)
+		}
+		if request.Method != "tools.catalog" {
+			t.Fatalf("expected tools.catalog, got %+v", request)
+		}
+		params, ok := request.Params.(map[string]any)
+		if !ok || params["includePlugins"] != true {
+			t.Fatalf("unexpected tools.catalog params: %+v", request.Params)
+		}
+		_ = conn.WriteJSON(openClawResponse{
+			ID: request.ID,
+			Result: json.RawMessage(`{
+  "agentId":"agent-1",
+  "groups":[
+    {
+      "id":"plugin:personastack-conn-1",
+      "label":"personastack-conn-1",
+      "source":"plugin",
+      "pluginId":"personastack-conn-1",
+      "tools":[
+        {"id":"calendar","label":"Calendar","source":"plugin","pluginId":"personastack-conn-1"}
+      ]
+    }
+  ]
+}`),
+		})
+	}))
+	defer server.Close()
+
+	result := NewOpenClawAdapterWithAuth("ws"+server.URL[len("http"):], OpenClawAuth{Token: "token-1"}, "agent-1").VerifyMCPCatalog(context.Background(), "personastack-conn-1")
+	if !result.OK {
+		t.Fatalf("expected catalog verification to pass: %+v", result)
+	}
+	if !strings.Contains(result.Note, "effective tool catalog visible") {
+		t.Fatalf("unexpected note: %q", result.Note)
 	}
 }
 

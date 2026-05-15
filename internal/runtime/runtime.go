@@ -94,8 +94,6 @@ type Detection struct {
 type Adapter interface {
 	Kind() AdapterKind
 	Detect() Detection
-	ConfigureMCP(bindingID string) error
-	VerifyMCP(bindingID string) (AdapterState, error)
 	StartRun(RunRequest) (string, error)
 	StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error)
 	CancelRun(nativeRunID string) error
@@ -234,14 +232,6 @@ func (adapter PlaceholderAdapter) Detect() Detection {
 		State: AdapterStateRuntimeMissing,
 		Note:  "runtime networking is not implemented in this scaffold",
 	}
-}
-
-func (adapter PlaceholderAdapter) ConfigureMCP(bindingID string) error {
-	return fmt.Errorf("%s MCP configuration is not implemented", adapter.kind)
-}
-
-func (adapter PlaceholderAdapter) VerifyMCP(bindingID string) (AdapterState, error) {
-	return AdapterStateMCPConfigMissing, fmt.Errorf("%s MCP verification is not implemented", adapter.kind)
 }
 
 func (adapter PlaceholderAdapter) StartRun(RunRequest) (string, error) {

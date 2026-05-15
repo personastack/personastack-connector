@@ -15,3 +15,8 @@ stream EOF.
 Live verification performs an MCP initialize, initialized notification, and
 tools/list call with the binding credential before daemon heartbeats report MCP
 as verified.
+
+Verification also accepts loopback `streamable-http` server definitions when a
+native runtime is configured that way, but the default install path remains
+stdio. When stdio is unavailable, the installer can fall back to a loopback
+HTTP proxy entry with an owner-only local token/config.

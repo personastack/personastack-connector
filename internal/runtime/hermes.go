@@ -21,6 +21,10 @@ import (
 const defaultHermesURL = "http://127.0.0.1:8642"
 const defaultHermesCancelWait = 15 * time.Second
 const hermesResponsesRunPrefix = "responses:"
+const hermesRequiredRunSubmissionFeature = "run_submission"
+const hermesRequiredRunStatusFeature = "run_status"
+const hermesDegradedRunEventsSSEFeature = "run_events_sse"
+const hermesDegradedRunStopFeature = "run_stop"
 
 type HermesAdapter struct {
 	BaseURL string
@@ -87,7 +91,7 @@ func (adapter HermesAdapter) Detect() Detection {
 	}
 	degraded := capabilities.degradedFallbackFeatures()
 	if len(degraded) > 0 {
-		return Detection{Kind: AdapterKindHermes, State: AdapterStateReady, Note: "Hermes API ready with degraded fallback: " + strings.Join(degraded, ",") + " missing"}
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateReady, Note: fmt.Sprintf("Hermes API ready with degraded fallback: supports_streaming=%t supports_cancel=%t", capabilities.Features.RunEventsSSE, capabilities.Features.RunStop)}
 	}
 	return Detection{Kind: AdapterKindHermes, State: AdapterStateReady, Note: "Hermes API ready"}
 }
@@ -107,20 +111,6 @@ func (adapter HermesAdapter) probeOptionalAuthenticatedEndpoint(path string) (De
 		return Detection{Kind: AdapterKindHermes, State: AdapterStateAuthMissing, Note: "Hermes API key rejected"}, true
 	}
 	return Detection{}, false
-}
-
-func (adapter HermesAdapter) ConfigureMCP(bindingID string) error {
-	if strings.TrimSpace(bindingID) == "" {
-		return fmt.Errorf("binding id required")
-	}
-	return fmt.Errorf("Hermes MCP config edit is not implemented")
-}
-
-func (adapter HermesAdapter) VerifyMCP(bindingID string) (AdapterState, error) {
-	if strings.TrimSpace(bindingID) == "" {
-		return AdapterStateMCPConfigMissing, fmt.Errorf("binding id required")
-	}
-	return AdapterStateMCPConfigMissing, fmt.Errorf("Hermes MCP verification is not implemented")
 }
 
 func (adapter HermesAdapter) StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error) {
@@ -847,10 +837,10 @@ func (response hermesResponseResponse) outputSummary() string {
 func (capabilities hermesCapabilities) missingRequiredFeatures() []string {
 	missing := []string{}
 	if !capabilities.Features.RunSubmission {
-		missing = append(missing, "run_submission")
+		missing = append(missing, hermesRequiredRunSubmissionFeature)
 	}
 	if !capabilities.Features.RunStatus {
-		missing = append(missing, "run_status")
+		missing = append(missing, hermesRequiredRunStatusFeature)
 	}
 	return missing
 }
@@ -858,10 +848,10 @@ func (capabilities hermesCapabilities) missingRequiredFeatures() []string {
 func (capabilities hermesCapabilities) degradedFallbackFeatures() []string {
 	missing := []string{}
 	if !capabilities.Features.RunEventsSSE {
-		missing = append(missing, "run_events_sse")
+		missing = append(missing, hermesDegradedRunEventsSSEFeature)
 	}
 	if !capabilities.Features.RunStop {
-		missing = append(missing, "run_stop")
+		missing = append(missing, hermesDegradedRunStopFeature)
 	}
 	return missing
 }

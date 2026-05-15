@@ -6,6 +6,11 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq is required for release policy checks" >&2
+  exit 1
+fi
+
 repo="${GITHUB_REPOSITORY:-personastack/personastack-connector}"
 
 rulesets_json="$(gh api "repos/${repo}/rulesets" 2>/dev/null || true)"
@@ -14,13 +19,26 @@ if [[ -z "${rulesets_json}" ]]; then
   exit 1
 fi
 
-tag_rule_count="$(jq '[.[]? | select(.target == "tag")] | length' <<<"${rulesets_json}")"
+tag_rule_count="$(jq '[.[]? | select(.target == "tag" and (.enforcement // "") == "active")] | length' <<<"${rulesets_json}")"
 if [[ "${tag_rule_count}" -lt 1 ]]; then
-  echo "release tag ruleset missing" >&2
+  echo "active release tag ruleset missing" >&2
   exit 1
 fi
 
-if ! jq -e '.[]? | select(.target == "tag") | tostring | contains("v*")' >/dev/null <<<"${rulesets_json}"; then
+tag_ruleset_ids="$(jq -r '.[]? | select(.target == "tag" and (.enforcement // "") == "active") | .id' <<<"${rulesets_json}")"
+tag_ruleset_covers_release_tags=0
+while IFS= read -r ruleset_id; do
+  if [[ -z "${ruleset_id}" ]]; then
+    continue
+  fi
+  ruleset_json="$(gh api "repos/${repo}/rulesets/${ruleset_id}" 2>/dev/null || true)"
+  if jq -e '((.conditions.ref_name.include // []) | (index("v*") != null or index("refs/tags/v*") != null))' >/dev/null <<<"${ruleset_json}"; then
+    tag_ruleset_covers_release_tags=1
+    break
+  fi
+done <<<"${tag_ruleset_ids}"
+
+if [[ "${tag_ruleset_covers_release_tags}" -ne 1 ]]; then
   echo "release tag ruleset does not cover v* tags" >&2
   exit 1
 fi
@@ -31,7 +49,7 @@ if [[ -z "${environment_json}" ]]; then
   exit 1
 fi
 
-reviewer_count="$(jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length' <<<"${environment_json}")"
+reviewer_count="$(jq '[.protection_rules[]? | select(.type == "required_reviewers" and ((.reviewers // []) | length > 0))] | length' <<<"${environment_json}")"
 if [[ "${reviewer_count}" -lt 1 ]]; then
   echo "release environment missing required reviewers" >&2
   exit 1

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
@@ -32,34 +33,40 @@ func (kind ExternalAgentKind) String() string {
 }
 
 type Binding struct {
-	ConnectionID         ConnectionID
-	PersonaID            PersonaID
-	ExternalAgentKind    ExternalAgentKind
-	ConnectionGeneration int64
-	GatewayWebsocketURL  string
-	BridgeCredentialID   string
-	BridgePrivateKey     string
-	BridgePublicKey      string
-	NativeMCPServer      string
-	NativeMCPNamespace   string
-	OpenClawAgentID      string
-	OpenClawGatewayToken string
-	OpenClawPassword     string
-	OpenClawDeviceToken  string
-	PersonaMCPURL        string
-	PersonaMCPToken      string
-	ActiveRunID          string
-	ActiveAssignmentID   string
-	ActiveNativeRunID    string
-	ActiveRunMCPToken    string
-	RuntimeKind          runtime.AdapterKind
-	ReadinessState       runtime.AdapterState
-	HasBridgeSecret      bool
-	HasOpenClawToken     bool
-	HasOpenClawPassword  bool
-	HasOpenClawDevice    bool
-	HasPersonaMCPToken   bool
-	HasActiveRunMCPToken bool
+	ConnectionID            ConnectionID
+	PersonaID               PersonaID
+	ExternalAgentKind       ExternalAgentKind
+	ConnectionGeneration    int64
+	GatewayWebsocketURL     string
+	BridgeCredentialID      string
+	BridgePrivateKey        string
+	BridgePublicKey         string
+	NativeMCPServer         string
+	NativeMCPNamespace      string
+	OpenClawAgentID         string
+	OpenClawGatewayToken    string
+	OpenClawPassword        string
+	OpenClawDeviceToken     string
+	PersonaMCPURL           string
+	PersonaMCPToken         string
+	LocalMCPProxyURL        string
+	LocalMCPProxyToken      string
+	ActiveRunID             string
+	ActiveAssignmentID      string
+	ActiveNativeRunID       string
+	ActiveRunMCPToken       string
+	LastHeartbeatAt         time.Time
+	LastWakeProbeAt         time.Time
+	LastWakeProbeGeneration int64
+	RuntimeKind             runtime.AdapterKind
+	ReadinessState          runtime.AdapterState
+	HasBridgeSecret         bool
+	HasOpenClawToken        bool
+	HasOpenClawPassword     bool
+	HasOpenClawDevice       bool
+	HasPersonaMCPToken      bool
+	HasLocalMCPProxyToken   bool
+	HasActiveRunMCPToken    bool
 }
 
 type State struct {

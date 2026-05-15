@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,67 @@ import (
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/zalando/go-keyring"
 )
+
+func TestRunnerFailsFastWhenLoopbackProxyCannotBind(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	binding := config.Binding{
+		ConnectionID:          "conn-1",
+		PersonaID:             "persona-1",
+		LocalMCPProxyURL:      "http://" + listener.Addr().String() + "/mcp/conn-1",
+		LocalMCPProxyToken:    "local-token",
+		HasLocalMCPProxyToken: true,
+		PersonaMCPURL:         "http://127.0.0.1:1/mcp",
+		PersonaMCPToken:       "persona-token",
+	}
+	err = (Runner{Store: config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})}).RunForeground(t.Context())
+	if err == nil {
+		t.Fatal("RunForeground() expected loopback bind error")
+	}
+}
+
+func TestRunnerConfigRefreshUsesLatestLoopbackProxyState(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	if err := os.MkdirAll(filepath.Join(homeDir, ".openclaw"), 0o700); err != nil {
+		t.Fatalf("mkdir openclaw: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", "config.json"), []byte("{invalid json"), 0o600); err != nil {
+		t.Fatalf("write invalid openclaw config: %v", err)
+	}
+	stale := config.Binding{
+		ConnectionID: "conn-1",
+		PersonaID:    "persona-1",
+		RuntimeKind:  runtime.AdapterKindOpenClaw,
+	}
+	latest := stale
+	latest.LocalMCPProxyURL = "http://127.0.0.1:23119/mcp/conn-1"
+	latest.LocalMCPProxyToken = "local-token"
+	latest.HasLocalMCPProxyToken = true
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{latest}})
+
+	err := (Runner{Store: &store}).refreshMCPConfig(stale)
+	if err != nil {
+		t.Fatalf("refreshMCPConfig() error = %v", err)
+	}
+	stored, ok := store.Binding("conn-1")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	if stored.LocalMCPProxyURL != latest.LocalMCPProxyURL || stored.LocalMCPProxyToken != latest.LocalMCPProxyToken {
+		t.Fatalf("loopback proxy changed: %+v", stored)
+	}
+	raw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "config.json"))
+	if err != nil {
+		t.Fatalf("read openclaw config: %v", err)
+	}
+	if !strings.Contains(string(raw), latest.LocalMCPProxyURL) {
+		t.Fatalf("refresh did not use latest loopback url:\n%s", string(raw))
+	}
+}
 
 func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -44,6 +107,9 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 		if connectFrame.MessageType != externalagentprotocol.FrameTypeConnect {
 			t.Fatalf("unexpected connect frame: %+v", connectFrame)
 		}
+		if connectFrame.Connect.ConnectionGeneration != 2 {
+			t.Fatalf("expected first session to advance generation to 2, got %+v", connectFrame.Connect)
+		}
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
 			PersonaID:    "persona-1",
@@ -51,7 +117,7 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 			SentAt:       time.Now(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
 				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
-				ConnectionGeneration: 1,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
 		})
@@ -60,37 +126,21 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 			t.Fatalf("read heartbeat: %v", err)
 		}
 		seenHeartbeat <- heartbeat
-		_ = conn.WriteJSON(externalagentprotocol.Frame{
-			MessageID:    "probe-msg-1",
-			MessageType:  externalagentprotocol.FrameTypeWakeProbe,
-			PersonaID:    "persona-1",
-			ConnectionID: "conn-1",
-			SentAt:       time.Now(),
-			WakeProbe: &externalagentprotocol.WakeProbePayload{
-				ProbeID:    "probe-1",
-				DeadlineAt: time.Now().Add(time.Second),
-			},
-		})
-		var wakeAck externalagentprotocol.Frame
-		if err := conn.ReadJSON(&wakeAck); err != nil {
-			t.Fatalf("read wake ack: %v", err)
-		}
-		if wakeAck.MessageType != externalagentprotocol.FrameTypeWakeProbeAccepted {
-			t.Fatalf("unexpected wake ack: %+v", wakeAck)
-		}
 		cancel()
 	}))
 	defer server.Close()
 
 	binding := config.Binding{
-		ConnectionID:         "conn-1",
-		PersonaID:            "persona-1",
-		ConnectionGeneration: 1,
-		GatewayWebsocketURL:  "ws" + server.URL[len("http"):],
-		BridgeCredentialID:   "cred-1",
-		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
-		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
-		RuntimeKind:          runtime.AdapterKindHermes,
+		ConnectionID:            "conn-1",
+		PersonaID:               "persona-1",
+		ConnectionGeneration:    1,
+		GatewayWebsocketURL:     "ws" + server.URL[len("http"):],
+		BridgeCredentialID:      "cred-1",
+		BridgePrivateKey:        base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:         base64.StdEncoding.EncodeToString(publicKey),
+		LastWakeProbeAt:         time.Now().UTC().Add(-time.Minute),
+		LastWakeProbeGeneration: 1,
+		RuntimeKind:             runtime.AdapterKindHermes,
 	}
 	store := config.NewFileStore(t.TempDir() + "/state.json")
 	if err := store.SaveBinding(binding); err != nil {
@@ -103,6 +153,16 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 	if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat || heartbeat.ConnectionID != "conn-1" {
 		t.Fatalf("unexpected heartbeat: %+v", heartbeat)
 	}
+	if heartbeat.Heartbeat.ReadinessStatus == externalagentprotocol.ReadinessStatusWakeable {
+		t.Fatalf("heartbeat reused persisted wake probe before current-session probe: %+v", heartbeat.Heartbeat)
+	}
+	stored, ok := store.Binding("conn-1")
+	if !ok {
+		t.Fatal("binding missing after run")
+	}
+	if stored.ConnectionGeneration != 2 || stored.LastWakeProbeGeneration == stored.ConnectionGeneration {
+		t.Fatalf("expected first session generation to invalidate persisted wake probe: %+v", stored)
+	}
 }
 
 func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
@@ -111,7 +171,6 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 		t.Fatalf("generate key: %v", err)
 	}
 	heartbeatCount := make(chan externalagentprotocol.Frame, 2)
-	wakeProbeCount := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -151,25 +210,6 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 			t.Fatalf("expected connected heartbeat, got %+v", heartbeat.Heartbeat)
 		}
 		heartbeatCount <- heartbeat
-		_ = conn.WriteJSON(externalagentprotocol.Frame{
-			MessageID:    "probe-msg-1",
-			MessageType:  externalagentprotocol.FrameTypeWakeProbe,
-			PersonaID:    "persona-1",
-			ConnectionID: "conn-1",
-			SentAt:       time.Now(),
-			WakeProbe: &externalagentprotocol.WakeProbePayload{
-				ProbeID:    "probe-1",
-				DeadlineAt: time.Now().Add(time.Second),
-			},
-		})
-		var wakeAck externalagentprotocol.Frame
-		if err := conn.ReadJSON(&wakeAck); err != nil {
-			t.Fatalf("read wake ack: %v", err)
-		}
-		if wakeAck.MessageType != externalagentprotocol.FrameTypeWakeProbeAccepted {
-			t.Fatalf("unexpected wake ack: %+v", wakeAck)
-		}
-		wakeProbeCount <- wakeAck.MessageID
 	}))
 	defer server.Close()
 
@@ -203,12 +243,6 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 		}()
 		select {
 		case <-heartbeatCount:
-			select {
-			case <-wakeProbeCount:
-			case <-time.After(2 * time.Second):
-				cancel()
-				t.Fatalf("timeout waiting for wake probe ack on restart %d", i+1)
-			}
 			cancel()
 		case <-time.After(2 * time.Second):
 			cancel()
@@ -356,6 +390,28 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 		}
 		if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat || heartbeat.Heartbeat == nil {
 			t.Fatalf("unexpected heartbeat: %+v", heartbeat)
+		}
+
+		err = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "probe-1",
+			MessageType:  externalagentprotocol.FrameTypeWakeProbe,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			WakeProbe: &externalagentprotocol.WakeProbePayload{
+				ProbeID:    "probe-1",
+				DeadlineAt: time.Now().UTC().Add(time.Second),
+			},
+		})
+		if err != nil {
+			t.Fatalf("write wake probe: %v", err)
+		}
+		var wakeAck externalagentprotocol.Frame
+		if err := conn.ReadJSON(&wakeAck); err != nil {
+			t.Fatalf("read wake probe accepted: %v", err)
+		}
+		if wakeAck.MessageType != externalagentprotocol.FrameTypeWakeProbeAccepted || wakeAck.WakeProbeAccepted == nil {
+			t.Fatalf("unexpected wake probe accepted: %+v", wakeAck)
 		}
 
 		runStart := externalagentprotocol.Frame{
@@ -562,6 +618,24 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 			t.Fatalf("read heartbeat: %v", err)
 		}
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "probe-1",
+			MessageType:  externalagentprotocol.FrameTypeWakeProbe,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now(),
+			WakeProbe: &externalagentprotocol.WakeProbePayload{
+				ProbeID:    "probe-1",
+				DeadlineAt: time.Now().Add(time.Second),
+			},
+		})
+		var wakeAck externalagentprotocol.Frame
+		if err := conn.ReadJSON(&wakeAck); err != nil {
+			t.Fatalf("read wake probe accepted: %v", err)
+		}
+		if wakeAck.MessageType != externalagentprotocol.FrameTypeWakeProbeAccepted {
+			t.Fatalf("unexpected wake probe accepted: %+v", wakeAck)
+		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageID:    "run-start-1",
 			MessageType:  externalagentprotocol.FrameTypeRunStart,
 			PersonaID:    "persona-1",
@@ -655,6 +729,10 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("HERMES_API_SERVER_KEY", "test-hermes-api-key")
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -681,6 +759,14 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 		if err := conn.ReadJSON(&heartbeat); err != nil {
 			t.Fatalf("read heartbeat: %v", err)
 		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:     "refresh-1",
+			MessageType:   externalagentprotocol.FrameTypeConfigRefresh,
+			PersonaID:     "persona-1",
+			ConnectionID:  "conn-1",
+			SentAt:        time.Now(),
+			ConfigRefresh: &externalagentprotocol.ConfigRefreshPayload{},
+		})
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageID:    "revoke-1",
 			MessageType:  externalagentprotocol.FrameTypeTokenRevoked,
@@ -713,13 +799,20 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 	if _, ok := store.Binding("conn-1"); ok {
 		t.Fatalf("expected token revocation to delete binding")
 	}
+	if _, err := os.ReadFile(filepath.Join(homeDir, ".hermes", "config.yaml")); err != nil {
+		t.Fatalf("expected config refresh to write Hermes config: %v", err)
+	}
 }
 
 func TestCanStartRunWithReadiness(t *testing.T) {
-	if !canStartRunWithReadiness(runtime.AdapterStateMCPVerified) {
+	now := time.Now().UTC()
+	if !canStartRunWithReadiness(runtime.AdapterStateMCPVerified, &now) {
 		t.Fatalf("mcp verified should be runnable")
 	}
-	if !canStartRunWithReadiness(runtime.AdapterStateReady) {
+	if canStartRunWithReadiness(runtime.AdapterStateMCPVerified, nil) {
+		t.Fatalf("mcp verified without wake probe should not be runnable")
+	}
+	if !canStartRunWithReadiness(runtime.AdapterStateReady, nil) {
 		t.Fatalf("ready should be runnable")
 	}
 	for _, state := range []runtime.AdapterState{
@@ -731,7 +824,7 @@ func TestCanStartRunWithReadiness(t *testing.T) {
 		runtime.AdapterStateMCPRestartRequired,
 		runtime.AdapterStateWakeProbeFailed,
 	} {
-		if canStartRunWithReadiness(state) {
+		if canStartRunWithReadiness(state, &now) {
 			t.Fatalf("%s should not be runnable", state)
 		}
 	}
@@ -842,20 +935,172 @@ func TestRunnerReplaysActiveRunOnReconnect(t *testing.T) {
 	}}})
 	runner := Runner{Store: &store}
 	frames := make([]externalagentprotocol.Frame, 0, 2)
-	if err := runner.replayActiveRun(config.Binding{ConnectionID: "conn-1"}, session, func(frame externalagentprotocol.Frame) error {
+	if err := runner.replayActiveRun(context.Background(), config.Binding{ConnectionID: "conn-1"}, session, nil, func(frame externalagentprotocol.Frame) error {
 		frames = append(frames, frame)
 		return nil
 	}); err != nil {
 		t.Fatalf("replay active run: %v", err)
 	}
-	if len(frames) != 2 {
+	if len(frames) != 1 {
 		t.Fatalf("unexpected replay frames: %+v", frames)
 	}
 	if frames[0].MessageType != externalagentprotocol.FrameTypeRunAccepted || frames[0].RunAccepted == nil || frames[0].RunAccepted.NativeRunID != "native-1" {
 		t.Fatalf("unexpected accepted replay: %+v", frames[0])
 	}
-	if frames[1].MessageType != externalagentprotocol.FrameTypeRunStarted || frames[1].RunStarted == nil || frames[1].RunStarted.NativeRunID != "native-1" {
-		t.Fatalf("unexpected started replay: %+v", frames[1])
+}
+
+func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("HERMES_API_SERVER_KEY", "hermes-key-1")
+	if err := os.MkdirAll(filepath.Join(homeDir, ".hermes"), 0o700); err != nil {
+		t.Fatalf("create hermes config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".hermes", "config.yaml"), []byte(
+		"mcp_servers:\n"+
+			"  personastack-conn-1:\n"+
+			"    command: /opt/personastack-connector\n"+
+			"    args:\n"+
+			"      - mcp\n"+
+			"      - stdio\n"+
+			"      - --binding\n"+
+			"      - conn-1\n",
+	), 0o600); err != nil {
+		t.Fatalf("write hermes config: %v", err)
+	}
+	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Method string `json:"method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode mcp request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch request.Method {
+		case "initialize":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{}}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+		case "tools/list":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}`))
+		default:
+			t.Fatalf("unexpected mcp method: %s", request.Method)
+		}
+	}))
+	defer mcpServer.Close()
+	hermesServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/health/detailed", "/v1/models":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/v1/capabilities":
+			_, _ = w.Write([]byte(`{"features":{"run_submission":true,"run_status":true,"run_events_sse":true,"run_stop":true}}`))
+		case "/v1/runs/native-1":
+			_, _ = w.Write([]byte(`{"status":"running"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer hermesServer.Close()
+	t.Setenv("PERSONASTACK_CONNECTOR_HERMES_URL", hermesServer.URL)
+
+	runFailed := make(chan externalagentprotocol.Frame, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		})
+		readNonHeartbeat := func() externalagentprotocol.Frame {
+			for {
+				var frame externalagentprotocol.Frame
+				if err := conn.ReadJSON(&frame); err != nil {
+					t.Fatalf("read frame: %v", err)
+				}
+				if frame.MessageType != externalagentprotocol.FrameTypeHeartbeat {
+					return frame
+				}
+			}
+		}
+		if replay := readNonHeartbeat(); replay.MessageType != externalagentprotocol.FrameTypeRunAccepted {
+			t.Fatalf("expected replay accepted, got %+v", replay)
+		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "redelivery-1",
+			MessageType:  externalagentprotocol.FrameTypeRunStart,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			RunID:        "run-1",
+			AssignmentID: "assignment-1",
+			SentAt:       time.Now().UTC(),
+			RunStart: &externalagentprotocol.RunStartPayload{
+				FullyComposedPrompt: "prompt",
+				RunScopedMCPToken:   "run-token-1",
+			},
+		})
+		frame := readNonHeartbeat()
+		runFailed <- frame
+		cancel()
+	}))
+	defer gateway.Close()
+
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ConnectionGeneration: 1,
+		GatewayWebsocketURL:  "ws" + gateway.URL[len("http"):],
+		BridgeCredentialID:   "cred-1",
+		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
+		NativeMCPServer:      "personastack-conn-1",
+		PersonaMCPURL:        mcpServer.URL,
+		PersonaMCPToken:      "mcp-token-1",
+		ActiveRunID:          "run-1",
+		ActiveAssignmentID:   "assignment-1",
+		ActiveNativeRunID:    "native-1",
+		RuntimeKind:          runtime.AdapterKindHermes,
+	}}})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx)
+	}()
+
+	select {
+	case frame := <-runFailed:
+		if frame.MessageType != externalagentprotocol.FrameTypeRunFailed {
+			t.Fatalf("expected redelivered run.start failure before wake probe, got %+v", frame)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for redelivered run.start failure")
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run foreground: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
 	}
 }
 
@@ -966,7 +1211,7 @@ func TestRunnerReconnectsWithFreshGenerationAfterDrainHint(t *testing.T) {
 		if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat || heartbeat.Heartbeat == nil {
 			t.Fatalf("unexpected heartbeat: %+v", heartbeat)
 		}
-		if connectFrame.Connect.ConnectionGeneration == 1 {
+		if connectFrame.Connect.ConnectionGeneration == 2 {
 			firstHandshakeDone <- struct{}{}
 			if err := conn.WriteJSON(externalagentprotocol.Frame{
 				MessageType:  externalagentprotocol.FrameTypeServerDraining,
@@ -1024,7 +1269,7 @@ func TestRunnerReconnectsWithFreshGenerationAfterDrainHint(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for runner shutdown")
 	}
-	if firstGeneration != 1 || secondGeneration != 2 {
+	if firstGeneration != 2 || secondGeneration != 3 {
 		t.Fatalf("unexpected reconnect generations: first=%d second=%d", firstGeneration, secondGeneration)
 	}
 }

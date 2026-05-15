@@ -30,9 +30,12 @@ require_one "$(asset_pattern darwin_amd64.tar.gz)" >/dev/null
 require_one "$(asset_pattern darwin_arm64.tar.gz)" >/dev/null
 linux_amd64_archive="$(require_one "$(asset_pattern linux_amd64.tar.gz)")"
 require_one "$(asset_pattern linux_arm64.tar.gz)" >/dev/null
-require_one "$(asset_pattern windows_amd64.zip)" >/dev/null
+windows_amd64_archive="$(require_one "$(asset_pattern windows_amd64.zip)")"
 
 require_one "$(asset_pattern checksums.txt)" >/dev/null
+if [[ -n "$version" && "$version" != "auto" ]]; then
+  require_one "$(asset_pattern checksums.txt.sigstore.json)" >/dev/null
+fi
 find "$dist_dir" -maxdepth 1 -name '*.deb' -print -quit | grep -q .
 find "$dist_dir" -maxdepth 1 -name '*.rpm' -print -quit | grep -q .
 
@@ -46,6 +49,20 @@ fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
+unzip -q "$windows_amd64_archive" -d "$tmp_dir/windows"
+windows_binary="$tmp_dir/windows/personastack-connector.exe"
+if [[ -n "$version" && "$version" != "auto" ]]; then
+  if ! command -v osslsigncode >/dev/null 2>&1; then
+    echo "osslsigncode is required to verify Windows Authenticode signatures" >&2
+    exit 1
+  fi
+  if [[ ! -s "$windows_binary" ]]; then
+    echo "windows binary missing from release archive: $windows_binary" >&2
+    exit 1
+  fi
+  osslsigncode verify -in "$windows_binary" >/tmp/personastack-connector-windows-signature.out 2>/tmp/personastack-connector-windows-signature.err
+  grep -q 'Signature verification: ok' /tmp/personastack-connector-windows-signature.out /tmp/personastack-connector-windows-signature.err
+fi
 tar -xzf "$linux_amd64_archive" -C "$tmp_dir"
 binary="$tmp_dir/personastack-connector"
 

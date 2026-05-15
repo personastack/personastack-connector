@@ -33,10 +33,37 @@ jobs:
       - name: License file
         run: test -s LICENSE
 
+  runtime-smoke:
+    name: runtime smoke (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Fake runtime smoke
+        run: ./scripts/fake-runtime-smoke.sh
+        shell: bash
+
   release:
     name: release
-    needs: test
+    needs:
+      - test
+      - runtime-smoke
     runs-on: ubuntu-latest
+    environment:
+      name: release
     permissions:
       contents: write
       id-token: write
@@ -51,10 +78,33 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Install osslsigncode
+        run: sudo apt-get update && sudo apt-get install -y osslsigncode
+      - name: Prepare Windows signing certificate
+        run: |
+          printf '%s' "$WINDOWS_CODE_SIGN_PFX_B64" | base64 -d > "$WINDOWS_CODE_SIGN_PFX_FILE"
+          openssl pkcs12 -in "$WINDOWS_CODE_SIGN_PFX_FILE" -passin "pass:$WINDOWS_CODE_SIGN_PFX_PASSWORD" -noout
+        env:
+          WINDOWS_CODE_SIGN_PFX_B64: ${{ secrets.WINDOWS_CODE_SIGN_PFX_B64 }}
+          WINDOWS_CODE_SIGN_PFX_FILE: ${{ runner.temp }}/personastack-windows-signing.pfx
+          WINDOWS_CODE_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD }}
+      - name: Check Windows signing gate
+        run: ./scripts/check-windows-signing.sh
+        env:
+          WINDOWS_CODE_SIGN_REQUIRED: "1"
+          WINDOWS_CODE_SIGN_PFX_FILE: ${{ runner.temp }}/personastack-windows-signing.pfx
+          WINDOWS_CODE_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD }}
+          WINDOWS_CODE_SIGN_TIMESTAMP_URL: https://timestamp.digicert.com
+      - name: Install Cosign
+        run: |
+          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
       - name: Check release policy
         run: ./scripts/check-release-policy.sh
+      - name: Check release notes
+        run: ./scripts/check-release-notes.sh
       - name: GoReleaser
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
@@ -63,18 +113,55 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONASTACK_RELEASE_SIGNING: "1"
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          WINDOWS_CODE_SIGN_REQUIRED: "1"
+          WINDOWS_CODE_SIGN_PFX_FILE: ${{ runner.temp }}/personastack-windows-signing.pfx
+          WINDOWS_CODE_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD }}
+          WINDOWS_CODE_SIGN_TIMESTAMP_URL: https://timestamp.digicert.com
+          WINDOWS_CODE_SIGN_DESCRIPTION: PersonaStack Connector
+          WINDOWS_CODE_SIGN_URL: https://personastack.ai
+          COSIGN_EXPERIMENTAL: "1"
       - name: Release package smoke
         run: ./scripts/smoke-release-artifacts.sh dist "${GITHUB_REF_NAME#v}"
       - name: Build release manifest
         run: go run ./cmd/release-manifest --dist dist --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" --output "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json"
+        env:
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+      - name: Sign release manifest
+        run: cosign sign-blob --bundle "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sigstore.json" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" --yes
+        env:
+          COSIGN_EXPERIMENTAL: "1"
       - name: Check release manifest checksum
-        run: sha256sum "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" > "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sha256"
+        run: (cd dist && sha256sum "personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" > "personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sha256")
+      - name: Render package-manager metadata
+        run: ./scripts/render-package-manager-metadata.sh dist "${GITHUB_REF_NAME#v}"
       - name: Verify release manifest checksum
         run: ./scripts/verify-release-manifest.sh dist "${GITHUB_REF_NAME#v}"
-      - name: Upload release manifest
-        run: gh release upload "$GITHUB_REF_NAME" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sha256" --clobber
+        env:
+          COSIGN_CERTIFICATE_IDENTITY: https://github.com/personastack/personastack-connector/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
+          COSIGN_CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+      - name: Upload release manifest bundle
+        run: gh release upload "$GITHUB_REF_NAME" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sha256" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sigstore.json" "dist/personastack-connector_${GITHUB_REF_NAME#v}_checksums.txt.sigstore.json" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload package-manager metadata
+        run: gh release upload "$GITHUB_REF_NAME" dist/package-manager/homebrew/personastack-connector.rb dist/package-manager/winget/PersonaStack.Connector/${GITHUB_REF_NAME#v}/*.yaml --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish API release metadata
+        run: ./scripts/publish-release-metadata-to-api.sh dist "${GITHUB_REF_NAME#v}"
+        env:
+          PERSONASTACK_API_URL: ${{ secrets.PERSONASTACK_API_URL }}
+          PERSONASTACK_ADMIN_BEARER_TOKEN: ${{ secrets.PERSONASTACK_ADMIN_BEARER_TOKEN }}
       - name: Attest artifacts
         uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:

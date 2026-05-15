@@ -82,7 +82,7 @@ func TestHermesAdapterDetectReportsDegradedFallbacks(t *testing.T) {
 	if detection.State != AdapterStateReady {
 		t.Fatalf("expected ready with degraded fallback, got %+v", detection)
 	}
-	if detection.Note != "Hermes API ready with degraded fallback: run_events_sse,run_stop missing" {
+	if detection.Note != "Hermes API ready with degraded fallback: supports_streaming=false supports_cancel=false" {
 		t.Fatalf("unexpected note: %q", detection.Note)
 	}
 }

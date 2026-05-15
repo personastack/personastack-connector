@@ -124,6 +124,25 @@ func TestHeartbeatFrameReportsBuildMetadata(t *testing.T) {
 	}
 }
 
+func TestHeartbeatFrameRequiresWakeProbeForMCPVerifiedWakeable(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session := testSession(t, publicKey, privateKey)
+
+	withoutProbe := session.HeartbeatFrame(runtime.AdapterStateMCPVerified, nil)
+	if withoutProbe.Heartbeat.ReadinessStatus == externalagentprotocol.ReadinessStatusWakeable {
+		t.Fatalf("heartbeat reported wakeable without wake probe: %+v", withoutProbe.Heartbeat)
+	}
+
+	probedAt := time.Now().UTC()
+	withProbe := session.HeartbeatFrame(runtime.AdapterStateMCPVerified, &probedAt)
+	if withProbe.Heartbeat.ReadinessStatus != externalagentprotocol.ReadinessStatusWakeable {
+		t.Fatalf("heartbeat did not report wakeable after wake probe: %+v", withProbe.Heartbeat)
+	}
+}
+
 func testSession(t *testing.T, publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey) Session {
 	t.Helper()
 	session, err := NewSession(config.Binding{

@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -106,6 +107,79 @@ func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 	}
 	if _, ok := secrets[keyringService+":conn-1:active-run-mcp-token"]; ok {
 		t.Fatalf("expected active run token to be deleted")
+	}
+}
+
+func TestFileStoreUsesEncryptedFallbackWhenKeyringUnavailable(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	t.Setenv("HOME", t.TempDir())
+
+	originalGet := keyringGet
+	originalSet := keyringSet
+	originalDelete := keyringDelete
+	keyringGet = func(service string, user string) (string, error) {
+		return "", os.ErrNotExist
+	}
+	keyringSet = func(service string, user string, password string) error {
+		return os.ErrPermission
+	}
+	keyringDelete = func(service string, user string) error {
+		return os.ErrNotExist
+	}
+	t.Cleanup(func() {
+		keyringGet = originalGet
+		keyringSet = originalSet
+		keyringDelete = originalDelete
+	})
+
+	path := t.TempDir() + "/state.json"
+	store := NewFileStore(path)
+	binding := Binding{
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		BridgePrivateKey:   "fallback-bridge-secret",
+		PersonaMCPToken:    "fallback-mcp-token",
+		HasBridgeSecret:    true,
+		HasPersonaMCPToken: true,
+	}
+	if err := store.SaveBinding(binding); err != nil {
+		t.Fatalf("save binding: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if strings.Contains(string(raw), "fallback-bridge-secret") || strings.Contains(string(raw), "fallback-mcp-token") {
+		t.Fatalf("state file leaked secret: %s", string(raw))
+	}
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("user config dir: %v", err)
+	}
+	secretPath := filepath.Join(configDir, "personastack", "connector", "secrets.enc")
+	secretRaw, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("read fallback secret store: %v", err)
+	}
+	if strings.Contains(string(secretRaw), "fallback-bridge-secret") || strings.Contains(string(secretRaw), "fallback-mcp-token") {
+		t.Fatalf("fallback secret store leaked plaintext: %s", string(secretRaw))
+	}
+
+	loaded, ok := store.Binding("conn-1")
+	if !ok {
+		t.Fatalf("expected binding")
+	}
+	if loaded.BridgePrivateKey != "fallback-bridge-secret" || loaded.PersonaMCPToken != "fallback-mcp-token" {
+		t.Fatalf("expected fallback secrets, got %+v", loaded)
+	}
+
+	if err := store.DeleteBinding("conn-1"); err != nil {
+		t.Fatalf("delete binding: %v", err)
+	}
+	if _, ok := store.Binding("conn-1"); ok {
+		t.Fatalf("expected binding deleted")
 	}
 }
 

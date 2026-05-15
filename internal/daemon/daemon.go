@@ -33,53 +33,69 @@ func (r Runner) RunForeground(ctx context.Context) error {
 	if len(bindings) == 0 {
 		return fmt.Errorf("no paired bindings")
 	}
-	errs := make(chan error, len(bindings))
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errs := make(chan error, len(bindings)*2)
 	var wg sync.WaitGroup
+	for _, binding := range bindings {
+		if strings.TrimSpace(binding.LocalMCPProxyURL) == "" {
+			continue
+		}
+		proxyErrs, err := mcp.StartLoopbackHTTPProxyWithStore(runCtx, r.Store, binding, nil)
+		if err != nil {
+			return err
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- <-proxyErrs
+		}()
+	}
 	for _, binding := range bindings {
 		wg.Add(1)
 		go func(binding config.Binding) {
 			defer wg.Done()
-			errs <- r.runBinding(ctx, binding)
+			errs <- r.runBinding(runCtx, binding)
 		}(binding)
 	}
-	wg.Wait()
-	close(errs)
+	go func() {
+		wg.Wait()
+		close(errs)
+	}()
+	var firstErr error
 	for err := range errs {
-		if err != nil {
-			return err
+		if err != nil && firstErr == nil {
+			firstErr = err
+			cancel()
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
-	return r.runBindingLoop(ctx, binding, false)
+	return r.runBindingLoop(ctx, binding)
 }
 
-func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding, freshGeneration bool) error {
+func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) error {
 	connectionID := binding.ConnectionID
 	backoff := r.reconnectMin()
-	firstAttempt := true
 	for {
 		latest, ok := r.Store.Binding(connectionID)
 		if !ok {
 			return nil
 		}
 		current := latest
-		if freshGeneration || !firstAttempt {
-			current.ConnectionGeneration++
-			if current.ConnectionGeneration <= 0 {
-				current.ConnectionGeneration = 1
-			}
-			writable, ok := r.Store.(config.WritableStore)
-			if !ok {
-				return fmt.Errorf("writable connector store required")
-			}
-			if err := writable.SaveBinding(current); err != nil {
-				return err
-			}
+		current.ConnectionGeneration++
+		if current.ConnectionGeneration <= 0 {
+			current.ConnectionGeneration = 1
 		}
-		firstAttempt = false
+		writable, ok := r.Store.(config.WritableStore)
+		if !ok {
+			return fmt.Errorf("writable connector store required")
+		}
+		if err := writable.SaveBinding(current); err != nil {
+			return err
+		}
 		credential, err := bridge.CredentialFromBinding(current)
 		if err != nil {
 			return err
@@ -145,11 +161,28 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	adapter := r.adapterForBinding(binding)
 	detection := r.bindingReadiness(adapter, binding)
 	_ = r.recordHeartbeat(binding.ConnectionID, r.now())
-	heartbeat := session.HeartbeatFrame(detection.State, r.lastWakeProbeAt(binding.ConnectionID))
+	var wakeProbeMu sync.Mutex
+	var sessionWakeProbeAt *time.Time
+	lastSessionWakeProbeAt := func() *time.Time {
+		wakeProbeMu.Lock()
+		defer wakeProbeMu.Unlock()
+		if sessionWakeProbeAt == nil {
+			return nil
+		}
+		value := sessionWakeProbeAt.UTC()
+		return &value
+	}
+	recordSessionWakeProbe := func(at time.Time) {
+		value := at.UTC()
+		wakeProbeMu.Lock()
+		sessionWakeProbeAt = &value
+		wakeProbeMu.Unlock()
+	}
+	heartbeat := session.HeartbeatFrame(detection.State, lastSessionWakeProbeAt())
 	if err := writeFrame(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
-	if err := r.replayActiveRun(binding, session, writeFrame); err != nil {
+	if err := r.replayActiveRun(ctx, binding, session, adapter, writeFrame); err != nil {
 		return err
 	}
 	heartbeatStop := make(chan struct{})
@@ -164,7 +197,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			case <-ticker.C:
 				_ = r.recordHeartbeat(binding.ConnectionID, r.now())
 				state := r.bindingReadiness(adapter, binding).State
-				_ = writeFrame(session.HeartbeatFrame(state, r.lastWakeProbeAt(binding.ConnectionID)))
+				_ = writeFrame(session.HeartbeatFrame(state, lastSessionWakeProbeAt()))
 			}
 		}
 	}()
@@ -187,7 +220,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			draining = true
 			drainOnce.Do(func() {
 				go func() {
-					_ = r.runBindingLoop(ctx, binding, true)
+					_ = r.runBindingLoop(ctx, binding)
 				}()
 			})
 			if deadline := frame.ServerDraining.DeadlineAt; !deadline.IsZero() {
@@ -213,11 +246,28 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
-			_ = r.recordWakeProbe(binding.ConnectionID, r.now())
+			readiness := r.bindingReadiness(adapter, binding)
+			if !wakeProbeSucceeded(readiness.State) {
+				continue
+			}
+			probedAt := r.now()
+			_ = r.recordWakeProbe(binding.ConnectionID, binding.ConnectionGeneration, probedAt)
+			recordSessionWakeProbe(probedAt)
 			accepted := session.WakeProbeAcceptedFrame(frame.WakeProbe.ProbeID)
 			commandCache.storeReply(frame, accepted)
 			if err := writeFrame(accepted); err != nil {
 				return fmt.Errorf("write wake probe ack: %w", err)
+			}
+			state := r.bindingReadiness(adapter, binding).State
+			if err := writeFrame(session.HeartbeatFrame(state, lastSessionWakeProbeAt())); err != nil {
+				return fmt.Errorf("write wake probe heartbeat: %w", err)
+			}
+		case externalagentprotocol.FrameTypeConfigRefresh:
+			if frame.ConfigRefresh == nil {
+				continue
+			}
+			if err := r.refreshMCPConfig(binding); err != nil {
+				return fmt.Errorf("refresh mcp config: %w", err)
 			}
 		case externalagentprotocol.FrameTypeRunStart:
 			if frame.RunStart == nil {
@@ -238,14 +288,20 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
+			readiness := r.bindingReadiness(adapter, binding)
+			if !canStartRunWithReadiness(readiness.State, lastSessionWakeProbeAt()) {
+				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
+				commandCache.storeReply(frame, failed)
+				if writeErr := writeFrame(failed); writeErr != nil {
+					return fmt.Errorf("write run readiness failure: %w", writeErr)
+				}
+				continue
+			}
 			if nativeRunID, ok := r.activeNativeRunIDForRunStart(binding, frame); ok {
 				accepted := session.RunAcceptedFrame(frame, nativeRunID)
 				commandCache.storeReply(frame, accepted)
 				if err := writeFrame(accepted); err != nil {
 					return fmt.Errorf("write redelivered run accepted: %w", err)
-				}
-				if err := writeFrame(session.RunStartedFrame(frame, nativeRunID, time.Time{})); err != nil {
-					return fmt.Errorf("write redelivered run started: %w", err)
 				}
 				continue
 			}
@@ -254,14 +310,6 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write active run conflict: %w", writeErr)
-				}
-				continue
-			}
-			if readiness := r.bindingReadiness(adapter, binding); !canStartRunWithReadiness(readiness.State) {
-				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
-				commandCache.storeReply(frame, failed)
-				if writeErr := writeFrame(failed); writeErr != nil {
-					return fmt.Errorf("write run readiness failure: %w", writeErr)
 				}
 				continue
 			}
@@ -329,15 +377,9 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 					}
 				})
 				if err != nil {
-					if !started {
-						_ = writeStarted(time.Time{})
-					}
 					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
 					_ = writeFrame(failed)
 					return
-				}
-				if !started {
-					_ = writeStarted(time.Time{})
 				}
 				status := externalagentprotocol.RunStatusCompleted
 				reason := externalagentprotocol.TerminalReasonSucceeded
@@ -380,6 +422,15 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			return nil
 		}
 	}
+}
+
+func (r Runner) refreshMCPConfig(binding config.Binding) error {
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok {
+		return nil
+	}
+	_, err := (mcp.Installer{Store: r.Store}).InstallBinding(latest)
+	return err
 }
 
 func (r Runner) now() time.Time {
@@ -496,7 +547,7 @@ func (r Runner) activeRunConflict(binding config.Binding, frame externalagentpro
 	return activeRunID, true
 }
 
-func (r Runner) replayActiveRun(binding config.Binding, session bridge.Session, writeFrame func(externalagentprotocol.Frame) error) error {
+func (r Runner) replayActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, writeFrame func(externalagentprotocol.Frame) error) error {
 	if r.Store == nil {
 		return nil
 	}
@@ -515,12 +566,47 @@ func (r Runner) replayActiveRun(binding config.Binding, session bridge.Session, 
 	if err := writeFrame(accepted); err != nil {
 		return err
 	}
-	started := session.RunStartedFrame(externalagentprotocol.Frame{
+	replayRequest := externalagentprotocol.Frame{
 		MessageID:    uuid.NewString(),
 		RunID:        latest.ActiveRunID,
 		AssignmentID: latest.ActiveAssignmentID,
-	}, latest.ActiveNativeRunID, time.Time{})
-	return writeFrame(started)
+	}
+	go r.observeReplayedActiveRun(ctx, binding, session, adapter, replayRequest, latest.ActiveNativeRunID, writeFrame)
+	return nil
+}
+
+func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, frame externalagentprotocol.Frame, nativeRunID string, writeFrame func(externalagentprotocol.Frame) error) {
+	if adapter == nil {
+		return
+	}
+	defer func() {
+		_ = r.clearRunMCPToken(binding, frame.RunID)
+	}()
+	result, err := adapter.StreamOrPollRun(ctx, nativeRunID, func(event runtime.RunEvent) error {
+		switch event.Kind {
+		case runtime.RunEventOutputDelta:
+			return writeFrame(session.RunOutputDeltaFrame(frame, event.Delta))
+		case runtime.RunEventToolEvent:
+			return writeFrame(session.RunToolEventFrame(frame, event.ToolName, event.ToolPhase, event.Summary))
+		default:
+			return nil
+		}
+	})
+	if err != nil {
+		_ = writeFrame(session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error()))
+		return
+	}
+	status := externalagentprotocol.RunStatusCompleted
+	reason := externalagentprotocol.TerminalReasonSucceeded
+	if result.Status == runtime.RunStatusFailed {
+		status = externalagentprotocol.RunStatusFailed
+		reason = externalagentprotocol.TerminalReasonFailed
+	}
+	if result.Status == runtime.RunStatusCancelled {
+		status = externalagentprotocol.RunStatusCancelled
+		reason = externalagentprotocol.TerminalReasonCancelled
+	}
+	_ = writeFrame(session.RunTerminalFrame(frame, status, reason, result.Output))
 }
 
 func (r Runner) revokeBinding(binding config.Binding, adapter runtime.Adapter, reason string) error {
@@ -547,7 +633,10 @@ func (r Runner) activateRunMCPToken(binding config.Binding, frame externalagentp
 	if !ok {
 		return fmt.Errorf("writable connector store required")
 	}
-	active := binding
+	active, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok {
+		return fmt.Errorf("binding %s not found", binding.ConnectionID)
+	}
 	active.ActiveRunID = strings.TrimSpace(frame.RunID)
 	active.ActiveAssignmentID = strings.TrimSpace(frame.AssignmentID)
 	active.ActiveRunMCPToken = token
@@ -604,7 +693,7 @@ func (r Runner) recordHeartbeat(connectionID config.ConnectionID, at time.Time) 
 	return writable.SaveBinding(latest)
 }
 
-func (r Runner) recordWakeProbe(connectionID config.ConnectionID, at time.Time) error {
+func (r Runner) recordWakeProbe(connectionID config.ConnectionID, generation int64, at time.Time) error {
 	writable, ok := r.Store.(config.WritableStore)
 	if !ok {
 		return nil
@@ -614,6 +703,7 @@ func (r Runner) recordWakeProbe(connectionID config.ConnectionID, at time.Time) 
 		return nil
 	}
 	latest.LastWakeProbeAt = at.UTC()
+	latest.LastWakeProbeGeneration = generation
 	return writable.SaveBinding(latest)
 }
 
@@ -701,8 +791,15 @@ func getenv(key string) string {
 	return strings.TrimSpace(os.Getenv(key))
 }
 
-func canStartRunWithReadiness(state runtime.AdapterState) bool {
-	return state == runtime.AdapterStateMCPVerified || state == runtime.AdapterStateReady
+func canStartRunWithReadiness(state runtime.AdapterState, lastWakeProbeAt *time.Time) bool {
+	if state == runtime.AdapterStateReady {
+		return true
+	}
+	return state == runtime.AdapterStateMCPVerified && lastWakeProbeAt != nil && !lastWakeProbeAt.IsZero()
+}
+
+func wakeProbeSucceeded(state runtime.AdapterState) bool {
+	return state == runtime.AdapterStateReady || state == runtime.AdapterStateMCPVerified
 }
 
 func (r Runner) reconnectMin() time.Duration {

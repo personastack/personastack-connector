@@ -2,9 +2,13 @@ package mcp
 
 import (
 	"context"
+	cryptoRand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,19 +44,22 @@ type Installer struct {
 	HomeDir        string
 	ExecutablePath string
 	GOOS           string
+	Transport      MCPProxyTransport
 }
+
+type MCPProxyTransport int
+
+const (
+	MCPProxyTransportAuto MCPProxyTransport = iota
+	MCPProxyTransportStdio
+	MCPProxyTransportLoopbackHTTP
+)
+
+const credentialStorageWarning = "credential warning: local MCP auth stays in owner-only connector config"
 
 func (installer Installer) InstallAll() ([]InstallResult, error) {
 	if installer.Store == nil {
 		return nil, fmt.Errorf("store required")
-	}
-	homeDir, err := installer.homeDir()
-	if err != nil {
-		return nil, err
-	}
-	executablePath, err := installer.executablePath(homeDir)
-	if err != nil {
-		return nil, err
 	}
 	bindings := installer.Store.ListBindings()
 	if len(bindings) == 0 {
@@ -60,7 +67,7 @@ func (installer Installer) InstallAll() ([]InstallResult, error) {
 	}
 	var results []InstallResult
 	for _, binding := range bindings {
-		result, err := installBinding(homeDir, executablePath, binding)
+		result, err := installer.InstallBinding(binding)
 		if err != nil {
 			return nil, err
 		}
@@ -69,8 +76,24 @@ func (installer Installer) InstallAll() ([]InstallResult, error) {
 	return results, nil
 }
 
-func installBinding(homeDir string, executablePath string, binding config.Binding) (InstallResult, error) {
+func (installer Installer) InstallBinding(binding config.Binding) (InstallResult, error) {
+	homeDir, err := installer.homeDir()
+	if err != nil {
+		return InstallResult{}, err
+	}
+	executablePath, err := installer.executablePath(homeDir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	return installer.installBinding(homeDir, executablePath, binding)
+}
+
+func (installer Installer) installBinding(homeDir string, executablePath string, binding config.Binding) (InstallResult, error) {
 	server := stdioServer(binding, executablePath)
+	transport := installer.Transport
+	if transport == MCPProxyTransportLoopbackHTTP {
+		return installer.installBindingLoopbackHTTP(homeDir, binding, server)
+	}
 	switch binding.RuntimeKind {
 	case runtime.AdapterKindHermes:
 		setupReport, err := hermessetup.EnsureAPISetup(homeDir)
@@ -78,31 +101,35 @@ func installBinding(homeDir string, executablePath string, binding config.Bindin
 			return InstallResult{}, err
 		}
 		path := filepath.Join(homeDir, ".hermes", "config.yaml")
-		err = upsertHermesServer(path, server)
-		if err != nil {
+		if err := upsertHermesServer(path, server); err == nil {
+			result := InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name, Note: setupReport.Note}
+			if started, err := hermessetup.TryStartGateway(homeDir); err != nil {
+				return InstallResult{}, err
+			} else if started {
+				result.Note = appendNote(result.Note, "Hermes gateway start attempted")
+			}
+			diagnostic := hermessetup.Diagnose(homeDir)
+			if strings.TrimSpace(diagnostic.Note) != "" {
+				result.Note = appendNote(result.Note, diagnostic.Note)
+			}
+			return result, nil
+		} else if transport == MCPProxyTransportStdio {
 			return InstallResult{}, err
 		}
-		result := InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name, Note: setupReport.Note}
-		if started, err := hermessetup.TryStartGateway(homeDir); err != nil {
-			return InstallResult{}, err
-		} else if started {
-			result.Note = appendNote(result.Note, "Hermes gateway start attempted")
-		}
-		diagnostic := hermessetup.Diagnose(homeDir)
-		if strings.TrimSpace(diagnostic.Note) != "" {
-			result.Note = appendNote(result.Note, diagnostic.Note)
-		}
-		return result, nil
+		return installer.installBindingLoopbackHTTP(homeDir, binding, server)
 	case runtime.AdapterKindOpenClaw:
 		if result, err := installOpenClawServerWithCLI(homeDir, binding, server); err == nil {
 			return result, nil
-		}
-		path := filepath.Join(homeDir, ".openclaw", "config.json")
-		err := upsertOpenClawServer(path, server)
-		if err != nil {
+		} else if transport == MCPProxyTransportStdio {
 			return InstallResult{}, err
 		}
-		return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name}, nil
+		path := filepath.Join(homeDir, ".openclaw", "config.json")
+		if err := upsertOpenClawServer(path, server); err == nil {
+			return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name}, nil
+		} else if transport == MCPProxyTransportStdio {
+			return InstallResult{}, err
+		}
+		return installer.installBindingLoopbackHTTP(homeDir, binding, server)
 	default:
 		return InstallResult{}, fmt.Errorf("unsupported runtime for mcp install: %s", binding.RuntimeKind)
 	}
@@ -125,6 +152,59 @@ func installOpenClawServerWithCLI(homeDir string, binding config.Binding, server
 		return InstallResult{}, fmt.Errorf("openclaw mcp set: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: filepath.Join(homeDir, ".openclaw", "config.json"), ServerName: server.Name}, nil
+}
+
+func (installer Installer) installBindingLoopbackHTTP(homeDir string, binding config.Binding, server stdioServerConfig) (InstallResult, error) {
+	loopback, err := loopbackHTTPMCPServerForBinding(binding)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	binding.LocalMCPProxyURL = loopback.URL
+	binding.LocalMCPProxyToken = loopback.Token
+	binding.HasLocalMCPProxyToken = true
+	writable, ok := installer.Store.(config.WritableStore)
+	if ok {
+		if err := writable.SaveBinding(binding); err != nil {
+			return InstallResult{}, err
+		}
+	}
+	switch binding.RuntimeKind {
+	case runtime.AdapterKindHermes:
+		setupReport, err := hermessetup.EnsureAPISetup(homeDir)
+		if err != nil {
+			return InstallResult{}, err
+		}
+		envPath := filepath.Join(homeDir, ".hermes", ".env")
+		if err := upsertHermesLoopbackHTTPEnv(envPath, loopback.EnvironmentVariable, loopback.Token); err != nil {
+			return InstallResult{}, err
+		}
+		path := filepath.Join(homeDir, ".hermes", "config.yaml")
+		if err := upsertHermesLoopbackHTTPServer(path, server, loopback); err != nil {
+			return InstallResult{}, err
+		}
+		result := InstallResult{
+			ConnectionID: binding.ConnectionID,
+			Runtime:      binding.RuntimeKind,
+			Path:         path,
+			ServerName:   server.Name,
+			Note:         appendNote(setupReport.Note, "Hermes loopback HTTP MCP proxy configured", credentialStorageWarning),
+		}
+		return result, nil
+	case runtime.AdapterKindOpenClaw:
+		path := filepath.Join(homeDir, ".openclaw", "config.json")
+		if err := upsertOpenClawLoopbackHTTPServer(path, server, loopback); err != nil {
+			return InstallResult{}, err
+		}
+		return InstallResult{
+			ConnectionID: binding.ConnectionID,
+			Runtime:      binding.RuntimeKind,
+			Path:         path,
+			ServerName:   server.Name,
+			Note:         appendNote("OpenClaw loopback HTTP MCP proxy configured", credentialStorageWarning),
+		}, nil
+	default:
+		return InstallResult{}, fmt.Errorf("unsupported runtime for loopback HTTP install: %s", binding.RuntimeKind)
+	}
 }
 
 func VerifyBinding(homeDir string, binding config.Binding) VerifyResult {
@@ -160,14 +240,34 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 	if result.State != runtime.AdapterStateMCPRestartRequired {
 		return result
 	}
+	if binding.RuntimeKind == runtime.AdapterKindOpenClaw {
+		adapter := runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{
+			Token:       strings.TrimSpace(binding.OpenClawGatewayToken),
+			Password:    strings.TrimSpace(binding.OpenClawPassword),
+			DeviceToken: strings.TrimSpace(binding.OpenClawDeviceToken),
+		}, binding.OpenClawAgentID)
+		openClawLive := adapter.VerifyMCPCatalog(ctx, result.ServerName)
+		if !openClawLive.OK {
+			result.Note = openClawLive.Note
+			return result
+		}
+		result.Note = openClawLive.Note
+	}
 	live := VerifyBindingLive(ctx, binding, client)
+	if isLoopbackHTTPConfig(result.Note) {
+		live = VerifyLoopbackHTTPProxy(ctx, binding, client)
+	}
 	if !live.OK {
 		result.Note = live.Note
 		return result
 	}
 	result.State = runtime.AdapterStateMCPVerified
-	result.Note = live.Note + "; native runtime restart may be required"
+	result.Note = result.Note + "; " + live.Note + "; native runtime restart may be required"
 	return result
+}
+
+func isLoopbackHTTPConfig(note string) bool {
+	return strings.Contains(strings.ToLower(note), "streamable-http config present")
 }
 
 func VerifyBindingInUserHome(binding config.Binding) VerifyResult {
@@ -189,6 +289,12 @@ type stdioServerConfig struct {
 	Args    []string `json:"args" yaml:"args"`
 }
 
+type loopbackHTTPMCPServer struct {
+	URL                 string
+	Token               string
+	EnvironmentVariable string
+}
+
 func stdioServer(binding config.Binding, executablePath string) stdioServerConfig {
 	name := strings.TrimSpace(binding.NativeMCPServer)
 	if name == "" {
@@ -204,6 +310,162 @@ func stdioServer(binding config.Binding, executablePath string) stdioServerConfi
 			strings.TrimSpace(string(binding.ConnectionID)),
 		},
 	}
+}
+
+func newLoopbackHTTPMCPServer(binding config.Binding) (loopbackHTTPMCPServer, error) {
+	port, err := acquireLoopbackPort()
+	if err != nil {
+		return loopbackHTTPMCPServer{}, err
+	}
+	token, err := generateLoopbackHTTPToken()
+	if err != nil {
+		return loopbackHTTPMCPServer{}, err
+	}
+	return loopbackHTTPMCPServer{
+		URL:                 fmt.Sprintf("http://127.0.0.1:%d/mcp/%s", port, strings.TrimSpace(string(binding.ConnectionID))),
+		Token:               token,
+		EnvironmentVariable: loopbackHTTPEnvironmentVariable(binding.ConnectionID),
+	}, nil
+}
+
+func loopbackHTTPMCPServerForBinding(binding config.Binding) (loopbackHTTPMCPServer, error) {
+	localURL := strings.TrimSpace(binding.LocalMCPProxyURL)
+	localToken := strings.TrimSpace(binding.LocalMCPProxyToken)
+	if localURL != "" && localToken != "" {
+		parsed, err := url.Parse(localURL)
+		if err != nil {
+			return loopbackHTTPMCPServer{}, fmt.Errorf("parse existing loopback mcp url: %w", err)
+		}
+		if !loopbackMCPURL(parsed, binding.ConnectionID) {
+			return loopbackHTTPMCPServer{}, fmt.Errorf("existing loopback mcp url is invalid")
+		}
+		return loopbackHTTPMCPServer{
+			URL:                 localURL,
+			Token:               localToken,
+			EnvironmentVariable: loopbackHTTPEnvironmentVariable(binding.ConnectionID),
+		}, nil
+	}
+	return newLoopbackHTTPMCPServer(binding)
+}
+
+func acquireLoopbackPort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("acquire loopback port: %w", err)
+	}
+	defer listener.Close()
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0, fmt.Errorf("acquire loopback port: unexpected address")
+	}
+	return addr.Port, nil
+}
+
+func generateLoopbackHTTPToken() (string, error) {
+	var raw [32]byte
+	if _, err := cryptoRand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate loopback http token: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func loopbackHTTPEnvironmentVariable(bindingID config.ConnectionID) string {
+	trimmed := strings.TrimSpace(string(bindingID))
+	if trimmed == "" {
+		return "PERSONASTACK_CONNECTOR_LOCAL_MCP"
+	}
+	var builder strings.Builder
+	builder.WriteString("PERSONASTACK_CONNECTOR_LOCAL_MCP_")
+	for _, r := range strings.ToUpper(trimmed) {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune('_')
+		}
+	}
+	return builder.String()
+}
+
+func upsertHermesLoopbackHTTPEnv(path string, envVar string, token string) error {
+	state := map[string]string{}
+	raw, err := os.ReadFile(path)
+	if err == nil && len(raw) > 0 {
+		scanner := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+		for _, line := range scanner {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.HasPrefix(trimmed, "export ") {
+				trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "export "))
+			}
+			key, value, ok := strings.Cut(trimmed, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				continue
+			}
+			state[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	state[envVar] = token
+	var builder strings.Builder
+	for key, value := range state {
+		builder.WriteString(key)
+		builder.WriteByte('=')
+		builder.WriteString(value)
+		builder.WriteByte('\n')
+	}
+	return writeOwnerOnlyAtomic(path, []byte(builder.String()))
+}
+
+func upsertHermesLoopbackHTTPServer(path string, server stdioServerConfig, loopback loopbackHTTPMCPServer) error {
+	root := map[string]any{}
+	raw, err := os.ReadFile(path)
+	if err == nil && len(raw) > 0 {
+		_ = yaml.Unmarshal(raw, &root)
+	}
+	servers := ensureMap(root, "mcp_servers")
+	servers[server.Name] = map[string]any{
+		"url": loopback.URL,
+		"headers": map[string]any{
+			"Authorization": "Bearer ${" + loopback.EnvironmentVariable + "}",
+		},
+		"timeout":         120,
+		"connect_timeout": 10,
+		"enabled":         true,
+	}
+	removeLegacyNestedServer(root, server.Name)
+	output, err := yaml.Marshal(root)
+	if err != nil {
+		return fmt.Errorf("encode Hermes loopback config: %w", err)
+	}
+	return writeOwnerOnlyAtomic(path, output)
+}
+
+func upsertOpenClawLoopbackHTTPServer(path string, server stdioServerConfig, loopback loopbackHTTPMCPServer) error {
+	root := map[string]any{}
+	raw, err := os.ReadFile(path)
+	if err == nil && len(raw) > 0 {
+		_ = json.Unmarshal(raw, &root)
+	}
+	mcpNode := ensureMap(root, "mcp")
+	servers := ensureMap(mcpNode, "servers")
+	servers[server.Name] = map[string]any{
+		"transport":           "streamable-http",
+		"url":                 loopback.URL,
+		"connectionTimeoutMs": 10000,
+		"headers": map[string]any{
+			"Authorization": "Bearer " + loopback.Token,
+		},
+	}
+	output, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode OpenClaw loopback config: %w", err)
+	}
+	output = append(output, '\n')
+	return writeOwnerOnlyAtomic(path, output)
 }
 
 func upsertHermesServer(path string, server stdioServerConfig) error {
@@ -297,6 +559,9 @@ func verifyNamedServerMap(servers map[string]any, serverName string, bindingID c
 	if !ok {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP server missing"
 	}
+	if transport := normalizedMCPTransport(server); transport == "streamable-http" || transport == "sse" {
+		return verifyStreamableHTTPServer(server, bindingID)
+	}
 	command, ok := server["command"].(string)
 	if !ok || strings.TrimSpace(command) == "" {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP command missing"
@@ -305,6 +570,58 @@ func verifyNamedServerMap(servers map[string]any, serverName string, bindingID c
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP binding argument missing"
 	}
 	return runtime.AdapterStateMCPRestartRequired, "PersonaStack MCP config present; live verification required"
+}
+
+func verifyStreamableHTTPServer(server map[string]any, bindingID config.ConnectionID) (runtime.AdapterState, string) {
+	rawURL, ok := server["url"].(string)
+	if !ok || strings.TrimSpace(rawURL) == "" {
+		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP url missing"
+	}
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return runtime.AdapterStateMCPConfigMissing, "parse PersonaStack MCP url: " + err.Error()
+	}
+	if !loopbackMCPURL(parsed, bindingID) {
+		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP url must be loopback"
+	}
+	return runtime.AdapterStateMCPRestartRequired, appendNote("PersonaStack MCP streamable-http config present; live verification required", credentialStorageWarning)
+}
+
+func normalizedMCPTransport(server map[string]any) string {
+	if rawURL, ok := server["url"].(string); ok && strings.TrimSpace(rawURL) != "" {
+		return "streamable-http"
+	}
+	for _, key := range []string{"transport", "type"} {
+		raw, ok := server[key].(string)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "http":
+			return "streamable-http"
+		default:
+			return strings.ToLower(strings.TrimSpace(raw))
+		}
+	}
+	return ""
+}
+
+func loopbackMCPURL(parsed *url.URL, bindingID config.ConnectionID) bool {
+	if parsed == nil {
+		return false
+	}
+	if parsed.Scheme != "http" {
+		return false
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host != "127.0.0.1" {
+		return false
+	}
+	connectionID := strings.TrimSpace(string(bindingID))
+	if connectionID == "" {
+		return false
+	}
+	return strings.Contains(strings.TrimSpace(parsed.Path), "/mcp/"+connectionID)
 }
 
 func serverArgsMatchBinding(value any, bindingID config.ConnectionID) bool {

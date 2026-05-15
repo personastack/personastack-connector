@@ -92,7 +92,7 @@ func (s Session) HeartbeatFrame(state runtime.AdapterState, lastWakeProbeAt *tim
 	frame := s.baseFrame(externalagentprotocol.FrameTypeHeartbeat, s.now())
 	frame.Heartbeat = &externalagentprotocol.HeartbeatPayload{
 		ConnectionStatus:       externalagentprotocol.ConnectionStatusBridgeConnected,
-		ReadinessStatus:        readinessForAdapterState(state),
+		ReadinessStatus:        readinessForAdapterState(state, lastWakeProbeAt),
 		RuntimeKind:            runtimeKindForAdapter(s.Binding.RuntimeKind),
 		ConnectionGeneration:   s.Binding.ConnectionGeneration,
 		NativeMCPServerName:    strings.TrimSpace(s.Binding.NativeMCPServer),
@@ -249,11 +249,14 @@ func nativeMCPToolPrefix(kind runtime.AdapterKind, serverName string) string {
 	return "mcp_" + trimmed + "_"
 }
 
-func readinessForAdapterState(state runtime.AdapterState) externalagentprotocol.ReadinessStatus {
+func readinessForAdapterState(state runtime.AdapterState, lastWakeProbeAt *time.Time) externalagentprotocol.ReadinessStatus {
 	switch state {
 	case runtime.AdapterStateReady:
 		return externalagentprotocol.ReadinessStatusWakeable
 	case runtime.AdapterStateMCPVerified:
+		if lastWakeProbeAt != nil && !lastWakeProbeAt.IsZero() {
+			return externalagentprotocol.ReadinessStatusWakeable
+		}
 		return externalagentprotocol.ReadinessStatusMCPConfigured
 	case runtime.AdapterStateRuntimeStopped, runtime.AdapterStateRuntimeMissing, runtime.AdapterStateAuthMissing, runtime.AdapterStateCapabilityMissing, runtime.AdapterStateWakeProbeFailed:
 		return externalagentprotocol.ReadinessStatusRuntimeError

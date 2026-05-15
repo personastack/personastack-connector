@@ -19,6 +19,7 @@ external persona.
 - Stream or report local run events back through the Connector protocol.
 - Configure PersonaStack MCP access in supported local runtimes.
 - Keep local daemon startup persistent across user login or system restart.
+- Keep the default connector setup CLI-first and headless.
 - Store local secrets in OS credential storage.
 
 ## Non-Goals
@@ -29,6 +30,7 @@ external persona.
 - Do not expose native Hermes/OpenClaw tools as PersonaStack integrations.
 - Do not require inbound public network access to the user's machine.
 - Do not grant website chat reply authority to persistent Persona MCP tokens.
+- Do not target Termux, iOS, or Android as Connector hosts in V1.
 
 ## External Authorities
 
@@ -66,9 +68,13 @@ external persona.
   websocket attempt before the old websocket closes when possible, and the old
   websocket must stay usable until the drain deadline expires or the
   replacement is established.
-- Connection status should stay wakeable through a short owner-transfer grace
-  window while the old owner remains connected or the replacement owner has
-  authenticated but not yet completed wakeability probes.
+- Connection status must not report wakeable from persisted probe timestamps
+  alone; each websocket session must complete a live wake probe before it may
+  report wakeable or accept a new `run.start`, unless the current runtime state
+  is `ready` and already proves wakeability.
+- A `config.refresh` bridge frame should re-run the local MCP installer for the
+  active binding so native MCP config is rewritten and the local proxy is
+  restarted before revocation cleanup runs.
 - A `token.revoked` bridge frame deletes the local binding, clears OS credential
   storage for bridge/MCP/active-run secrets, best-effort cancels the active
   native run when one is journaled, and stops reconnecting that binding.
@@ -102,15 +108,18 @@ not be required for headless Linux.
 
 ## Runtime Adapters
 
-Adapters implement the same finite operations:
+Adapters implement the same finite runtime operations:
 
 - `detect`
-- `configure_mcp`
-- `verify_mcp`
 - `start_run`
 - `stream_or_poll_run`
 - `cancel_run`
 - `diagnose`
+
+Native MCP configuration and verification are Connector-level operations owned
+by `internal/mcp`, not runtime-adapter methods. The daemon combines adapter
+runtime detection with `internal/mcp` live verification before reporting
+`wakeable`.
 
 Adapter result states must be concrete typed enums, including:
 
@@ -129,6 +138,7 @@ Adapter result states must be concrete typed enums, including:
 - Default to a Connector-owned per-binding stdio MCP proxy.
 - Native runtime config invokes
   `personastack-connector mcp stdio --binding <connection_id>`.
+- Hermes tools should register as `mcp_<native_mcp_server_name>_<tool_name>`.
 - Native runtime config must point at the Connector's stable user shim path, not
   a transient package or test executable path.
 - The stdio proxy loads PersonaStack MCP credentials from OS credential storage.
@@ -144,6 +154,8 @@ Adapter result states must be concrete typed enums, including:
 - Native runtime config must not become a plaintext header export surface; any
   required auth material stays Connector-local and is handled by the stdio
   proxy, not by exposing native runtime config or tools as PersonaStack surface.
+- Direct remote PersonaStack MCP headers are advanced-only fallback and must
+  show a credential-storage warning in UX.
 - Streamable HTTP SSE responses may be long-lived; the stdio proxy must emit the
   first complete JSON-RPC SSE event back to stdio without waiting for stream EOF.
 - After MCP initialization completes, the stdio proxy must open the Streamable
@@ -165,6 +177,8 @@ Adapter result states must be concrete typed enums, including:
   to status polling only when events are unavailable.
 - Missing Hermes run SSE or stop features are degraded fallbacks, not hard
   runtime failures, when run submission and run status are available.
+- Hermes response and chat-completions fallbacks must report degraded streaming
+  and cancel support and must not claim full wakeability.
 - Put API-rendered `fully_composed_prompt` in Hermes `input` by default.
 - Include PersonaStack run id, assignment id, native MCP server name, and native
   MCP namespace as bounded non-secret Hermes run metadata.
@@ -188,6 +202,8 @@ Adapter result states must be concrete typed enums, including:
   MCP namespace in OpenClaw `agent` params as bounded non-secret metadata.
 - Verify MCP by effective tool visibility or controlled wake probe, not config
   write success alone.
+- OpenClaw CLI fallback is degraded only and must not claim Gateway streaming or
+  cancel parity unless the same native run id can be waited and cancelled.
 
 ## Security
 
@@ -205,31 +221,55 @@ Adapter result states must be concrete typed enums, including:
 ## Packaging
 
 - V1 release targets are macOS, Linux, and native Windows.
+- Termux is unsupported as a Connector host even if Hermes can run there.
 - GitHub Actions must run unit tests and a GoReleaser snapshot dry-run on pull
   requests and `main` pushes.
 - Tagged releases build GoReleaser archives for macOS/Linux/Windows plus Linux
   `.deb` and `.rpm` packages, publish checksum/SBOM artifacts to a draft GitHub
   Release, upload a machine-readable release manifest plus manifest checksum,
   and emit GitHub provenance attestations for `dist/*`.
+- macOS archives are signed and notarized only when the release environment
+  provides the Apple Developer ID and App Store Connect inputs; default install
+  UX must remain gated until those inputs are present.
+- macOS release artifacts stay split by `darwin/amd64` and `darwin/arm64`, and
+  setup continues to register a LaunchAgent after installation instead of
+  shipping an app bundle or DMG path.
 - Tagged releases also publish cosign-bundled signatures for the checksum file
   and the release manifest, so install guidance can verify the manifest bundle
   before it recommends any download command.
+- The release workflow must publish generated release-manifest metadata into
+  the PersonaStack API admin connector-release endpoint so the database
+  recommends the just-built GitHub Release artifacts.
 - The binary must expose `personastack-connector version` so install flows and
   support diagnostics can verify the downloaded artifact.
 - V1 signed distribution channels are GitHub Release archives for macOS,
-  Linux, and Windows plus Linux `.deb` and `.rpm` packages. Homebrew and
-  winget metadata are deferred until signed package-manager metadata exists.
+  Linux, and Windows plus Linux `.deb` and `.rpm` packages. Tagged releases
+  also publish Homebrew cask and winget metadata generated from the signed
+  checksum file.
+- Connector release metadata must only mark installer defaults eligible when
+  signed release metadata is active; Linux package defaults stay off until the
+  release signing gate is enabled.
+- V1 binary distribution stays GitHub Releases only; mirrored binary hosts are
+  a later decision, not part of the public install path.
+- Signed auto-update launch scope stays deferred until a separate
+  `personastack-ship` decision; package-manager/manual update prompts remain
+  the default guidance.
 - Stable public release activation is a separate `personastack-ship` gate and
   is not part of routine implementation completion.
 - WSL2 uses the Linux Connector inside the WSL2 environment.
 - Linux service installation prefers `systemd --user` and falls back to an XDG
   autostart desktop entry when user systemd is unavailable.
+- OpenClaw mobile nodes are not Connector hosts; they require Gateway on
+  macOS, Linux, Windows, or Windows/WSL2.
 - iOS and Android are not Connector host targets in V1.
+- `windows/arm64` stays excluded until signing, installer, credential storage,
+  and runtime probes are proven.
 - Default setup must verify the signed release manifest and checksum bundle
   before it recommends an install command.
-- Release workflow validation must check repo tag/environment protection policy
-  through GitHub CLI metadata when available and fail closed when the release
-  environment lacks required reviewers.
+- The release workflow must declare the protected `release` environment, and
+  release policy checks must use GitHub CLI metadata to fail closed when active
+  `v*` tag rulesets or required release reviewers are missing.
+- Public release activation remains a separate `personastack-ship` gate.
 - GitHub repository visibility is public at
   `https://github.com/personastack/personastack-connector`; install and support
   docs may link to public release artifacts.
@@ -243,3 +283,4 @@ Adapter result states must be concrete typed enums, including:
   runtime health, and re-verify MCP after process restart.
 - Fake Hermes and OpenClaw runtime tests must cover success, degraded fallback,
   cancel, reconnect, and MCP verification paths.
+- Connector CLI pairing tests must cover clear success and degraded setup states.

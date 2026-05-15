@@ -20,6 +20,8 @@ builds:
       - amd64
       - arm64
     ignore:
+      # Windows/arm64 remains excluded until signing, installer behavior,
+      # credential storage, and runtime probes are proven.
       - goos: windows
         goarch: arm64
     ldflags:
@@ -28,6 +30,24 @@ builds:
       - -X github.com/personastack/personastack-connector/internal/buildinfo.GitCommit={{ .Commit }}
       - -X github.com/personastack/personastack-connector/internal/buildinfo.BuildDate={{ .Date }}
       - -X github.com/personastack/personastack-connector/internal/buildinfo.ReleaseChannel=stable
+    hooks:
+      post:
+        - cmd: ./scripts/sign-windows-binary.sh "{{ .Path }}"
+          output: true
+
+notarize:
+  macos:
+    - enabled: '{{ and (isEnvSet "MACOS_SIGN_P12") (isEnvSet "MACOS_SIGN_PASSWORD") (isEnvSet "MACOS_NOTARY_ISSUER_ID") (isEnvSet "MACOS_NOTARY_KEY_ID") (isEnvSet "MACOS_NOTARY_KEY") }}'
+      ids:
+        - personastack-connector
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
 
 archives:
   - id: default
@@ -65,6 +85,15 @@ nfpms:
 checksum:
   name_template: personastack-connector_{{ .Version }}_checksums.txt
   algorithm: sha256
+
+signs:
+  - id: checksum-bundle
+    cmd: ./scripts/sign-release-checksum-bundle.sh
+    args:
+      - ${artifact}
+      - ${signature}
+    signature: "${artifact}.sigstore.json"
+    artifacts: checksum
 
 sboms:
   - artifacts: archive

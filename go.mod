@@ -9,6 +9,7 @@ require (
 
 require (
 	github.com/gorilla/websocket v1.5.0
+	github.com/integrii/flaggy v1.8.0
 	github.com/zalando/go-keyring v0.2.8
 	gopkg.in/yaml.v3 v3.0.1
 )

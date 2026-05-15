@@ -16,6 +16,8 @@ import (
 )
 
 const defaultOpenClawGatewayURL = "ws://127.0.0.1:18789"
+const minOpenClawProtocolVersion = 3
+const maxOpenClawProtocolVersion = 4
 
 type OpenClawAdapter struct {
 	GatewayURL      string
@@ -127,18 +129,72 @@ func (adapter OpenClawAdapter) probeOpenClawMethod(conn *websocket.Conn, request
 	return response.payload(), Detection{}, false
 }
 
-func (adapter OpenClawAdapter) ConfigureMCP(bindingID string) error {
-	if strings.TrimSpace(bindingID) == "" {
-		return fmt.Errorf("binding id required")
-	}
-	return fmt.Errorf("OpenClaw MCP config edit is not implemented")
+type openClawToolsCatalogResult struct {
+	AgentID string                      `json:"agentId"`
+	Groups  []openClawToolsCatalogGroup `json:"groups"`
 }
 
-func (adapter OpenClawAdapter) VerifyMCP(bindingID string) (AdapterState, error) {
-	if strings.TrimSpace(bindingID) == "" {
-		return AdapterStateMCPConfigMissing, fmt.Errorf("binding id required")
+type openClawToolsCatalogGroup struct {
+	ID       string                     `json:"id"`
+	Label    string                     `json:"label"`
+	Source   string                     `json:"source"`
+	PluginID string                     `json:"pluginId,omitempty"`
+	Tools    []openClawToolsCatalogTool `json:"tools"`
+}
+
+type openClawToolsCatalogTool struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Source   string `json:"source"`
+	PluginID string `json:"pluginId,omitempty"`
+}
+
+type OpenClawMCPVerificationResult struct {
+	OK   bool
+	Note string
+}
+
+func (adapter OpenClawAdapter) VerifyMCPCatalog(ctx context.Context, serverName string) OpenClawMCPVerificationResult {
+	expectedServerName := strings.TrimSpace(serverName)
+	if expectedServerName == "" {
+		return OpenClawMCPVerificationResult{Note: "OpenClaw native MCP server name required"}
 	}
-	return AdapterStateMCPConfigMissing, fmt.Errorf("OpenClaw MCP verification is not implemented")
+	connectCtx, cancel := context.WithTimeout(ctx, openClawSetupRetryBudget)
+	defer cancel()
+	conn, err := adapter.connectOperatorWithRetry(connectCtx)
+	if err != nil {
+		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog connect failed: " + err.Error()}
+	}
+	defer conn.Close()
+	params := map[string]any{"includePlugins": true}
+	if trimmed := strings.TrimSpace(adapter.AgentID); trimmed != "" {
+		params["agentId"] = trimmed
+	}
+	if err := conn.WriteJSON(openClawRequest{
+		ID:     "verify-mcp-catalog-1",
+		Method: "tools.catalog",
+		Params: params,
+	}); err != nil {
+		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog request failed: " + err.Error()}
+	}
+	var response openClawResponse
+	if err := conn.ReadJSON(&response); err != nil {
+		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog response failed: " + err.Error()}
+	}
+	if errText := response.errorString(); errText != "" {
+		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog error: " + errText}
+	}
+	catalog, err := openClawToolsCatalogFromResult(response.payload())
+	if err != nil {
+		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog invalid: " + err.Error()}
+	}
+	if !catalog.hasNativeMCPServer(expectedServerName) {
+		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog missing configured MCP server " + expectedServerName}
+	}
+	return OpenClawMCPVerificationResult{
+		OK:   true,
+		Note: "OpenClaw effective tool catalog visible for " + expectedServerName,
+	}
 }
 
 func (adapter OpenClawAdapter) StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error) {
@@ -401,8 +457,8 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 		ID:     "ps-connect",
 		Method: "connect",
 		Params: map[string]any{
-			"minProtocol": 3,
-			"maxProtocol": 4,
+			"minProtocol": minOpenClawProtocolVersion,
+			"maxProtocol": maxOpenClawProtocolVersion,
 			"client": map[string]string{
 				"id":       "personastack-connector",
 				"version":  "dev",
@@ -600,7 +656,7 @@ func openClawHelloFromResult(raw json.RawMessage) (openClawHello, error) {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return hello, err
 	}
-	if envelope.Protocol < 3 || envelope.Protocol > 4 {
+	if envelope.Protocol < minOpenClawProtocolVersion || envelope.Protocol > maxOpenClawProtocolVersion {
 		return hello, fmt.Errorf("OpenClaw protocol %d unsupported", envelope.Protocol)
 	}
 	features, err := openClawFeaturesFromAny(envelope.Features.Methods)
@@ -636,6 +692,33 @@ func openClawFeaturesFromAny(value any) (openClawFeatures, error) {
 		return openClawFeatures{}, fmt.Errorf("features.methods missing")
 	}
 	return openClawFeatures{methods: methods}, nil
+}
+
+func openClawToolsCatalogFromResult(raw json.RawMessage) (openClawToolsCatalogResult, error) {
+	var catalog openClawToolsCatalogResult
+	if len(raw) == 0 {
+		return catalog, fmt.Errorf("catalog missing")
+	}
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		return catalog, err
+	}
+	return catalog, nil
+}
+
+func (catalog openClawToolsCatalogResult) hasNativeMCPServer(expectedServerName string) bool {
+	target := strings.TrimSpace(expectedServerName)
+	if target == "" {
+		return false
+	}
+	for _, group := range catalog.Groups {
+		if strings.TrimSpace(group.PluginID) != target && strings.TrimSpace(group.Label) != target && strings.TrimSpace(group.ID) != "plugin:"+target {
+			continue
+		}
+		if len(group.Tools) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (hello openClawHello) hasScope(scope string) bool {

@@ -18,9 +18,14 @@ func NewRedactor() Redactor {
 		patterns: []redactionPattern{
 			mustPattern(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`, "Bearer [REDACTED]"),
 			mustPattern(`(?i)(token|secret|api[_-]?key|password)=([^ \n\r\t]+)`, "$1=[REDACTED]"),
+			mustPattern(`(?i)port=([^ \n\r\t]+)`, "port=[REDACTED]"),
+			mustPattern(`(?i)path=([^ \n\r\t]+)`, "path=[LOCAL_PATH]"),
+			mustPattern(`(?i)(PERSONASTACK_CONNECTOR_LOCAL_MCP_[A-Z0-9_]+)=([^ \n\r\t]+)`, "$1=[REDACTED]"),
 			mustPattern(`(?i)(prompt|fully_composed_prompt)=([^ \n\r\t]+)`, "$1=[REDACTED]"),
 			mustPattern(`(?:https?|wss?)://127\.0\.0\.1:[0-9]+[^\s]*`, "[LOCAL_ENDPOINT]"),
+			mustPattern(`(?:/private)?/var/folders/[^\s]+`, "[LOCAL_PATH]"),
 			mustPattern(`(?:/Users|/home)/[^\s]+`, "[LOCAL_PATH]"),
+			mustPattern(`(?:/private)?/tmp/[^\s]+`, "[LOCAL_PATH]"),
 			mustPattern(`[A-Za-z]:\\Users\\[^\s]+`, "[LOCAL_PATH]"),
 		},
 	}

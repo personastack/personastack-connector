@@ -3,13 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/runtime"
+	"github.com/personastack/personastack-connector/internal/service"
 	"github.com/zalando/go-keyring"
 )
 
@@ -23,7 +28,7 @@ func TestRunHelp(t *testing.T) {
 	}
 
 	output := stdout.String()
-	for _, want := range []string{"pair <code>", "runtime detect", "mcp stdio --binding", "service plan", "run --foreground", "version"} {
+	for _, want := range []string{"pair <code>", "status [--repair]", "diagnostics", "runtime detect", "mcp stdio --binding", "service plan", "run --foreground", "version"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("help output missing %q: %s", want, output)
 		}
@@ -99,6 +104,270 @@ func TestRunStatusIncludesActiveAssignmentState(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("status output missing %q: %s", want, output)
 		}
+	}
+}
+
+func TestRunStatusIncludesWebsocketAndWakeProbeState(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd := command{
+		stdout: &stdout,
+		stderr: &stderr,
+		store: config.NewMemoryStore(config.State{
+			Bindings: []config.Binding{
+				{
+					ConnectionID:            "connection-1",
+					PersonaID:               "persona-1",
+					ConnectionGeneration:    7,
+					RuntimeKind:             runtime.AdapterKindHermes,
+					LastHeartbeatAt:         time.Now().UTC(),
+					LastWakeProbeAt:         time.Now().UTC().Add(-time.Minute),
+					LastWakeProbeGeneration: 7,
+					HasBridgeSecret:         true,
+					PersonaMCPURL:           "http://127.0.0.1:8642",
+					HasPersonaMCPToken:      true,
+				},
+			},
+		}),
+	}
+
+	if err := cmd.runStatus(context.Background(), nil); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{"summary=", "websocket=connected", "last_wake_probe="} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("status output missing %q: %s", want, output)
+		}
+	}
+}
+
+func TestConnectorStatusSummaryRequiresCurrentGenerationWakeProbe(t *testing.T) {
+	binding := config.Binding{
+		ConnectionGeneration:    2,
+		LastWakeProbeAt:         time.Now().UTC(),
+		LastWakeProbeGeneration: 1,
+		HasBridgeSecret:         true,
+	}
+
+	summary := strings.Join(connectorStatusSummaryTokens(binding, runtime.AdapterStateReady, runtime.AdapterStateMCPVerified, "connected"), " ")
+	if strings.Contains(summary, " wakeable") {
+		t.Fatalf("summary should not be wakeable with stale wake probe generation: %s", summary)
+	}
+
+	binding.ConnectionGeneration = 0
+	binding.LastWakeProbeGeneration = 0
+	summary = strings.Join(connectorStatusSummaryTokens(binding, runtime.AdapterStateReady, runtime.AdapterStateMCPVerified, "connected"), " ")
+	if strings.Contains(summary, " wakeable") {
+		t.Fatalf("summary should not be wakeable with zero wake probe generation: %s", summary)
+	}
+
+	binding.ConnectionGeneration = 2
+	binding.LastWakeProbeGeneration = 2
+	summary = strings.Join(connectorStatusSummaryTokens(binding, runtime.AdapterStateReady, runtime.AdapterStateMCPVerified, "connected"), " ")
+	if !strings.Contains(summary, " wakeable") {
+		t.Fatalf("summary should be wakeable with current wake probe generation: %s", summary)
+	}
+}
+
+func TestRunPairReportsSuccessState(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+	oldInstallService := installService
+	installService = func() (service.InstallResult, error) {
+		return service.InstallResult{Kind: "launchagent", Path: "/tmp/personastack-connector.plist"}, nil
+	}
+	t.Cleanup(func() {
+		installService = oldInstallService
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"persona_id":                "persona-1",
+			"connection_id":             "connection-1",
+			"credential_id":             "cred-1",
+			"runtime_kind":              "hermes",
+			"connection_generation":     1,
+			"gateway_websocket_url":     "ws://example/v1/external-agent/ws",
+			"native_mcp_server_name":    "personastack-connection-1",
+			"native_mcp_tool_namespace": "personastack",
+			"persona_mcp_url":           "https://mcp.example/mcp",
+			"persona_mcp_token":         "mcp-token-1",
+		})
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdout: &stdout,
+		stderr: &stderr,
+		store:  &store,
+	}
+	if err := cmd.runPair([]string{"PAIR-1234", "--gateway", server.URL, "--runtime", "hermes"}); err != nil {
+		t.Fatalf("runPair() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"installed mcp binding=connection-1 runtime=hermes",
+		"service installed kind=launchagent path=/tmp/personastack-connector.plist",
+		"paired persona=persona-1 connection=connection-1 runtime=hermes configure_mcp=true setup_state=pending_bridge_wake_probe",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("pair output missing %q: %s", want, output)
+		}
+	}
+}
+
+func TestRunPairReportsDegradedState(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+	oldInstallService := installService
+	installService = func() (service.InstallResult, error) {
+		return service.InstallResult{Kind: "no_user_service_manager", Path: "/tmp/personastack-connector.desktop"}, nil
+	}
+	t.Cleanup(func() {
+		installService = oldInstallService
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"persona_id":                "persona-2",
+			"connection_id":             "connection-2",
+			"credential_id":             "cred-2",
+			"runtime_kind":              "hermes",
+			"connection_generation":     1,
+			"gateway_websocket_url":     "ws://example/v1/external-agent/ws",
+			"native_mcp_server_name":    "personastack-connection-2",
+			"native_mcp_tool_namespace": "personastack",
+			"persona_mcp_url":           "https://mcp.example/mcp",
+			"persona_mcp_token":         "mcp-token-2",
+		})
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdout: &stdout,
+		stderr: &stderr,
+		store:  &store,
+	}
+	if err := cmd.runPair([]string{"PAIR-2345", "--gateway", server.URL, "--runtime", "hermes"}); err != nil {
+		t.Fatalf("runPair() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"service installed kind=no_user_service_manager path=/tmp/personastack-connector.desktop",
+		"paired persona=persona-2 connection=connection-2 runtime=hermes configure_mcp=true setup_state=pending_bridge_wake_probe",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("pair output missing %q: %s", want, output)
+		}
+	}
+}
+
+func TestRunDiagnosticsRedactsPathsAndListsRepairActions(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	t.Setenv("HOME", t.TempDir())
+	cmd := command{
+		stdout: &stdout,
+		stderr: &stderr,
+		store: config.NewMemoryStore(config.State{
+			Bindings: []config.Binding{
+				{
+					ConnectionID:       "connection-1",
+					PersonaID:          "persona-1",
+					RuntimeKind:        runtime.AdapterKindAuto,
+					BridgeCredentialID: "cred-1",
+					HasBridgeSecret:    true,
+				},
+			},
+		}),
+	}
+
+	if err := cmd.runDiagnostics(nil); err != nil {
+		t.Fatalf("runDiagnostics() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{"[LOCAL_PATH]", "repair_actions=runtime_detect,mcp_install,reconnect,rotate_local_token,export_diagnostics"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("diagnostics output missing %q: %s", want, output)
+		}
+	}
+}
+
+func TestRuntimeRepairActionMapsToUpdateRuntime(t *testing.T) {
+	if got := runtimeRepairAction(runtime.AdapterStateRuntimeMissing); got != "update_runtime" {
+		t.Fatalf("runtimeRepairAction(runtime_missing) = %q, want update_runtime", got)
+	}
+	if got := runtimeRepairAction(runtime.AdapterStateMCPRestartRequired); got != "restart_runtime" {
+		t.Fatalf("runtimeRepairAction(mcp_restart_required) = %q, want restart_runtime", got)
+	}
+}
+
+func TestRuntimeDetectionReportSummariesChoices(t *testing.T) {
+	cases := []struct {
+		name      string
+		report    runtimeDetectionReport
+		wantLine  string
+		wantError string
+	}{
+		{
+			name: "none",
+			report: runtimeDetectionReport{
+				readyKinds: []runtime.AdapterKind{},
+			},
+			wantLine:  "choice=repair action=runtime_repair ready=none",
+			wantError: "run personastack-connector runtime repair",
+		},
+		{
+			name: "single",
+			report: runtimeDetectionReport{
+				readyKinds: []runtime.AdapterKind{runtime.AdapterKindHermes},
+			},
+			wantLine:  "choice=auto runtime=hermes",
+			wantError: "",
+		},
+		{
+			name: "multiple",
+			report: runtimeDetectionReport{
+				readyKinds: []runtime.AdapterKind{runtime.AdapterKindHermes, runtime.AdapterKindOpenClaw},
+			},
+			wantLine:  "choice=manual action=choose_runtime options=hermes,openclaw",
+			wantError: "rerun with --runtime hermes or --runtime openclaw",
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.report.summaryLine(); got != test.wantLine {
+				t.Fatalf("summaryLine() = %q, want %q", got, test.wantLine)
+			}
+			err := test.report.autoDetectError()
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("autoDetectError() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("autoDetectError() = %v, want substring %q", err, test.wantError)
+			}
+		})
 	}
 }
 

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/integrii/flaggy"
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
 )
 
@@ -25,23 +25,35 @@ type releaseManifest struct {
 }
 
 type releaseAsset struct {
-	Arch        string `json:"arch,omitempty"`
-	Checksum    string `json:"checksum,omitempty"`
-	Name        string `json:"name"`
-	OS          string `json:"os,omitempty"`
-	PackageKind string `json:"package_kind"`
-	Path        string `json:"path"`
-	Signature   string `json:"signature,omitempty"`
+	Arch                   string `json:"arch,omitempty"`
+	Checksum               string `json:"checksum,omitempty"`
+	DefaultInstallEligible bool   `json:"default_install_eligible"`
+	Name                   string `json:"name"`
+	OS                     string `json:"os,omitempty"`
+	PackageKind            string `json:"package_kind"`
+	Path                   string `json:"path"`
+	Signature              string `json:"signature,omitempty"`
 }
 
 func main() {
-	distDir := flag.String("dist", "dist", "GoReleaser dist directory")
-	version := flag.String("version", strings.TrimPrefix(os.Getenv("GITHUB_REF_NAME"), "v"), "release version")
-	commit := flag.String("commit", os.Getenv("GITHUB_SHA"), "git commit")
-	output := flag.String("output", "", "manifest output path")
-	flag.Parse()
+	distDir := "dist"
+	version := strings.TrimPrefix(os.Getenv("GITHUB_REF_NAME"), "v")
+	commit := os.Getenv("GITHUB_SHA")
+	output := ""
+	parser := flaggy.NewParser("release-manifest")
+	parser.ShowCompletion = false
+	parser.ShowVersionWithVersionFlag = false
+	parser.String(&distDir, "", "dist", "GoReleaser dist directory")
+	parser.String(&version, "", "version", "release version")
+	parser.String(&commit, "", "commit", "git commit")
+	parser.String(&output, "", "output", "manifest output path")
+	err := parser.ParseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
-	manifest, err := buildManifest(*distDir, strings.TrimSpace(*version), strings.TrimSpace(*commit), time.Now().UTC())
+	manifest, err := buildManifest(distDir, strings.TrimSpace(version), strings.TrimSpace(commit), time.Now().UTC())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -52,11 +64,11 @@ func main() {
 		os.Exit(1)
 	}
 	raw = append(raw, '\n')
-	if strings.TrimSpace(*output) == "" {
+	if strings.TrimSpace(output) == "" {
 		_, _ = os.Stdout.Write(raw)
 		return
 	}
-	if err := os.WriteFile(*output, raw, 0o644); err != nil {
+	if err := os.WriteFile(output, raw, 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -78,12 +90,14 @@ func buildManifest(distDir string, version string, commit string, generatedAt ti
 		return releaseManifest{}, fmt.Errorf("read dist dir: %w", err)
 	}
 	signatures := map[string]string{}
+	macosDefaultInstallEligible := macOSDefaultInstallEligible()
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".sig") {
+		source, ok := signatureSourceName(name)
+		if entry.IsDir() || !ok {
 			continue
 		}
-		signatures[strings.TrimSuffix(name, ".sig")] = name
+		signatures[source] = name
 	}
 	assets := make([]releaseAsset, 0, len(entries))
 	for _, entry := range entries {
@@ -97,13 +111,14 @@ func buildManifest(distDir string, version string, commit string, generatedAt ti
 		}
 		osName, arch := osArch(name)
 		assets = append(assets, releaseAsset{
-			Arch:        arch,
-			Checksum:    checksums[name],
-			Name:        name,
-			OS:          osName,
-			PackageKind: kind,
-			Path:        name,
-			Signature:   signatures[name],
+			Arch:                   arch,
+			Checksum:               checksums[name],
+			DefaultInstallEligible: defaultInstallEligible(osName, kind, macosDefaultInstallEligible),
+			Name:                   name,
+			OS:                     osName,
+			PackageKind:            kind,
+			Path:                   name,
+			Signature:              signatures[name],
 		})
 	}
 	sort.Slice(assets, func(i int, j int) bool {
@@ -118,6 +133,43 @@ func buildManifest(distDir string, version string, commit string, generatedAt ti
 		RuntimeKinds:    []string{"hermes", "openclaw"},
 		Version:         version,
 	}, nil
+}
+
+func defaultInstallEligible(osName string, packageKind string, macosDefaultInstallEligible bool) bool {
+	if !releaseSigningEnabled() {
+		return false
+	}
+	switch packageKind {
+	case "archive":
+		if strings.EqualFold(osName, "darwin") {
+			return macosDefaultInstallEligible
+		}
+		return true
+	case "deb", "rpm":
+		return strings.EqualFold(osName, "linux")
+	default:
+		return false
+	}
+}
+
+func releaseSigningEnabled() bool {
+	return strings.TrimSpace(os.Getenv("PERSONASTACK_RELEASE_SIGNING")) == "1"
+}
+
+func macOSDefaultInstallEligible() bool {
+	requiredEnv := []string{
+		"MACOS_SIGN_P12",
+		"MACOS_SIGN_PASSWORD",
+		"MACOS_NOTARY_ISSUER_ID",
+		"MACOS_NOTARY_KEY_ID",
+		"MACOS_NOTARY_KEY",
+	}
+	for _, name := range requiredEnv {
+		if strings.TrimSpace(os.Getenv(name)) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func readChecksums(distDir string) (map[string]string, error) {
@@ -173,4 +225,15 @@ func osArch(name string) (string, string) {
 		}
 	}
 	return "", ""
+}
+
+func signatureSourceName(name string) (string, bool) {
+	switch {
+	case strings.HasSuffix(name, ".sigstore.json"):
+		return strings.TrimSuffix(name, ".sigstore.json"), true
+	case strings.HasSuffix(name, ".sig"):
+		return strings.TrimSuffix(name, ".sig"), true
+	default:
+		return "", false
+	}
 }
