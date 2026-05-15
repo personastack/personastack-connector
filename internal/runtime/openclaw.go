@@ -74,8 +74,8 @@ func (adapter OpenClawAdapter) Detect() Detection {
 	if err := conn.ReadJSON(&health); err != nil {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: err.Error()}
 	}
-	if health.Error != "" {
-		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: health.Error}
+	if errText := health.errorString(); errText != "" {
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: errText}
 	}
 	if _, detection, failed := adapter.probeOpenClawMethod(conn, "detect-2", "status"); failed {
 		return detection
@@ -102,10 +102,13 @@ func (adapter OpenClawAdapter) probeOpenClawMethod(conn *websocket.Conn, request
 	if err := conn.ReadJSON(&response); err != nil {
 		return nil, Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}, true
 	}
-	if response.Error != "" {
-		return nil, Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: response.Error}, true
+	if errText := response.errorString(); errText != "" {
+		return nil, Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: errText}, true
 	}
-	return response.Result, Detection{}, false
+	if !response.isResponseOK() {
+		return nil, Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: "OpenClaw response not ok"}, true
+	}
+	return response.payload(), Detection{}, false
 }
 
 func (adapter OpenClawAdapter) ConfigureMCP(bindingID string) error {
@@ -158,12 +161,15 @@ func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 	if err := conn.ReadJSON(&response); err != nil {
 		return "", fmt.Errorf("OpenClaw agent ack: %w", err)
 	}
-	if response.Error != "" {
-		return "", fmt.Errorf("OpenClaw agent error: %s", response.Error)
+	if errText := response.errorString(); errText != "" {
+		return "", fmt.Errorf("OpenClaw agent error: %s", errText)
+	}
+	if !response.isResponseOK() {
+		return "", fmt.Errorf("OpenClaw agent response not ok")
 	}
 	var accepted openClawRunResult
-	if len(response.Result) > 0 {
-		_ = json.Unmarshal(response.Result, &accepted)
+	if payload := response.payload(); len(payload) > 0 {
+		_ = json.Unmarshal(payload, &accepted)
 	}
 	status := strings.ToLower(strings.TrimSpace(accepted.Status))
 	if status != "" && status != "accepted" && status != "in_flight" && status != "running" {
@@ -204,13 +210,16 @@ func (adapter OpenClawAdapter) WaitRun(ctx context.Context, nativeRunID string) 
 		if err := conn.ReadJSON(&response); err != nil {
 			return RunResult{}, fmt.Errorf("OpenClaw wait response: %w", err)
 		}
-		if response.Error != "" {
-			if openClawErrorIsTimeout(response.Error) && ctx.Err() == nil {
+		if errText := response.errorString(); errText != "" {
+			if openClawErrorIsTimeout(errText) && ctx.Err() == nil {
 				continue
 			}
-			return RunResult{}, fmt.Errorf("OpenClaw wait error: %s", response.Error)
+			return RunResult{}, fmt.Errorf("OpenClaw wait error: %s", errText)
 		}
-		result, terminal := openClawRunResultFromResponse(response.Result)
+		if !response.isResponseOK() {
+			return RunResult{}, fmt.Errorf("OpenClaw wait response not ok")
+		}
+		result, terminal := openClawRunResultFromResponse(response.payload())
 		if !terminal {
 			if err := ctx.Err(); err != nil {
 				return RunResult{}, err
@@ -253,8 +262,11 @@ func (adapter OpenClawAdapter) CancelRun(nativeRunID string) error {
 	if err := conn.ReadJSON(&response); err != nil {
 		return fmt.Errorf("OpenClaw cancel response: %w", err)
 	}
-	if response.Error != "" {
-		return fmt.Errorf("OpenClaw cancel error: %s", response.Error)
+	if errText := response.errorString(); errText != "" {
+		return fmt.Errorf("OpenClaw cancel error: %s", errText)
+	}
+	if !response.isResponseOK() {
+		return fmt.Errorf("OpenClaw cancel response not ok")
 	}
 	return nil
 }
@@ -287,8 +299,8 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 	if err := conn.ReadJSON(&challenge); err != nil {
 		return fmt.Errorf("read OpenClaw connect challenge: %w", err)
 	}
-	if challenge.Method != "connect.challenge" && challenge.Type != "connect.challenge" {
-		return fmt.Errorf("expected OpenClaw connect.challenge, got %q", firstNonEmpty(challenge.Method, challenge.Type))
+	if !challenge.isEvent("connect.challenge") {
+		return fmt.Errorf("expected OpenClaw connect.challenge, got %q", firstNonEmpty(challenge.Event, challenge.Method, challenge.Type))
 	}
 	auth := map[string]string{}
 	switch {
@@ -327,13 +339,18 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 	if err := conn.ReadJSON(&hello); err != nil {
 		return fmt.Errorf("read OpenClaw hello-ok: %w", err)
 	}
-	if hello.Error != "" {
-		return fmt.Errorf("OpenClaw connect error: %s", hello.Error)
+	if errText := hello.errorString(); errText != "" {
+		return fmt.Errorf("OpenClaw connect error: %s", errText)
 	}
-	if hello.Method != "hello-ok" && hello.Type != "hello-ok" {
-		return fmt.Errorf("expected OpenClaw hello-ok, got %q", firstNonEmpty(hello.Method, hello.Type))
+	payload := hello.payload()
+	payloadType := openClawPayloadType(payload)
+	if !hello.isResponseOK() {
+		return fmt.Errorf("OpenClaw connect response not ok")
 	}
-	helloResult, err := openClawHelloFromResult(hello.Result)
+	helloResult, err := openClawHelloFromResult(payload)
+	if err != nil && payloadType != "hello-ok" && hello.Method != "hello-ok" && hello.Type != "hello-ok" {
+		return fmt.Errorf("expected OpenClaw hello-ok, got %q", firstNonEmpty(payloadType, hello.Event, hello.Method, hello.Type))
+	}
 	if err != nil {
 		return err
 	}
@@ -369,11 +386,59 @@ type openClawRequest struct {
 }
 
 type openClawResponse struct {
-	Type   string          `json:"type,omitempty"`
-	ID     string          `json:"id"`
-	Method string          `json:"method,omitempty"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	OK      *bool           `json:"ok,omitempty"`
+	Type    string          `json:"type,omitempty"`
+	ID      string          `json:"id"`
+	Event   string          `json:"event,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   any             `json:"error,omitempty"`
+}
+
+func (response openClawResponse) payload() json.RawMessage {
+	if len(response.Payload) > 0 {
+		return response.Payload
+	}
+	return response.Result
+}
+
+func (response openClawResponse) isEvent(event string) bool {
+	return response.Type == "event" && response.Event == event || response.Type == event || response.Method == event
+}
+
+func (response openClawResponse) isResponseOK() bool {
+	if response.OK != nil && !*response.OK {
+		return false
+	}
+	if response.Type == "res" {
+		return response.OK != nil && *response.OK
+	}
+	return response.Type == "" || response.Type == "hello-ok" || response.Type == "hello"
+}
+
+func (response openClawResponse) errorString() string {
+	switch value := response.Error.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(value)
+	case map[string]any:
+		for _, key := range []string{"message", "reason", "code"} {
+			if raw, ok := value[key]; ok && strings.TrimSpace(fmt.Sprint(raw)) != "" {
+				return strings.TrimSpace(fmt.Sprint(raw))
+			}
+		}
+	}
+	return strings.TrimSpace(fmt.Sprint(response.Error))
+}
+
+func openClawPayloadType(raw json.RawMessage) string {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(raw, &envelope)
+	return strings.TrimSpace(envelope.Type)
 }
 
 type openClawRunResult struct {

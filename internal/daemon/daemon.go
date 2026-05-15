@@ -161,6 +161,15 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
+			if r.activeRunMatchesWithoutNativeRunID(binding, frame) {
+				_ = r.clearRunMCPToken(binding, frame.RunID)
+				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "active run native id missing")
+				commandCache.storeReply(frame, failed)
+				if writeErr := writeFrame(failed); writeErr != nil {
+					return fmt.Errorf("write active run missing native id: %w", writeErr)
+				}
+				continue
+			}
 			if nativeRunID, ok := r.activeNativeRunIDForRunStart(binding, frame); ok {
 				accepted := session.RunAcceptedFrame(frame, nativeRunID)
 				commandCache.storeReply(frame, accepted)
@@ -259,13 +268,13 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if commandCache.seen(frame) {
 				continue
 			}
-			commandCache.mark(frame)
 			nativeRunID, err := r.nativeRunIDForCancel(binding, frame.RunID)
 			if err != nil {
-				return err
+				continue
 			}
+			commandCache.mark(frame)
 			if err := adapter.CancelRun(nativeRunID); err != nil {
-				return fmt.Errorf("cancel local run: %w", err)
+				continue
 			}
 		case externalagentprotocol.FrameTypeTokenRevoked:
 			if frame.TokenRevoked == nil {
@@ -353,6 +362,23 @@ func (r Runner) activeNativeRunIDForRunStart(binding config.Binding, frame exter
 		return "", false
 	}
 	return nativeRunID, true
+}
+
+func (r Runner) activeRunMatchesWithoutNativeRunID(binding config.Binding, frame externalagentprotocol.Frame) bool {
+	if r.Store == nil {
+		return false
+	}
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok {
+		return false
+	}
+	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(frame.RunID) {
+		return false
+	}
+	if strings.TrimSpace(latest.ActiveAssignmentID) != strings.TrimSpace(frame.AssignmentID) {
+		return false
+	}
+	return strings.TrimSpace(latest.ActiveNativeRunID) == ""
 }
 
 func (r Runner) activeRunConflict(binding config.Binding, frame externalagentprotocol.Frame) (string, bool) {

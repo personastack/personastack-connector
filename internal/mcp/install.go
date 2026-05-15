@@ -126,6 +126,7 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 		result.Note = live.Note
 		return result
 	}
+	result.State = runtime.AdapterStateMCPVerified
 	result.Note = live.Note + "; native runtime restart may be required"
 	return result
 }

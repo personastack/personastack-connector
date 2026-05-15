@@ -1,7 +1,10 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +57,38 @@ func TestInstallerWritesHermesStdioServer(t *testing.T) {
 	}
 	if !strings.Contains(string(shim), "exec '/usr/local/bin/personastack-connector'") {
 		t.Fatalf("unexpected shim:\n%s", shim)
+	}
+}
+
+func TestVerifyBindingWithLivePromotesVerifiedState(t *testing.T) {
+	homeDir := t.TempDir()
+	binding := config.Binding{
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		RuntimeKind:        runtime.AdapterKindHermes,
+		NativeMCPServer:    "personastack-conn-1",
+		PersonaMCPURL:      "",
+		PersonaMCPToken:    "token-1",
+		HasPersonaMCPToken: true,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodPost:
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	binding.PersonaMCPURL = server.URL
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	if _, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll(); err != nil {
+		t.Fatalf("InstallAll() error = %v", err)
+	}
+	verified := VerifyBindingWithLive(context.Background(), homeDir, binding, server.Client())
+	if verified.State != runtime.AdapterStateMCPVerified {
+		t.Fatalf("verified.State = %s note=%s", verified.State, verified.Note)
 	}
 }
 

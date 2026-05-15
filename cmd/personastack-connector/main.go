@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
@@ -124,7 +125,11 @@ func (cmd command) runPair(args []string) error {
 		return err
 	}
 	if kind == runtime.AdapterKindAuto {
-		kind = runtime.AdapterKindHermes
+		detectedKind, err := detectSingleReadyRuntime()
+		if err != nil {
+			return err
+		}
+		kind = detectedKind
 	}
 
 	writable, ok := cmd.store.(config.WritableStore)
@@ -190,7 +195,8 @@ func (cmd command) runStatus(ctx context.Context, args []string) error {
 		verifyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		verify := mcp.VerifyBindingWithLive(verifyCtx, homeDir, binding, nil)
 		cancel()
-		fmt.Fprintf(cmd.stdout, "%s persona=%s runtime=%s state=%s mcp=%s mcp_note=%q\n", binding.ConnectionID, binding.PersonaID, binding.RuntimeKind, binding.ReadinessState, verify.State, verify.Note)
+		detection := adapterForBinding(binding).Detect()
+		fmt.Fprintf(cmd.stdout, "%s persona=%s runtime=%s runtime_state=%s mcp=%s mcp_note=%q\n", binding.ConnectionID, binding.PersonaID, binding.RuntimeKind, detection.State, verify.State, verify.Note)
 	}
 	return nil
 }
@@ -210,6 +216,14 @@ func (cmd command) runRuntime(args []string) error {
 	if args[0] == "repair" {
 		if len(args) != 1 {
 			return errors.New("runtime repair accepts no arguments")
+		}
+		for _, binding := range cmd.store.ListBindings() {
+			detection := adapterForBinding(binding).Diagnose()
+			if detection.State != runtime.AdapterStateReady {
+				fmt.Fprintf(cmd.stdout, "runtime repair binding=%s runtime=%s state=%s note=%q action=manual_runtime_setup_required\n", binding.ConnectionID, binding.RuntimeKind, detection.State, detection.Note)
+				continue
+			}
+			fmt.Fprintf(cmd.stdout, "runtime repair binding=%s runtime=%s state=%s note=%q\n", binding.ConnectionID, binding.RuntimeKind, detection.State, detection.Note)
 		}
 		results, err := cmd.repairSetup(true)
 		if err != nil {
@@ -232,6 +246,44 @@ func (cmd command) runRuntime(args []string) error {
 		fmt.Fprintf(cmd.stdout, "%s %s %s\n", detection.Kind, detection.State, detection.Note)
 	}
 	return nil
+}
+
+func detectSingleReadyRuntime() (runtime.AdapterKind, error) {
+	var ready []runtime.Detection
+	for _, kind := range []runtime.AdapterKind{runtime.AdapterKindHermes, runtime.AdapterKindOpenClaw} {
+		detection := runtime.NewAdapter(kind).Detect()
+		if detection.State == runtime.AdapterStateReady {
+			ready = append(ready, detection)
+		}
+	}
+	switch len(ready) {
+	case 1:
+		return ready[0].Kind, nil
+	case 0:
+		return runtime.AdapterKindAuto, errors.New("runtime auto-detect found no ready Hermes or OpenClaw runtime")
+	default:
+		return runtime.AdapterKindAuto, errors.New("runtime auto-detect found multiple ready runtimes; rerun with --runtime hermes or --runtime openclaw")
+	}
+}
+
+func adapterForBinding(binding config.Binding) runtime.Adapter {
+	if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
+		return runtime.NewAdapter(binding.RuntimeKind)
+	}
+	return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{
+		Token:       firstNonEmpty(binding.OpenClawGatewayToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN")),
+		Password:    firstNonEmpty(binding.OpenClawPassword, os.Getenv("OPENCLAW_GATEWAY_PASSWORD")),
+		DeviceToken: firstNonEmpty(binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")),
+	}, binding.OpenClawAgentID)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (cmd command) runMCP(ctx context.Context, args []string) error {

@@ -118,6 +118,58 @@ func TestOpenClawAdapterStartRunUsesAgentMethod(t *testing.T) {
 	}
 }
 
+func TestOpenClawAdapterStartRunRejectsNotOKEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{Type: "res", ID: request.ID, OK: boolRef(false), Error: map[string]any{"message": "rejected"}})
+	}))
+	defer server.Close()
+
+	_, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StartRun(RunRequest{
+		AssignmentID:        "assignment-1",
+		FullyComposedPrompt: "prompt",
+	})
+	if err == nil {
+		t.Fatal("expected not-ok agent response to fail")
+	}
+}
+
+func TestOpenClawAdapterStartRunRejectsUntypedNotOKEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, OK: boolRef(false)})
+	}))
+	defer server.Close()
+
+	_, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StartRun(RunRequest{
+		AssignmentID:        "assignment-1",
+		FullyComposedPrompt: "prompt",
+	})
+	if err == nil {
+		t.Fatal("expected untyped not-ok agent response to fail")
+	}
+}
+
 func TestOpenClawAdapterWaitRunUsesAgentWait(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -144,6 +196,29 @@ func TestOpenClawAdapterWaitRunUsesAgentWait(t *testing.T) {
 	}
 	if result.Status != RunStatusSucceeded || result.Output != "done" {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestOpenClawAdapterWaitRunRejectsNotOKEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{Type: "res", ID: request.ID, OK: boolRef(false), Error: map[string]any{"message": "wait failed"}})
+	}))
+	defer server.Close()
+
+	_, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").WaitRun(context.Background(), "run-1")
+	if err == nil {
+		t.Fatal("expected not-ok wait response to fail")
 	}
 }
 
@@ -244,6 +319,29 @@ func TestOpenClawAdapterCancelRunSurfacesAbortError(t *testing.T) {
 	err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").CancelRun("run-1")
 	if err == nil {
 		t.Fatalf("expected cancel error")
+	}
+}
+
+func TestOpenClawAdapterCancelRunRejectsNotOKEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{Type: "res", ID: request.ID, OK: boolRef(false)})
+	}))
+	defer server.Close()
+
+	err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").CancelRun("run-1")
+	if err == nil {
+		t.Fatal("expected not-ok cancel response to fail")
 	}
 }
 
@@ -355,6 +453,45 @@ func TestOpenClawAdapterStoresDeviceTokenFromHello(t *testing.T) {
 	}
 }
 
+func TestOpenClawAdapterAcceptsResHelloPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(openClawResponse{Type: "event", Event: "connect.challenge"})
+		var connect openClawRequest
+		if err := conn.ReadJSON(&connect); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		payload := `{"protocol":4,"role":"operator","scopes":["operator.read","operator.write"],"features":{"methods":["health","status","agents.list","agent","agent.wait","sessions.abort"]}}`
+		_ = conn.WriteJSON(openClawResponse{Type: "res", ID: connect.ID, OK: boolRef(true), Payload: json.RawMessage(payload)})
+		var health openClawRequest
+		if err := conn.ReadJSON(&health); err != nil {
+			t.Fatalf("read health: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: health.ID, Result: json.RawMessage(`{"ok":true}`)})
+		var status openClawRequest
+		if err := conn.ReadJSON(&status); err != nil {
+			t.Fatalf("read status: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: status.ID, Result: json.RawMessage(`{"ok":true}`)})
+		var agents openClawRequest
+		if err := conn.ReadJSON(&agents); err != nil {
+			t.Fatalf("read agents.list: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: agents.ID, Result: json.RawMessage(`{"agents":[{"id":"agent-1"}]}`)})
+	}))
+	defer server.Close()
+
+	detection := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").Detect()
+	if detection.State != AdapterStateReady {
+		t.Fatalf("expected ready, got %+v", detection)
+	}
+}
+
 func openClawTestAcceptOperator(t *testing.T, conn *websocket.Conn, token string, methods string) {
 	t.Helper()
 	openClawTestAcceptOperatorWithDevice(t, conn, token, methods, "")
@@ -380,4 +517,8 @@ func openClawTestAcceptOperatorWithDevice(t *testing.T, conn *websocket.Conn, to
 	}
 	result := `{"protocol":4,"role":"operator","scopes":["operator.read","operator.write"],"features":{"methods":` + methods + `},"auth":{"deviceToken":"` + deviceToken + `"}}`
 	_ = conn.WriteJSON(openClawResponse{Type: "hello-ok", Result: json.RawMessage(result)})
+}
+
+func boolRef(value bool) *bool {
+	return &value
 }

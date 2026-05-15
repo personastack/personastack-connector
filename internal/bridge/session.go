@@ -143,6 +143,7 @@ func (s Session) RunStartedFrame(request externalagentprotocol.Frame, nativeRunI
 
 func (s Session) RunTerminalFrame(request externalagentprotocol.Frame, status externalagentprotocol.RunStatus, reason externalagentprotocol.TerminalReason, output string) externalagentprotocol.Frame {
 	frame := s.baseFrame(externalagentprotocol.FrameTypeRunCompleted, s.now())
+	frame.MessageID = strings.TrimSpace(request.MessageID)
 	if status == externalagentprotocol.RunStatusFailed {
 		frame.MessageType = externalagentprotocol.FrameTypeRunFailed
 	}
