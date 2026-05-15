@@ -11,12 +11,16 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/personastack/personastack-connector/internal/hermessetup"
 )
 
 const defaultHermesURL = "http://127.0.0.1:8642"
 const defaultHermesCancelWait = 15 * time.Second
+const hermesResponsesRunPrefix = "responses:"
 
 type HermesAdapter struct {
 	BaseURL string
@@ -27,6 +31,9 @@ type HermesAdapter struct {
 func NewHermesAdapter(baseURL string, apiKey string) HermesAdapter {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = defaultHermesURL
+	}
+	if strings.TrimSpace(apiKey) == "" {
+		apiKey = hermessetup.LoadAPIKey()
 	}
 	return HermesAdapter{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: strings.TrimSpace(apiKey), Client: defaultHTTPClient()}
 }
@@ -42,11 +49,11 @@ func (adapter HermesAdapter) Detect() Detection {
 	client := adapter.client()
 	resp, err := client.Get(adapter.BaseURL + "/health")
 	if err != nil {
-		return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeMissing, Note: "Hermes API unavailable"}
+		return adapter.unavailableDetection("Hermes API unavailable")
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeStopped, Note: fmt.Sprintf("health status %d", resp.StatusCode)}
+		return adapter.unavailableDetection(fmt.Sprintf("health status %d", resp.StatusCode))
 	}
 	if adapter.APIKey == "" {
 		return Detection{Kind: AdapterKindHermes, State: AdapterStateAuthMissing, Note: "HERMES_API_SERVER_KEY is required"}
@@ -116,10 +123,52 @@ func (adapter HermesAdapter) VerifyMCP(bindingID string) (AdapterState, error) {
 	return AdapterStateMCPConfigMissing, fmt.Errorf("Hermes MCP verification is not implemented")
 }
 
+func (adapter HermesAdapter) StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error) {
+	if err := adapter.validateLoopbackBaseURL(); err != nil {
+		return RunResult{}, err
+	}
+	trimmedRunID := strings.TrimSpace(nativeRunID)
+	if trimmedRunID == "" {
+		return RunResult{}, fmt.Errorf("native run id required")
+	}
+	if fallbackRunID, ok := hermesResponsesRunTarget(trimmedRunID); ok {
+		return adapter.waitHermesResponse(ctx, fallbackRunID, handle)
+	}
+	state := &runEventState{}
+	observer := func(event RunEvent) error {
+		if event.Kind == RunEventStarted {
+			return state.emitStarted(handle, event.StartedAt)
+		}
+		if handle == nil {
+			return nil
+		}
+		return handle(event)
+	}
+	if result, terminal, err := adapter.streamRunEvents(ctx, trimmedRunID, observer); err != nil {
+		return RunResult{}, err
+	} else if terminal {
+		return result, nil
+	}
+	return adapter.pollRunStatus(ctx, trimmedRunID, handle, state)
+}
+
+func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
+	return adapter.StreamOrPollRun(ctx, nativeRunID, nil)
+}
+
 func (adapter HermesAdapter) StartRun(request RunRequest) (string, error) {
 	if err := adapter.validateLoopbackBaseURL(); err != nil {
 		return "", err
 	}
+	if nativeRunID, err := adapter.startHermesRun(request); err == nil {
+		return nativeRunID, nil
+	} else if !hermesRunFallbackAllowed(err) {
+		return "", err
+	}
+	return adapter.startHermesResponse(request)
+}
+
+func (adapter HermesAdapter) startHermesRun(request RunRequest) (string, error) {
 	body := map[string]any{
 		"input":                strings.TrimSpace(request.FullyComposedPrompt),
 		"session_id":           strings.TrimSpace(firstNonEmpty(request.RunID, request.AssignmentID)),
@@ -146,7 +195,7 @@ func (adapter HermesAdapter) StartRun(request RunRequest) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("Hermes run dispatch status %d", resp.StatusCode)
+		return "", hermesRunDispatchError{status: resp.StatusCode, body: readHermesResponseBody(resp.Body)}
 	}
 	var decoded hermesRunResponse
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
@@ -159,23 +208,46 @@ func (adapter HermesAdapter) StartRun(request RunRequest) (string, error) {
 	return nativeRunID, nil
 }
 
-func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
-	if err := adapter.validateLoopbackBaseURL(); err != nil {
-		return RunResult{}, err
+func (adapter HermesAdapter) startHermesResponse(request RunRequest) (string, error) {
+	body := map[string]any{
+		"model":        "hermes-agent",
+		"input":        strings.TrimSpace(request.FullyComposedPrompt),
+		"store":        true,
+		"conversation": strings.TrimSpace(request.AssignmentID),
+		"metadata":     runMetadata(request),
 	}
-	trimmedRunID := strings.TrimSpace(nativeRunID)
-	if trimmedRunID == "" {
-		return RunResult{}, fmt.Errorf("native run id required")
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", err
 	}
-	if result, terminal, err := adapter.waitRunEvents(ctx, trimmedRunID); err != nil {
-		return RunResult{}, err
-	} else if terminal {
-		return result, nil
+	req, err := http.NewRequest(http.MethodPost, adapter.BaseURL+"/v1/responses", bytes.NewReader(raw))
+	if err != nil {
+		return "", err
 	}
-	return adapter.waitRunStatus(ctx, trimmedRunID)
+	req.Header.Set("Content-Type", "application/json")
+	if adapter.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
+	}
+	resp, err := adapter.client().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("Hermes response dispatch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("Hermes response dispatch status %d", resp.StatusCode)
+	}
+	var decoded hermesResponseResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return "", err
+	}
+	responseID := strings.TrimSpace(firstNonEmpty(decoded.ResponseID, decoded.ID))
+	if responseID == "" {
+		return "", fmt.Errorf("Hermes response missing id")
+	}
+	return hermesResponsesRunPrefix + responseID, nil
 }
 
-func (adapter HermesAdapter) waitRunEvents(ctx context.Context, nativeRunID string) (RunResult, bool, error) {
+func (adapter HermesAdapter) streamRunEvents(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, adapter.BaseURL+"/v1/runs/"+strings.TrimSpace(nativeRunID)+"/events", nil)
 	if err != nil {
 		return RunResult{}, false, err
@@ -195,22 +267,139 @@ func (adapter HermesAdapter) waitRunEvents(ctx context.Context, nativeRunID stri
 	if resp.StatusCode >= 300 {
 		return RunResult{}, false, fmt.Errorf("Hermes run events status %d", resp.StatusCode)
 	}
-	result, terminal, err := readHermesRunEvents(resp.Body)
+	result, terminal, err := readHermesRunEvents(resp.Body, handle)
 	if err != nil {
 		return RunResult{}, false, err
 	}
 	return result, terminal, nil
 }
 
-func readHermesRunEvents(body io.Reader) (RunResult, bool, error) {
+func (adapter HermesAdapter) pollRunStatus(ctx context.Context, nativeRunID string, handle RunEventHandler, state *runEventState) (RunResult, error) {
+	result, err := adapter.waitHermesRunStatus(ctx, nativeRunID)
+	if err != nil {
+		return RunResult{}, err
+	}
+	if state != nil {
+		if err := state.emitStarted(handle, time.Time{}); err != nil {
+			return RunResult{}, err
+		}
+	}
+	return result, nil
+}
+
+func (adapter HermesAdapter) waitHermesRunStatus(ctx context.Context, nativeRunID string) (RunResult, error) {
+	if fallbackRunID, ok := hermesResponsesRunTarget(nativeRunID); ok {
+		return adapter.waitHermesResponse(ctx, fallbackRunID, nil)
+	}
+	return adapter.waitRunStatus(ctx, nativeRunID)
+}
+
+func (adapter HermesAdapter) waitHermesResponse(ctx context.Context, responseID string, handle RunEventHandler) (RunResult, error) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		result, terminal, err := adapter.responseStatus(ctx, responseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if terminal {
+			if handle != nil {
+				if err := handle(RunEvent{Kind: RunEventStarted, StartedAt: time.Now().UTC()}); err != nil {
+					return RunResult{}, err
+				}
+			}
+			return result, nil
+		}
+		select {
+		case <-ctx.Done():
+			return RunResult{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (adapter HermesAdapter) responseStatus(ctx context.Context, responseID string) (RunResult, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, adapter.BaseURL+"/v1/responses/"+strings.TrimSpace(responseID), nil)
+	if err != nil {
+		return RunResult{}, false, err
+	}
+	if adapter.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
+	}
+	resp, err := adapter.client().Do(req)
+	if err != nil {
+		return RunResult{}, false, fmt.Errorf("Hermes response status: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return RunResult{Status: RunStatusCancelled}, true, nil
+	}
+	if resp.StatusCode >= 300 {
+		return RunResult{}, false, fmt.Errorf("Hermes response status %d", resp.StatusCode)
+	}
+	var decoded hermesResponseResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return RunResult{}, false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(decoded.Status)) {
+	case "completed", "succeeded", "success":
+		return RunResult{Status: RunStatusSucceeded, Output: decoded.outputSummary()}, true, nil
+	case "failed", "error":
+		return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(firstNonEmpty(decoded.Error, decoded.outputSummary(), decoded.Text, decoded.Message))}, true, nil
+	case "cancelled", "canceled":
+		return RunResult{Status: RunStatusCancelled}, true, nil
+	default:
+		return RunResult{}, false, nil
+	}
+}
+
+func readHermesRunEvents(body io.Reader, handle RunEventHandler) (RunResult, bool, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var data []string
+	started := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
-			if result, terminal := hermesRunEventResult(strings.Join(data, "\n")); terminal {
-				return result, true, nil
+			if result, terminal, event, hasEvent := hermesRunEventResult(strings.Join(data, "\n")); hasEvent {
+				if !started {
+					started = true
+					if handle != nil {
+						if err := handle(RunEvent{Kind: RunEventStarted, StartedAt: hermesRunEventStartedAt(event)}); err != nil {
+							return RunResult{}, false, err
+						}
+					}
+				}
+				if handle != nil {
+					for _, runEvent := range hermesRunEventsForEvent(event) {
+						if err := handle(runEvent); err != nil {
+							return RunResult{}, false, err
+						}
+					}
+				}
+				if terminal {
+					return result, true, nil
+				}
+			} else if result, terminal := hermesRunEventResultLegacy(strings.Join(data, "\n")); terminal {
+				if !started {
+					started = true
+					if handle != nil {
+						if err := handle(RunEvent{Kind: RunEventStarted, StartedAt: time.Now().UTC()}); err != nil {
+							return RunResult{}, false, err
+						}
+					}
+				}
+				if terminal {
+					return result, true, nil
+				}
+			}
+			if len(data) > 0 && !started {
+				started = true
+				if handle != nil {
+					if err := handle(RunEvent{Kind: RunEventStarted, StartedAt: time.Now().UTC()}); err != nil {
+						return RunResult{}, false, err
+					}
+				}
 			}
 			data = nil
 			continue
@@ -222,20 +411,37 @@ func readHermesRunEvents(body io.Reader) (RunResult, bool, error) {
 	if err := scanner.Err(); err != nil {
 		return RunResult{}, false, fmt.Errorf("read Hermes run events: %w", err)
 	}
-	if result, terminal := hermesRunEventResult(strings.Join(data, "\n")); terminal {
-		return result, true, nil
+	if result, terminal, event, hasEvent := hermesRunEventResult(strings.Join(data, "\n")); hasEvent {
+		if !started {
+			started = true
+			if handle != nil {
+				if err := handle(RunEvent{Kind: RunEventStarted, StartedAt: hermesRunEventStartedAt(event)}); err != nil {
+					return RunResult{}, false, err
+				}
+			}
+		}
+		if handle != nil {
+			for _, runEvent := range hermesRunEventsForEvent(event) {
+				if err := handle(runEvent); err != nil {
+					return RunResult{}, false, err
+				}
+			}
+		}
+		if terminal {
+			return result, true, nil
+		}
 	}
 	return RunResult{}, false, nil
 }
 
-func hermesRunEventResult(raw string) (RunResult, bool) {
+func hermesRunEventResult(raw string) (RunResult, bool, hermesRunEvent, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" || trimmed == "[DONE]" {
-		return RunResult{}, false
+		return RunResult{}, false, hermesRunEvent{}, false
 	}
 	var event hermesRunEvent
 	if err := json.Unmarshal([]byte(trimmed), &event); err != nil {
-		return RunResult{}, false
+		return RunResult{}, false, hermesRunEvent{}, false
 	}
 	if len(event.Data) > 0 {
 		var nested hermesRunEvent
@@ -246,14 +452,95 @@ func hermesRunEventResult(raw string) (RunResult, bool) {
 	status := strings.ToLower(strings.TrimSpace(firstNonEmpty(event.Status, event.Type, event.Event)))
 	switch status {
 	case "run.completed", "completed", "succeeded", "success":
-		return RunResult{Status: RunStatusSucceeded, Output: strings.TrimSpace(event.Output)}, true
+		return RunResult{Status: RunStatusSucceeded, Output: strings.TrimSpace(event.Output)}, true, event, true
 	case "run.failed", "failed", "error":
-		return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(firstNonEmpty(event.Error, event.Output))}, true
+		return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(firstNonEmpty(event.Error, event.Output))}, true, event, true
 	case "run.cancelled", "run.canceled", "cancelled", "canceled":
-		return RunResult{Status: RunStatusCancelled}, true
+		return RunResult{Status: RunStatusCancelled}, true, event, true
 	default:
+		return RunResult{}, false, event, true
+	}
+}
+
+func hermesRunEventResultLegacy(raw string) (RunResult, bool) {
+	result, terminal, _, hasEvent := hermesRunEventResult(raw)
+	if !hasEvent {
 		return RunResult{}, false
 	}
+	return result, terminal
+}
+
+func hermesRunEventsForEvent(event hermesRunEvent) []RunEvent {
+	events := []RunEvent{}
+	if delta := firstNonEmpty(hermesRunEventString(event, "deltaText"), hermesRunEventString(event, "delta"), hermesRunEventString(event, "text"), event.Output); delta != "" {
+		events = append(events, RunEvent{Kind: RunEventOutputDelta, Delta: delta})
+	}
+	toolName := firstNonEmpty(hermesRunEventString(event, "toolName"), hermesRunEventString(event, "tool"), hermesRunEventString(event, "name"))
+	phase := firstNonEmpty(hermesRunEventString(event, "phase"), hermesRunEventString(event, "status"))
+	summary := firstNonEmpty(hermesRunEventString(event, "summary"), hermesRunEventString(event, "message"), event.Output, event.Error)
+	if toolName != "" || phase != "" || summary != "" {
+		events = append(events, RunEvent{Kind: RunEventToolEvent, ToolName: toolName, ToolPhase: phase, Summary: summary})
+	}
+	return events
+}
+
+func hermesRunEventStartedAt(event hermesRunEvent) time.Time {
+	if startedAt, ok := hermesRunEventTime(event, "startedAt", "started_at"); ok {
+		return startedAt
+	}
+	return time.Now().UTC()
+}
+
+func hermesRunEventString(event hermesRunEvent, names ...string) string {
+	if len(event.Data) > 0 {
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(event.Data, &envelope); err == nil {
+			for _, name := range names {
+				if raw, ok := envelope[name]; ok {
+					var value string
+					if err := json.Unmarshal(raw, &value); err == nil {
+						return strings.TrimSpace(value)
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func hermesRunEventTime(event hermesRunEvent, names ...string) (time.Time, bool) {
+	if len(event.Data) == 0 {
+		return time.Time{}, false
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(event.Data, &envelope); err != nil {
+		return time.Time{}, false
+	}
+	for _, name := range names {
+		if raw, ok := envelope[name]; ok {
+			if parsed, ok := parseHermesJSONTime(raw); ok {
+				return parsed, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func parseHermesJSONTime(raw json.RawMessage) (time.Time, bool) {
+	if len(raw) == 0 {
+		return time.Time{}, false
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(text)); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	var millis int64
+	if err := json.Unmarshal(raw, &millis); err == nil {
+		return time.UnixMilli(millis).UTC(), true
+	}
+	return time.Time{}, false
 }
 
 func mergeHermesRunEvents(parent hermesRunEvent, child hermesRunEvent) hermesRunEvent {
@@ -328,6 +615,9 @@ func (adapter HermesAdapter) CancelRun(nativeRunID string) error {
 	if trimmedRunID == "" {
 		return fmt.Errorf("native run id required")
 	}
+	if fallbackRunID, ok := hermesResponsesRunTarget(trimmedRunID); ok {
+		return adapter.cancelHermesResponse(fallbackRunID)
+	}
 	req, err := http.NewRequest(http.MethodPost, adapter.BaseURL+"/v1/runs/"+strings.TrimSpace(nativeRunID)+"/stop", nil)
 	if err != nil {
 		return err
@@ -356,8 +646,49 @@ func (adapter HermesAdapter) CancelRun(nativeRunID string) error {
 	return nil
 }
 
+func (adapter HermesAdapter) cancelHermesResponse(responseID string) error {
+	req, err := http.NewRequest(http.MethodDelete, adapter.BaseURL+"/v1/responses/"+strings.TrimSpace(responseID), nil)
+	if err != nil {
+		return err
+	}
+	if adapter.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
+	}
+	resp, err := adapter.client().Do(req)
+	if err != nil {
+		return fmt.Errorf("Hermes response delete: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		return fmt.Errorf("Hermes response fallback does not provide native stop")
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("Hermes response delete status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (adapter HermesAdapter) Diagnose() Detection {
 	return adapter.Detect()
+}
+
+func (adapter HermesAdapter) unavailableDetection(prefix string) Detection {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeMissing, Note: prefix + "; resolve home dir: " + err.Error()}
+	}
+	diagnostic := hermessetup.Diagnose(homeDir)
+	note := prefix
+	if strings.TrimSpace(diagnostic.Note) != "" {
+		note += "; " + diagnostic.Note
+	}
+	if diagnostic.State == hermessetup.SetupStateNeedsEnv {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeStopped, Note: note}
+	}
+	if diagnostic.State == hermessetup.SetupStateNeedsConfig {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateMCPConfigMissing, Note: note}
+	}
+	return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeStopped, Note: note}
 }
 
 func (adapter HermesAdapter) client() *http.Client {
@@ -416,6 +747,101 @@ type hermesCapabilities struct {
 		RunEventsSSE  bool `json:"run_events_sse"`
 		RunStop       bool `json:"run_stop"`
 	} `json:"features"`
+}
+
+type hermesRunDispatchError struct {
+	status int
+	body   string
+}
+
+func (err hermesRunDispatchError) Error() string {
+	if strings.TrimSpace(err.body) != "" {
+		return fmt.Sprintf("Hermes run dispatch status %d: %s", err.status, strings.TrimSpace(err.body))
+	}
+	return fmt.Sprintf("Hermes run dispatch status %d", err.status)
+}
+
+func hermesRunFallbackAllowed(err error) bool {
+	dispatchErr, ok := err.(hermesRunDispatchError)
+	if !ok {
+		return false
+	}
+	switch dispatchErr.status {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
+}
+
+func readHermesResponseBody(body io.Reader) string {
+	raw, _ := io.ReadAll(io.LimitReader(body, 4096))
+	return strings.TrimSpace(string(raw))
+}
+
+func hermesResponsesRunTarget(nativeRunID string) (string, bool) {
+	trimmed := strings.TrimSpace(nativeRunID)
+	if !strings.HasPrefix(trimmed, hermesResponsesRunPrefix) {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(trimmed, hermesResponsesRunPrefix)), true
+}
+
+type hermesResponseResponse struct {
+	ID          string          `json:"id"`
+	ResponseID  string          `json:"response_id"`
+	Status      string          `json:"status"`
+	Output      json.RawMessage `json:"output"`
+	OutputText  string          `json:"output_text"`
+	Text        string          `json:"text"`
+	Message     string          `json:"message"`
+	Error       string          `json:"error"`
+	Diagnostics json.RawMessage `json:"diagnostics"`
+}
+
+func (response hermesResponseResponse) OutputString() string {
+	if len(response.Output) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(response.Output, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	return ""
+}
+
+func (response hermesResponseResponse) OutputTextFromArray() string {
+	if len(response.Output) == 0 {
+		return ""
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal(response.Output, &entries); err != nil {
+		return ""
+	}
+	var parts []string
+	for _, entry := range entries {
+		for _, key := range []string{"text", "message", "output"} {
+			if raw, ok := entry[key]; ok {
+				if text := strings.TrimSpace(fmt.Sprint(raw)); text != "" {
+					parts = append(parts, text)
+					break
+				}
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (response hermesResponseResponse) outputSummary() string {
+	parts := []string{
+		response.OutputText,
+		response.OutputString(),
+		response.OutputTextFromArray(),
+		strings.TrimSpace(string(response.Output)),
+		response.Text,
+		response.Message,
+	}
+	return firstNonEmpty(parts...)
 }
 
 func (capabilities hermesCapabilities) missingRequiredFeatures() []string {

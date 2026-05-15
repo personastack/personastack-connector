@@ -63,7 +63,7 @@ external persona.
 
 - `personastack-connector pair <code> --runtime auto --configure-mcp`
 - `personastack-connector pair <code> --runtime hermes --configure-mcp`
-- `personastack-connector pair <code> --runtime openclaw --configure-mcp`
+- `personastack-connector pair <code> --runtime openclaw --configure-mcp --openclaw-token <token>`
 - `personastack-connector status`
 - `personastack-connector status --repair`
 - `personastack-connector runtime detect`
@@ -75,6 +75,14 @@ external persona.
 - `personastack-connector unpair`
 
 Default setup must require only package installation plus the pairing command.
+OpenClaw pairing must collect or locate an approved operator credential through
+`--openclaw-token`, `--openclaw-password`, `--openclaw-device-token`, or the
+matching `OPENCLAW_GATEWAY_*` environment variables before it reports local
+runtime setup as usable.
+
+The V1 Connector does not expose a local HTTP UI/control listener. CLI control
+is local process execution and native MCP uses stdio; any future local control
+server must bind loopback only.
 
 ## Runtime Adapters
 
@@ -117,6 +125,9 @@ Adapter result states must be concrete typed enums, including:
   runtime run id in binding state while the run is active and clears them on
   terminal cleanup.
 - Native runtime config must not contain PersonaStack bearer tokens by default.
+- Native runtime config must not become a plaintext header export surface; any
+  required auth material stays Connector-local and is handled by the stdio
+  proxy, not by exposing native runtime config or tools as PersonaStack surface.
 - Streamable HTTP SSE responses may be long-lived; the stdio proxy must emit the
   first complete JSON-RPC SSE event back to stdio without waiting for stream EOF.
 - After MCP initialization completes, the stdio proxy must open the Streamable
@@ -182,16 +193,27 @@ Adapter result states must be concrete typed enums, including:
   requests and `main` pushes.
 - Tagged releases build GoReleaser archives for macOS/Linux/Windows plus Linux
   `.deb` and `.rpm` packages, publish checksum/SBOM artifacts to a draft GitHub
-  Release, upload a machine-readable release manifest, and emit GitHub
-  provenance attestations for `dist/*`.
+  Release, upload a machine-readable release manifest plus manifest checksum,
+  and emit GitHub provenance attestations for `dist/*`.
 - The binary must expose `personastack-connector version` so install flows and
   support diagnostics can verify the downloaded artifact.
+- V1 signed distribution channels are GitHub Release archives for macOS,
+  Linux, and Windows plus Linux `.deb` and `.rpm` packages. Homebrew and
+  winget metadata are deferred until signed package-manager metadata exists.
+- Stable public release activation is a separate `personastack-ship` gate and
+  is not part of routine implementation completion.
 - WSL2 uses the Linux Connector inside the WSL2 environment.
 - Linux service installation prefers `systemd --user` and falls back to an XDG
   autostart desktop entry when user systemd is unavailable.
 - iOS and Android are not Connector host targets in V1.
 - Release artifacts must be signed or checksummed before appearing in default
   setup UX.
+- Release workflow validation must check repo tag/environment protection policy
+  through GitHub CLI metadata when available and fail closed when the release
+  environment lacks required reviewers.
+- GitHub repository visibility is public at
+  `https://github.com/personastack/personastack-connector`; install and support
+  docs may link to public release artifacts.
 
 ## Testing
 

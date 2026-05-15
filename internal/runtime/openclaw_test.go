@@ -5,7 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -273,6 +278,117 @@ func TestOpenClawAdapterWaitRunDoesNotSucceedAfterContextCancel(t *testing.T) {
 	}
 }
 
+func TestOpenClawAdapterStreamOrPollRunForwardsBroadcastEvents(t *testing.T) {
+	events := []RunEvent{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read agent.wait: %v", err)
+		}
+		if request.Method != "agent.wait" {
+			t.Fatalf("expected agent.wait, got %+v", request)
+		}
+		_ = conn.WriteJSON(openClawResponse{Type: "event", Event: "chat", Payload: json.RawMessage(`{"deltaText":"chunk"}`)})
+		_ = conn.WriteJSON(openClawResponse{Type: "event", Event: "session.tool", Payload: json.RawMessage(`{"toolName":"browser","phase":"started","summary":"opening"}`)})
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"status":"completed","output":"done"}`)})
+	}))
+	defer server.Close()
+
+	result, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StreamOrPollRun(context.Background(), "run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(events) != 3 {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	if events[0].Kind != RunEventStarted {
+		t.Fatalf("first event = %+v", events[0])
+	}
+	if events[1].Kind != RunEventOutputDelta || events[1].Delta != "chunk" {
+		t.Fatalf("second event = %+v", events[1])
+	}
+	if events[2].Kind != RunEventToolEvent || events[2].ToolName != "browser" || events[2].ToolPhase != "started" || events[2].Summary != "opening" {
+		t.Fatalf("third event = %+v", events[2])
+	}
+}
+
+func TestOpenClawAdapterStreamOrPollRunRetriesStartupSidecars(t *testing.T) {
+	var attempts int32
+	startedAt := "2026-05-14T19:31:05Z"
+	events := []RunEvent{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		for {
+			var request openClawRequest
+			if err := conn.ReadJSON(&request); err != nil {
+				t.Fatalf("read agent.wait: %v", err)
+			}
+			if request.Method != "agent.wait" {
+				t.Fatalf("expected agent.wait, got %+v", request)
+			}
+			switch atomic.AddInt32(&attempts, 1) {
+			case 1:
+				_ = conn.WriteJSON(openClawResponse{
+					Type:   "res",
+					ID:     request.ID,
+					OK:     boolRef(false),
+					Error:  map[string]any{"details": map[string]any{"code": "UNAVAILABLE", "reason": "startup-sidecars", "retryAfterMs": 1}},
+					Result: nil,
+				})
+			case 2:
+				_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: json.RawMessage(`{"status":"completed","output":"done","startedAt":"` + startedAt + `"}`)})
+				return
+			default:
+				t.Fatalf("unexpected retry attempt %d", attempts)
+			}
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StreamOrPollRun(context.Background(), "run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if atomic.LoadInt32(&attempts) != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if len(events) != 1 || events[0].Kind != RunEventStarted {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	parsedStartedAt, err := time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		t.Fatalf("parse startedAt: %v", err)
+	}
+	if !events[0].StartedAt.Equal(parsedStartedAt) {
+		t.Fatalf("startedAt = %s want %s", events[0].StartedAt, parsedStartedAt)
+	}
+}
+
 func TestOpenClawAdapterCancelRunReadsAbortResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -343,6 +459,52 @@ func TestOpenClawAdapterCancelRunRejectsNotOKEnvelope(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected not-ok cancel response to fail")
 	}
+}
+
+func TestOpenClawAdapterCLIJSONFallbackUsesCachedResult(t *testing.T) {
+	t.Setenv("PATH", tempPathWithOpenClawCLI(t))
+	adapter := NewOpenClawAdapterWithAuth("ws://127.0.0.1:1", OpenClawAuth{Token: "token-1"}, "agent-1")
+
+	runID, err := adapter.StartRun(RunRequest{
+		AssignmentID:        "assignment-1",
+		FullyComposedPrompt: "prompt",
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	if runID != "assignment-1" {
+		t.Fatalf("run id = %q", runID)
+	}
+
+	events := []RunEvent{}
+	result, err := adapter.StreamOrPollRun(context.Background(), runID, func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "fallback output" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(events) != 1 || events[0].Kind != RunEventStarted {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+
+	if err := adapter.CancelRun(runID); err == nil || !strings.Contains(err.Error(), "does not support cancellation") {
+		t.Fatalf("CancelRun() error = %v", err)
+	}
+}
+
+func tempPathWithOpenClawCLI(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "openclaw")
+	raw := []byte("#!/bin/sh\nprintf '%s\\n' '{\"meta\":{\"transport\":\"embedded\",\"fallbackFrom\":\"gateway\"},\"payloads\":[{\"text\":\"fallback output\"}]}'\n")
+	if err := os.WriteFile(script, raw, 0o755); err != nil {
+		t.Fatalf("write fake openclaw: %v", err)
+	}
+	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
 }
 
 func TestOpenClawAdapterDetectRequiresAgentSelection(t *testing.T) {

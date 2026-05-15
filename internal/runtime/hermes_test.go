@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -121,6 +122,65 @@ func TestHermesAdapterStartRun(t *testing.T) {
 	}
 }
 
+func TestHermesAdapterFallsBackToResponsesWhenRunsUnavailable(t *testing.T) {
+	var deleted bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/v1/models", "/health/detailed":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/v1/capabilities":
+			_, _ = w.Write([]byte(`{"features":{"run_submission":true,"run_status":true,"run_events_sse":true,"run_stop":true}}`))
+		case "/v1/runs":
+			http.NotFound(w, r)
+		case "/v1/responses":
+			if r.Method != http.MethodPost {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":"resp-1","status":"completed","output_text":"done"}`))
+		case "/v1/responses/resp-1":
+			switch r.Method {
+			case http.MethodGet:
+				_, _ = w.Write([]byte(`{"id":"resp-1","status":"completed","output_text":"done"}`))
+			case http.MethodDelete:
+				deleted = true
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	adapter := NewHermesAdapter(server.URL, "key-1")
+	runID, err := adapter.StartRun(RunRequest{
+		RunID:               "run-1",
+		AssignmentID:        "assignment-1",
+		FullyComposedPrompt: "prompt",
+	})
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if runID != hermesResponsesRunPrefix+"resp-1" {
+		t.Fatalf("run id = %q", runID)
+	}
+	result, err := adapter.WaitRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("wait run: %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if err := adapter.CancelRun(runID); err != nil {
+		t.Fatalf("cancel run: %v", err)
+	}
+	if !deleted {
+		t.Fatalf("expected response delete on cancel")
+	}
+}
+
 func TestHermesAdapterRejectsNonLoopbackURL(t *testing.T) {
 	detection := NewHermesAdapter("http://192.0.2.10:8642", "key-1").Detect()
 	if detection.State != AdapterStateRuntimeMissing {
@@ -141,8 +201,20 @@ func TestHermesAdapterRejectsRedirectToNonLoopbackURL(t *testing.T) {
 	}))
 	defer server.Close()
 	detection := NewHermesAdapter(server.URL, "key-1").Detect()
-	if detection.State != AdapterStateRuntimeMissing {
-		t.Fatalf("expected runtime missing, got %+v", detection)
+	if detection.State != AdapterStateRuntimeStopped {
+		t.Fatalf("expected runtime stopped, got %+v", detection)
+	}
+}
+
+func TestHermesAdapterDetectReportsHermesSetupDiagnostics(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	detection := NewHermesAdapter("http://127.0.0.1:65535", "").Detect()
+	if detection.State != AdapterStateRuntimeStopped {
+		t.Fatalf("expected runtime stopped, got %+v", detection)
+	}
+	if !strings.Contains(detection.Note, "API_SERVER_ENABLED") {
+		t.Fatalf("expected local Hermes env diagnostics, got %q", detection.Note)
 	}
 }
 
@@ -172,6 +244,42 @@ func TestHermesAdapterWaitRunUsesSSEEvents(t *testing.T) {
 	}
 	if statusPolled {
 		t.Fatalf("status endpoint should not be polled after terminal SSE event")
+	}
+}
+
+func TestHermesAdapterStreamOrPollRunForwardsDeltaAndStarted(t *testing.T) {
+	events := []RunEvent{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"progress\",\"data\":{\"deltaText\":\"chunk\"}}\n\n"))
+		case "/v1/runs/hermes-run-1":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "completed",
+				"output": "done",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewHermesAdapter(server.URL, "key-1").StreamOrPollRun(context.Background(), "hermes-run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(events) != 2 || events[0].Kind != RunEventStarted || events[1].Kind != RunEventOutputDelta || events[1].Delta != "chunk" {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	if events[0].StartedAt.IsZero() {
+		t.Fatalf("started event missing timestamp")
 	}
 }
 

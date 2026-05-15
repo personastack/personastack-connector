@@ -12,10 +12,14 @@ func TestBuildManifestScansReleaseAssets(t *testing.T) {
 	files := map[string]string{
 		"personastack-connector_0.2.0_darwin_arm64.tar.gz": "artifact",
 		"personastack-connector_0.2.0_linux_amd64.deb":     "artifact",
+		"personastack-connector_0.2.0_linux_amd64.rpm":     "artifact",
+		"personastack-connector_0.2.0_windows_amd64.zip":   "artifact",
 		"personastack-connector_0.2.0_sbom.spdx.json":      "{}",
 		"personastack-connector_0.2.0_checksums.txt": "aaa111  personastack-connector_0.2.0_darwin_arm64.tar.gz\n" +
 			"bbb222  personastack-connector_0.2.0_linux_amd64.deb\n" +
-			"ccc333  personastack-connector_0.2.0_sbom.spdx.json\n",
+			"ccc333  personastack-connector_0.2.0_linux_amd64.rpm\n" +
+			"ddd444  personastack-connector_0.2.0_windows_amd64.zip\n" +
+			"eee555  personastack-connector_0.2.0_sbom.spdx.json\n",
 		"personastack-connector_0.2.0_darwin_arm64.tar.gz.sig": "signature",
 	}
 	for name, body := range files {
@@ -34,7 +38,7 @@ func TestBuildManifestScansReleaseAssets(t *testing.T) {
 	if manifest.MinimumProtocol != "external-agent-v1" {
 		t.Fatalf("minimum protocol = %q", manifest.MinimumProtocol)
 	}
-	if len(manifest.Assets) != 4 {
+	if len(manifest.Assets) != 6 {
 		t.Fatalf("assets len = %d", len(manifest.Assets))
 	}
 	archive := manifest.Assets[1]

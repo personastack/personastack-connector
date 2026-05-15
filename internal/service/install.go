@@ -200,7 +200,7 @@ X-GNOME-Autostart-enabled=true
 	if err := writeOwnerOnly(path, []byte(entry)); err != nil {
 		return InstallResult{}, err
 	}
-	return InstallResult{Kind: "linux-autostart", Path: path}, nil
+	return InstallResult{Kind: "no_user_service_manager", Path: path}, nil
 }
 
 func (installer Installer) installWindowsTask(homeDir string, executablePath string) (InstallResult, error) {

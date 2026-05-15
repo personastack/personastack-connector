@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,17 +15,21 @@ import (
 	"github.com/personastack/personastack-connector/internal/buildinfo"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/daemon"
+	"github.com/personastack/personastack-connector/internal/hermessetup"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/pairing"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/service"
+	"github.com/zalando/go-keyring"
 )
 
 const usage = `Usage:
-  personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--configure-mcp]
+  personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--configure-mcp] [--openclaw-token <token>|--openclaw-password <password>|--openclaw-device-token <token>] [--openclaw-agent-id <id>]
   personastack-connector status [--repair]
   personastack-connector runtime detect
   personastack-connector runtime repair
+  personastack-connector runtime hermes configure [--enable-api] [--configure-mcp]
+  personastack-connector runtime openclaw configure [--gateway ws://127.0.0.1:18789] [--configure-mcp]
   personastack-connector mcp install
   personastack-connector mcp repair
   personastack-connector mcp stdio --binding <connection_id>
@@ -43,6 +48,9 @@ type command struct {
 }
 
 func main() {
+	if strings.TrimSpace(os.Getenv("PERSONASTACK_CONNECTOR_MOCK_KEYRING")) == "1" {
+		keyring.MockInit()
+	}
 	cmd := command{
 		stdin:  os.Stdin,
 		stdout: os.Stdout,
@@ -111,6 +119,10 @@ func (cmd command) runPair(args []string) error {
 	runtimeValue := flags.String("runtime", "auto", "runtime adapter")
 	configureMCP := flags.Bool("configure-mcp", true, "configure native runtime MCP")
 	gateway := flags.String("gateway", externalagentprotocol.DefaultGatewayBaseURL, "PersonaStack gateway URL")
+	openClawToken := flags.String("openclaw-token", "", "OpenClaw operator token")
+	openClawPassword := flags.String("openclaw-password", "", "OpenClaw operator password")
+	openClawDeviceToken := flags.String("openclaw-device-token", "", "OpenClaw operator device token")
+	openClawAgentID := flags.String("openclaw-agent-id", "", "OpenClaw agent id")
 
 	err := flags.Parse(args)
 	if err != nil {
@@ -144,7 +156,16 @@ func (cmd command) runPair(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := writable.SaveBinding(result.Binding); err != nil {
+	binding := result.Binding
+	if err := applyOpenClawPairOptions(&binding, openClawPairOptions{
+		token:       *openClawToken,
+		password:    *openClawPassword,
+		deviceToken: *openClawDeviceToken,
+		agentID:     *openClawAgentID,
+	}); err != nil {
+		return err
+	}
+	if err := writable.SaveBinding(binding); err != nil {
 		return err
 	}
 	repairResults, err := cmd.repairSetup(*configureMCP)
@@ -154,7 +175,28 @@ func (cmd command) runPair(args []string) error {
 	for _, repairResult := range repairResults {
 		fmt.Fprintln(cmd.stdout, repairResult)
 	}
-	fmt.Fprintf(cmd.stdout, "paired persona=%s connection=%s runtime=%s configure_mcp=%t\n", result.Binding.PersonaID, result.Binding.ConnectionID, result.Binding.RuntimeKind, *configureMCP)
+	fmt.Fprintf(cmd.stdout, "paired persona=%s connection=%s runtime=%s configure_mcp=%t setup_state=pending_bridge_wake_probe\n", binding.PersonaID, binding.ConnectionID, binding.RuntimeKind, *configureMCP)
+	return nil
+}
+
+type openClawPairOptions struct {
+	token       string
+	password    string
+	deviceToken string
+	agentID     string
+}
+
+func applyOpenClawPairOptions(binding *config.Binding, options openClawPairOptions) error {
+	if binding == nil || binding.RuntimeKind != runtime.AdapterKindOpenClaw {
+		return nil
+	}
+	binding.OpenClawGatewayToken = firstNonEmpty(options.token, binding.OpenClawGatewayToken)
+	binding.OpenClawPassword = firstNonEmpty(options.password, binding.OpenClawPassword)
+	binding.OpenClawDeviceToken = firstNonEmpty(options.deviceToken, binding.OpenClawDeviceToken)
+	binding.OpenClawAgentID = firstNonEmpty(options.agentID, binding.OpenClawAgentID)
+	if firstNonEmpty(binding.OpenClawGatewayToken, binding.OpenClawPassword, binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN"), os.Getenv("OPENCLAW_GATEWAY_PASSWORD"), os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")) == "" {
+		return errors.New("OpenClaw operator credential required; rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN")
+	}
 	return nil
 }
 
@@ -196,7 +238,18 @@ func (cmd command) runStatus(ctx context.Context, args []string) error {
 		verify := mcp.VerifyBindingWithLive(verifyCtx, homeDir, binding, nil)
 		cancel()
 		detection := adapterForBinding(binding).Detect()
-		fmt.Fprintf(cmd.stdout, "%s persona=%s runtime=%s runtime_state=%s mcp=%s mcp_note=%q\n", binding.ConnectionID, binding.PersonaID, binding.RuntimeKind, detection.State, verify.State, verify.Note)
+		fmt.Fprintf(cmd.stdout, "%s persona=%s runtime=%s runtime_state=%s mcp=%s mcp_note=%q active_run=%s active_assignment=%s active_native_run=%s active_run_mcp=%t\n",
+			binding.ConnectionID,
+			binding.PersonaID,
+			binding.RuntimeKind,
+			detection.State,
+			verify.State,
+			verify.Note,
+			emptyOrDash(binding.ActiveRunID),
+			emptyOrDash(binding.ActiveAssignmentID),
+			emptyOrDash(binding.ActiveNativeRunID),
+			binding.HasActiveRunMCPToken,
+		)
 	}
 	return nil
 }
@@ -234,6 +287,12 @@ func (cmd command) runRuntime(args []string) error {
 		}
 		return nil
 	}
+	if args[0] == "hermes" {
+		return cmd.runRuntimeHermes(args[1:])
+	}
+	if args[0] == "openclaw" {
+		return cmd.runRuntimeOpenClaw(args[1:])
+	}
 	if args[0] != "detect" {
 		return fmt.Errorf("unknown runtime subcommand %q", args[0])
 	}
@@ -244,6 +303,90 @@ func (cmd command) runRuntime(args []string) error {
 	for _, kind := range []runtime.AdapterKind{runtime.AdapterKindHermes, runtime.AdapterKindOpenClaw} {
 		detection := runtime.NewAdapter(kind).Detect()
 		fmt.Fprintf(cmd.stdout, "%s %s %s\n", detection.Kind, detection.State, detection.Note)
+	}
+	return nil
+}
+
+func (cmd command) runRuntimeHermes(args []string) error {
+	if len(args) == 0 || args[0] != "configure" {
+		return errors.New("runtime hermes requires configure")
+	}
+	flags := flag.NewFlagSet("runtime hermes configure", flag.ContinueOnError)
+	flags.SetOutput(cmd.stderr)
+
+	enableAPI := flags.Bool("enable-api", true, "enable Hermes API on loopback")
+	configureMCP := flags.Bool("configure-mcp", true, "configure native runtime MCP")
+
+	err := flags.Parse(args[1:])
+	if err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("runtime hermes configure accepts flags only")
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
+	if *enableAPI {
+		report, err := hermessetup.EnsureAPISetup(homeDir)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.stdout, "runtime hermes configure state=%s note=%q\n", report.State, report.Note)
+	}
+	if *configureMCP {
+		results, err := cmd.installMCPForKind(runtime.AdapterKindHermes)
+		if err != nil {
+			return err
+		}
+		for _, result := range results {
+			fmt.Fprintln(cmd.stdout, result)
+		}
+	}
+	return nil
+}
+
+func (cmd command) runRuntimeOpenClaw(args []string) error {
+	if len(args) == 0 || args[0] != "configure" {
+		return errors.New("runtime openclaw requires configure")
+	}
+	flags := flag.NewFlagSet("runtime openclaw configure", flag.ContinueOnError)
+	flags.SetOutput(cmd.stderr)
+
+	gateway := flags.String("gateway", "ws://127.0.0.1:18789", "OpenClaw Gateway URL")
+	configureMCP := flags.Bool("configure-mcp", true, "configure native runtime MCP")
+
+	err := flags.Parse(args[1:])
+	if err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("runtime openclaw configure accepts flags only")
+	}
+
+	bindings := filterBindingsByRuntime(cmd.store.ListBindings(), runtime.AdapterKindOpenClaw)
+	if len(bindings) == 0 {
+		fmt.Fprintf(cmd.stdout, "runtime openclaw configure gateway=%s no_bindings\n", strings.TrimSpace(*gateway))
+		return nil
+	}
+	for _, binding := range bindings {
+		detection := runtime.NewOpenClawAdapterWithAuth(*gateway, runtime.OpenClawAuth{
+			Token:       firstNonEmpty(binding.OpenClawGatewayToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN")),
+			Password:    firstNonEmpty(binding.OpenClawPassword, os.Getenv("OPENCLAW_GATEWAY_PASSWORD")),
+			DeviceToken: firstNonEmpty(binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")),
+		}, binding.OpenClawAgentID).Detect()
+		fmt.Fprintf(cmd.stdout, "runtime openclaw configure binding=%s gateway=%s state=%s note=%q\n", binding.ConnectionID, strings.TrimSpace(*gateway), detection.State, detection.Note)
+	}
+	if *configureMCP {
+		results, err := cmd.installMCPForKind(runtime.AdapterKindOpenClaw)
+		if err != nil {
+			return err
+		}
+		for _, result := range results {
+			fmt.Fprintln(cmd.stdout, result)
+		}
 	}
 	return nil
 }
@@ -277,6 +420,16 @@ func adapterForBinding(binding config.Binding) runtime.Adapter {
 	}, binding.OpenClawAgentID)
 }
 
+func filterBindingsByRuntime(bindings []config.Binding, kind runtime.AdapterKind) []config.Binding {
+	filtered := make([]config.Binding, 0, len(bindings))
+	for _, binding := range bindings {
+		if binding.RuntimeKind == kind {
+			filtered = append(filtered, binding)
+		}
+	}
+	return filtered
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -284,6 +437,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func emptyOrDash(value string) string {
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		return trimmed
+	}
+	return "-"
 }
 
 func (cmd command) runMCP(ctx context.Context, args []string) error {
@@ -329,6 +489,26 @@ func (cmd command) runMCPRepair(args []string) error {
 		fmt.Fprintln(cmd.stdout, result)
 	}
 	return nil
+}
+
+func (cmd command) installMCPForKind(kind runtime.AdapterKind) ([]string, error) {
+	bindings := filterBindingsByRuntime(cmd.store.ListBindings(), kind)
+	if len(bindings) == 0 {
+		return nil, nil
+	}
+	results, err := (mcp.Installer{Store: config.NewMemoryStore(config.State{Bindings: bindings})}).InstallAll()
+	if err != nil {
+		return nil, err
+	}
+	lines := make([]string, 0, len(results))
+	for _, result := range results {
+		line := fmt.Sprintf("installed mcp binding=%s runtime=%s server=%s path=%s", result.ConnectionID, result.Runtime, result.ServerName, result.Path)
+		if strings.TrimSpace(result.Note) != "" {
+			line = line + " note=" + strconv.Quote(result.Note)
+		}
+		lines = append(lines, line)
+	}
+	return lines, nil
 }
 
 func (cmd command) runMCPStdio(ctx context.Context, args []string) error {
@@ -402,7 +582,11 @@ func (cmd command) installMCP() ([]string, error) {
 	}
 	lines := make([]string, 0, len(results))
 	for _, result := range results {
-		lines = append(lines, fmt.Sprintf("installed mcp binding=%s runtime=%s server=%s path=%s", result.ConnectionID, result.Runtime, result.ServerName, result.Path))
+		line := fmt.Sprintf("installed mcp binding=%s runtime=%s server=%s path=%s", result.ConnectionID, result.Runtime, result.ServerName, result.Path)
+		if strings.TrimSpace(result.Note) != "" {
+			line = line + " note=" + strconv.Quote(result.Note)
+		}
+		lines = append(lines, line)
 	}
 	return lines, nil
 }

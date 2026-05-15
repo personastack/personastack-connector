@@ -169,3 +169,69 @@ func TestFileStoreDeleteBindingDeletesSecrets(t *testing.T) {
 		t.Fatalf("expected secrets deleted: %+v", secrets)
 	}
 }
+
+func TestFileStoreKeepsSecretsDistinctPerBinding(t *testing.T) {
+	secrets := map[string]string{}
+	originalGet := keyringGet
+	originalSet := keyringSet
+	originalDelete := keyringDelete
+	keyringGet = func(service string, user string) (string, error) {
+		value, ok := secrets[service+":"+user]
+		if !ok {
+			return "", os.ErrNotExist
+		}
+		return value, nil
+	}
+	keyringSet = func(service string, user string, password string) error {
+		secrets[service+":"+user] = password
+		return nil
+	}
+	keyringDelete = func(service string, user string) error {
+		delete(secrets, service+":"+user)
+		return nil
+	}
+	t.Cleanup(func() {
+		keyringGet = originalGet
+		keyringSet = originalSet
+		keyringDelete = originalDelete
+	})
+
+	path := t.TempDir() + "/state.json"
+	store := NewFileStore(path)
+	first := Binding{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		PersonaMCPToken:      "mcp-token-1",
+		ActiveRunMCPToken:    "run-token-1",
+		HasPersonaMCPToken:   true,
+		HasActiveRunMCPToken: true,
+	}
+	second := Binding{
+		ConnectionID:         "conn-2",
+		PersonaID:            "persona-2",
+		PersonaMCPToken:      "mcp-token-2",
+		ActiveRunMCPToken:    "run-token-2",
+		HasPersonaMCPToken:   true,
+		HasActiveRunMCPToken: true,
+	}
+	if err := store.SaveBinding(first); err != nil {
+		t.Fatalf("save first: %v", err)
+	}
+	if err := store.SaveBinding(second); err != nil {
+		t.Fatalf("save second: %v", err)
+	}
+	loadedFirst, ok := store.Binding("conn-1")
+	if !ok {
+		t.Fatalf("expected first binding")
+	}
+	loadedSecond, ok := store.Binding("conn-2")
+	if !ok {
+		t.Fatalf("expected second binding")
+	}
+	if loadedFirst.PersonaMCPToken != "mcp-token-1" || loadedFirst.ActiveRunMCPToken != "run-token-1" {
+		t.Fatalf("first binding secrets wrong: %+v", loadedFirst)
+	}
+	if loadedSecond.PersonaMCPToken != "mcp-token-2" || loadedSecond.ActiveRunMCPToken != "run-token-2" {
+		t.Fatalf("second binding secrets wrong: %+v", loadedSecond)
+	}
+}

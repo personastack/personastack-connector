@@ -36,6 +36,14 @@ require_one "$(asset_pattern checksums.txt)" >/dev/null
 find "$dist_dir" -maxdepth 1 -name '*.deb' -print -quit | grep -q .
 find "$dist_dir" -maxdepth 1 -name '*.rpm' -print -quit | grep -q .
 
+if [[ -n "$version" && "$version" != "auto" ]]; then
+  manifest="${dist_dir}/personastack-connector_${version}_release_manifest.json"
+  manifest_sha="${manifest}.sha256"
+  if [[ -s "$manifest" && -s "$manifest_sha" ]]; then
+    (cd "$dist_dir" && sha256sum -c "$(basename "$manifest_sha")")
+  fi
+fi
+
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 tar -xzf "$linux_amd64_archive" -C "$tmp_dir"

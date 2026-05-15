@@ -1,12 +1,15 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -22,6 +25,17 @@ type OpenClawAdapter struct {
 	AgentID         string
 	DeviceTokenSink func(string) error
 	Dialer          *websocket.Dialer
+	fallbackCache   *openClawFallbackCache
+}
+
+type openClawFallbackCache struct {
+	mu      sync.Mutex
+	results map[string]openClawFallbackResult
+}
+
+type openClawFallbackResult struct {
+	result   RunResult
+	degraded bool
 }
 
 func NewOpenClawAdapter(gatewayURL string, token string) OpenClawAdapter {
@@ -45,6 +59,9 @@ func NewOpenClawAdapterWithAuth(gatewayURL string, auth OpenClawAuth, agentID st
 		DeviceToken: strings.TrimSpace(auth.DeviceToken),
 		AgentID:     strings.TrimSpace(agentID),
 		Dialer:      websocket.DefaultDialer,
+		fallbackCache: &openClawFallbackCache{
+			results: map[string]openClawFallbackResult{},
+		},
 	}
 }
 
@@ -56,17 +73,16 @@ func (adapter OpenClawAdapter) Detect() Detection {
 	if !adapter.hasAuth() {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateAuthMissing, Note: "OpenClaw operator token, password, or device token is required"}
 	}
-	conn, err := adapter.dial(context.Background())
+	connectCtx, cancel := context.WithTimeout(context.Background(), openClawSetupRetryBudget)
+	defer cancel()
+	conn, err := adapter.connectOperatorWithRetry(connectCtx)
 	if err != nil {
-		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeMissing, Note: err.Error()}
-	}
-	defer conn.Close()
-	if err := adapter.connectOperator(conn); err != nil {
 		if openClawConnectErrorIsCapability(err) {
 			return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}
 		}
-		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateAuthMissing, Note: err.Error()}
+		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeMissing, Note: err.Error()}
 	}
+	defer conn.Close()
 	if err := conn.WriteJSON(openClawRequest{ID: "detect-1", Method: "health"}); err != nil {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: err.Error()}
 	}
@@ -125,19 +141,31 @@ func (adapter OpenClawAdapter) VerifyMCP(bindingID string) (AdapterState, error)
 	return AdapterStateMCPConfigMissing, fmt.Errorf("OpenClaw MCP verification is not implemented")
 }
 
+func (adapter OpenClawAdapter) StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error) {
+	return adapter.openClawStreamOrPollRun(ctx, nativeRunID, handle)
+}
+
+func (adapter OpenClawAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
+	return adapter.StreamOrPollRun(ctx, nativeRunID, nil)
+}
+
 func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 	assignmentID := strings.TrimSpace(runRequest.AssignmentID)
 	if assignmentID == "" {
 		return "", fmt.Errorf("OpenClaw assignment id required")
 	}
-	conn, err := adapter.dial(context.Background())
+	connectCtx, cancel := context.WithTimeout(context.Background(), openClawSetupRetryBudget)
+	defer cancel()
+	conn, err := adapter.connectOperatorWithRetry(connectCtx)
 	if err != nil {
-		return "", err
+		cliResult, cliErr := adapter.startOpenClawCLI(runRequest)
+		if cliErr == nil {
+			adapter.storeFallbackResult(assignmentID, cliResult)
+			return assignmentID, nil
+		}
+		return "", fmt.Errorf("OpenClaw CLI fallback after gateway connect failure: %v; fallback error: %w", err, cliErr)
 	}
 	defer conn.Close()
-	if err := adapter.connectOperator(conn); err != nil {
-		return "", err
-	}
 	params := map[string]any{
 		"message":                strings.TrimSpace(runRequest.FullyComposedPrompt),
 		"idempotencyKey":         assignmentID,
@@ -178,76 +206,17 @@ func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 	return strings.TrimSpace(assignmentID), nil
 }
 
-func (adapter OpenClawAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
-	if err := ctx.Err(); err != nil {
-		return RunResult{}, err
-	}
-	conn, err := adapter.dial(ctx)
-	if err != nil {
-		return RunResult{}, err
-	}
-	defer conn.Close()
-	if err := adapter.connectOperator(conn); err != nil {
-		return RunResult{}, err
-	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return RunResult{}, err
-		}
-		setOpenClawDeadline(conn, ctx, 35*time.Second)
-		request := openClawRequest{
-			ID:     "wait-" + strings.TrimSpace(nativeRunID),
-			Method: "agent.wait",
-			Params: map[string]any{
-				"runId":     strings.TrimSpace(nativeRunID),
-				"timeoutMs": 30000,
-			},
-		}
-		if err := conn.WriteJSON(request); err != nil {
-			return RunResult{}, fmt.Errorf("OpenClaw wait: %w", err)
-		}
-		var response openClawResponse
-		if err := conn.ReadJSON(&response); err != nil {
-			return RunResult{}, fmt.Errorf("OpenClaw wait response: %w", err)
-		}
-		if errText := response.errorString(); errText != "" {
-			if openClawErrorIsTimeout(errText) && ctx.Err() == nil {
-				continue
-			}
-			return RunResult{}, fmt.Errorf("OpenClaw wait error: %s", errText)
-		}
-		if !response.isResponseOK() {
-			return RunResult{}, fmt.Errorf("OpenClaw wait response not ok")
-		}
-		result, terminal := openClawRunResultFromResponse(response.payload())
-		if !terminal {
-			if err := ctx.Err(); err != nil {
-				return RunResult{}, err
-			}
-			continue
-		}
-		switch strings.ToLower(strings.TrimSpace(result.Status)) {
-		case "failed", "error":
-			return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(firstNonEmpty(result.Error, result.Output))}, nil
-		case "cancelled", "canceled", "aborted":
-			return RunResult{Status: RunStatusCancelled}, nil
-		case "timeout":
-			return RunResult{}, fmt.Errorf("OpenClaw wait timed out")
-		default:
-			return RunResult{Status: RunStatusSucceeded, Output: strings.TrimSpace(result.Output)}, nil
-		}
-	}
-}
-
 func (adapter OpenClawAdapter) CancelRun(nativeRunID string) error {
-	conn, err := adapter.dial(context.Background())
+	if result, ok := adapter.loadFallbackResult(nativeRunID); ok && result.degraded {
+		return fmt.Errorf("OpenClaw CLI fallback does not support cancellation")
+	}
+	connectCtx, cancel := context.WithTimeout(context.Background(), openClawSetupRetryBudget)
+	defer cancel()
+	conn, err := adapter.connectOperatorWithRetry(connectCtx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	if err := adapter.connectOperator(conn); err != nil {
-		return err
-	}
 	request := openClawRequest{
 		ID:     "cancel-" + strings.TrimSpace(nativeRunID),
 		Method: "sessions.abort",
@@ -273,6 +242,120 @@ func (adapter OpenClawAdapter) CancelRun(nativeRunID string) error {
 
 func (adapter OpenClawAdapter) Diagnose() Detection {
 	return adapter.Detect()
+}
+
+func (adapter OpenClawAdapter) startOpenClawCLI(runRequest RunRequest) (openClawFallbackResult, error) {
+	cliPath, err := exec.LookPath("openclaw")
+	if err != nil {
+		return openClawFallbackResult{}, fmt.Errorf("openclaw CLI not found: %w", err)
+	}
+	assignmentID := strings.TrimSpace(runRequest.AssignmentID)
+	if assignmentID == "" {
+		return openClawFallbackResult{}, fmt.Errorf("OpenClaw assignment id required")
+	}
+	message := strings.TrimSpace(runRequest.FullyComposedPrompt)
+	if message == "" {
+		return openClawFallbackResult{}, fmt.Errorf("OpenClaw prompt required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), openClawSetupRetryBudget)
+	defer cancel()
+	args := []string{"agent", "--json", "--session-id", assignmentID, "--message", message}
+	if adapter.AgentID != "" {
+		args = append(args, "--agent", adapter.AgentID)
+	}
+	cmd := exec.CommandContext(ctx, cliPath, args...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return openClawFallbackResult{}, fmt.Errorf("openclaw agent --json: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	parsed, err := parseOpenClawCLIResult(stdout.Bytes())
+	if err != nil {
+		return openClawFallbackResult{}, err
+	}
+	parsed.degraded = true
+	return parsed, nil
+}
+
+func parseOpenClawCLIResult(raw []byte) (openClawFallbackResult, error) {
+	var response struct {
+		Payloads []struct {
+			Text string `json:"text"`
+		} `json:"payloads"`
+		Meta struct {
+			Transport      string `json:"transport"`
+			FallbackFrom   string `json:"fallbackFrom"`
+			FallbackReason string `json:"fallbackReason"`
+		} `json:"meta"`
+		Output  string          `json:"output"`
+		Text    string          `json:"text"`
+		Message string          `json:"message"`
+		Result  json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return openClawFallbackResult{}, fmt.Errorf("decode openclaw agent json: %w", err)
+	}
+	output := strings.TrimSpace(response.Output)
+	if output == "" {
+		output = strings.TrimSpace(response.Text)
+	}
+	if output == "" {
+		output = strings.TrimSpace(response.Message)
+	}
+	if output == "" {
+		for _, payload := range response.Payloads {
+			if text := strings.TrimSpace(payload.Text); text != "" {
+				if output == "" {
+					output = text
+				} else {
+					output += "\n" + text
+				}
+			}
+		}
+	}
+	if output == "" && len(response.Result) > 0 {
+		var text string
+		if err := json.Unmarshal(response.Result, &text); err == nil {
+			output = strings.TrimSpace(text)
+		}
+	}
+	degraded := strings.EqualFold(strings.TrimSpace(response.Meta.Transport), "embedded") || strings.EqualFold(strings.TrimSpace(response.Meta.FallbackFrom), "gateway")
+	return openClawFallbackResult{
+		result: RunResult{
+			Status: RunStatusSucceeded,
+			Output: output,
+		},
+		degraded: degraded,
+	}, nil
+}
+
+func (adapter OpenClawAdapter) storeFallbackResult(runID string, result openClawFallbackResult) {
+	if adapter.fallbackCache == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(runID)
+	if trimmed == "" {
+		return
+	}
+	adapter.fallbackCache.mu.Lock()
+	defer adapter.fallbackCache.mu.Unlock()
+	adapter.fallbackCache.results[trimmed] = result
+}
+
+func (adapter OpenClawAdapter) loadFallbackResult(runID string) (openClawFallbackResult, bool) {
+	if adapter.fallbackCache == nil {
+		return openClawFallbackResult{}, false
+	}
+	trimmed := strings.TrimSpace(runID)
+	if trimmed == "" {
+		return openClawFallbackResult{}, false
+	}
+	adapter.fallbackCache.mu.Lock()
+	defer adapter.fallbackCache.mu.Unlock()
+	result, ok := adapter.fallbackCache.results[trimmed]
+	return result, ok
 }
 
 func (adapter OpenClawAdapter) dial(ctx context.Context) (*websocket.Conn, error) {
@@ -340,11 +423,29 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 		return fmt.Errorf("read OpenClaw hello-ok: %w", err)
 	}
 	if errText := hello.errorString(); errText != "" {
+		if retryAfter, retryable := hello.retryableStartupSidecars(); retryable {
+			_ = conn.Close()
+			return openClawRetryableError{info: openClawErrorInfo{
+				Code:       "UNAVAILABLE",
+				Reason:     "startup-sidecars",
+				Message:    errText,
+				RetryAfter: retryAfter,
+			}}
+		}
 		return fmt.Errorf("OpenClaw connect error: %s", errText)
 	}
 	payload := hello.payload()
 	payloadType := openClawPayloadType(payload)
 	if !hello.isResponseOK() {
+		if retryAfter, retryable := hello.retryableStartupSidecars(); retryable {
+			_ = conn.Close()
+			return openClawRetryableError{info: openClawErrorInfo{
+				Code:       "UNAVAILABLE",
+				Reason:     "startup-sidecars",
+				Message:    firstNonEmpty(hello.errorString(), "OpenClaw connect response not ok"),
+				RetryAfter: retryAfter,
+			}}
+		}
 		return fmt.Errorf("OpenClaw connect response not ok")
 	}
 	helloResult, err := openClawHelloFromResult(payload)

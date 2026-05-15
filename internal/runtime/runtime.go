@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/personastack/personastack-connector/internal/hermessetup"
 )
 
 type AdapterKind int
@@ -94,9 +97,63 @@ type Adapter interface {
 	ConfigureMCP(bindingID string) error
 	VerifyMCP(bindingID string) (AdapterState, error)
 	StartRun(RunRequest) (string, error)
-	WaitRun(ctx context.Context, nativeRunID string) (RunResult, error)
+	StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error)
 	CancelRun(nativeRunID string) error
 	Diagnose() Detection
+}
+
+type RunEventKind int
+
+const (
+	RunEventStarted RunEventKind = iota
+	RunEventOutputDelta
+	RunEventToolEvent
+)
+
+func (kind RunEventKind) String() string {
+	switch kind {
+	case RunEventStarted:
+		return "started"
+	case RunEventOutputDelta:
+		return "output_delta"
+	case RunEventToolEvent:
+		return "tool_event"
+	default:
+		return "unknown"
+	}
+}
+
+type RunEvent struct {
+	Kind      RunEventKind
+	StartedAt time.Time
+	Delta     string
+	ToolName  string
+	ToolPhase string
+	Summary   string
+}
+
+type RunEventHandler func(RunEvent) error
+
+type runEventState struct {
+	mu      sync.Mutex
+	started bool
+}
+
+func (state *runEventState) emitStarted(handle RunEventHandler, startedAt time.Time) error {
+	if handle == nil {
+		return nil
+	}
+	state.mu.Lock()
+	if state.started {
+		state.mu.Unlock()
+		return nil
+	}
+	state.started = true
+	state.mu.Unlock()
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	return handle(RunEvent{Kind: RunEventStarted, StartedAt: startedAt})
 }
 
 type RunRequest struct {
@@ -143,7 +200,7 @@ const (
 func NewAdapter(kind AdapterKind) Adapter {
 	switch kind {
 	case AdapterKindHermes:
-		return NewHermesAdapter(os.Getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), os.Getenv("HERMES_API_SERVER_KEY"))
+		return NewHermesAdapter(os.Getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), hermessetup.LoadAPIKey())
 	case AdapterKindOpenClaw:
 		return NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), OpenClawAuth{
 			Token:       os.Getenv("OPENCLAW_GATEWAY_TOKEN"),
@@ -191,7 +248,7 @@ func (adapter PlaceholderAdapter) StartRun(RunRequest) (string, error) {
 	return "", fmt.Errorf("%s run dispatch is not implemented", adapter.kind)
 }
 
-func (adapter PlaceholderAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
+func (adapter PlaceholderAdapter) StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error) {
 	return RunResult{}, fmt.Errorf("%s run wait is not implemented", adapter.kind)
 }
 

@@ -293,6 +293,39 @@ func TestVerifyBindingLiveChecksInitializeAndToolsList(t *testing.T) {
 	}
 }
 
+func TestVerifyBindingLiveRejectsBadToolsListResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var message rpcMessage
+		if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch message.Method {
+		case "initialize":
+			w.Header().Set("MCP-Session-Id", "session-1")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{}}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2}`))
+		default:
+			t.Fatalf("unexpected method: %s", message.Method)
+		}
+	}))
+	defer server.Close()
+	result := VerifyBindingLive(context.Background(), config.Binding{
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "token-1",
+	}, server.Client())
+	if result.OK {
+		t.Fatalf("VerifyBindingLive() = %+v", result)
+	}
+	if !strings.Contains(result.Note, "tools/list invalid") {
+		t.Fatalf("unexpected note: %q", result.Note)
+	}
+}
+
 func TestStdioProxyMissingToken(t *testing.T) {
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{ConnectionID: "conn-1"}}})
 	err := NewStdioProxy(store).Serve(context.Background(), "conn-1", strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})

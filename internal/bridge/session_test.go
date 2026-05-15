@@ -57,6 +57,40 @@ func TestRunAcceptedFrameCorrelatesRequestMessageID(t *testing.T) {
 	}
 }
 
+func TestRunFrameBuildersCarryEventPayloads(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session := testSession(t, publicKey, privateKey)
+	request := externalagentprotocol.Frame{
+		MessageID:    "request-1",
+		RunID:        "run-1",
+		AssignmentID: "assignment-1",
+	}
+
+	startedAt := time.Unix(123, 0).UTC()
+	started := session.RunStartedFrame(request, "native-1", startedAt)
+	if started.RunStarted == nil || !started.RunStarted.StartedAt.Equal(startedAt) || started.RunStarted.NativeRunID != "native-1" {
+		t.Fatalf("unexpected started frame: %+v", started)
+	}
+
+	startedDefault := session.RunStartedFrame(request, "native-2", time.Time{})
+	if startedDefault.RunStarted == nil || startedDefault.RunStarted.StartedAt.IsZero() {
+		t.Fatalf("expected default started frame timestamp, got %+v", startedDefault)
+	}
+
+	delta := session.RunOutputDeltaFrame(request, " chunk ")
+	if delta.RunOutputDelta == nil || delta.RunOutputDelta.Delta != "chunk" {
+		t.Fatalf("unexpected delta frame: %+v", delta)
+	}
+
+	tool := session.RunToolEventFrame(request, " browser ", " started ", " opening ")
+	if tool.RunToolEvent == nil || tool.RunToolEvent.ToolName != "browser" || tool.RunToolEvent.Phase != "started" || tool.RunToolEvent.Summary != "opening" {
+		t.Fatalf("unexpected tool event frame: %+v", tool)
+	}
+}
+
 func TestHeartbeatFrameReportsBuildMetadata(t *testing.T) {
 	oldVersion := buildinfo.Version
 	oldCommit := buildinfo.GitCommit

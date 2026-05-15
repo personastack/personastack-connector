@@ -176,7 +176,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				if err := writeFrame(accepted); err != nil {
 					return fmt.Errorf("write redelivered run accepted: %w", err)
 				}
-				if err := writeFrame(session.RunStartedFrame(frame, nativeRunID)); err != nil {
+				if err := writeFrame(session.RunStartedFrame(frame, nativeRunID, time.Time{})); err != nil {
 					return fmt.Errorf("write redelivered run started: %w", err)
 				}
 				continue
@@ -236,18 +236,40 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := writeFrame(accepted); err != nil {
 				return fmt.Errorf("write run accepted: %w", err)
 			}
-			if err := writeFrame(session.RunStartedFrame(frame, nativeRunID)); err != nil {
-				return fmt.Errorf("write run started: %w", err)
+			started := false
+			writeStarted := func(startedAt time.Time) error {
+				if started {
+					return nil
+				}
+				started = true
+				return writeFrame(session.RunStartedFrame(frame, nativeRunID, startedAt))
 			}
 			go func(frame externalagentprotocol.Frame, nativeRunID string) {
 				defer func() {
 					_ = r.clearRunMCPToken(binding, frame.RunID)
 				}()
-				result, err := adapter.WaitRun(ctx, nativeRunID)
+				result, err := adapter.StreamOrPollRun(ctx, nativeRunID, func(event runtime.RunEvent) error {
+					switch event.Kind {
+					case runtime.RunEventStarted:
+						return writeStarted(event.StartedAt)
+					case runtime.RunEventOutputDelta:
+						return writeFrame(session.RunOutputDeltaFrame(frame, event.Delta))
+					case runtime.RunEventToolEvent:
+						return writeFrame(session.RunToolEventFrame(frame, event.ToolName, event.ToolPhase, event.Summary))
+					default:
+						return nil
+					}
+				})
 				if err != nil {
+					if !started {
+						_ = writeStarted(time.Time{})
+					}
 					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
 					_ = writeFrame(failed)
 					return
+				}
+				if !started {
+					_ = writeStarted(time.Time{})
 				}
 				status := externalagentprotocol.RunStatusCompleted
 				reason := externalagentprotocol.TerminalReasonSucceeded

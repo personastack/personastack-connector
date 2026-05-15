@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	osruntime "runtime"
 	"strings"
 
 	"github.com/personastack/personastack-connector/internal/config"
+	"github.com/personastack/personastack-connector/internal/hermessetup"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/service"
 	"gopkg.in/yaml.v3"
@@ -21,6 +23,7 @@ type InstallResult struct {
 	Runtime      runtime.AdapterKind
 	Path         string
 	ServerName   string
+	Note         string
 }
 
 type VerifyResult struct {
@@ -70,13 +73,30 @@ func installBinding(homeDir string, executablePath string, binding config.Bindin
 	server := stdioServer(binding, executablePath)
 	switch binding.RuntimeKind {
 	case runtime.AdapterKindHermes:
-		path := filepath.Join(homeDir, ".hermes", "config.yaml")
-		err := upsertHermesServer(path, server)
+		setupReport, err := hermessetup.EnsureAPISetup(homeDir)
 		if err != nil {
 			return InstallResult{}, err
 		}
-		return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name}, nil
+		path := filepath.Join(homeDir, ".hermes", "config.yaml")
+		err = upsertHermesServer(path, server)
+		if err != nil {
+			return InstallResult{}, err
+		}
+		result := InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name, Note: setupReport.Note}
+		if started, err := hermessetup.TryStartGateway(homeDir); err != nil {
+			return InstallResult{}, err
+		} else if started {
+			result.Note = appendNote(result.Note, "Hermes gateway start attempted")
+		}
+		diagnostic := hermessetup.Diagnose(homeDir)
+		if strings.TrimSpace(diagnostic.Note) != "" {
+			result.Note = appendNote(result.Note, diagnostic.Note)
+		}
+		return result, nil
 	case runtime.AdapterKindOpenClaw:
+		if result, err := installOpenClawServerWithCLI(homeDir, binding, server); err == nil {
+			return result, nil
+		}
 		path := filepath.Join(homeDir, ".openclaw", "config.json")
 		err := upsertOpenClawServer(path, server)
 		if err != nil {
@@ -86,6 +106,25 @@ func installBinding(homeDir string, executablePath string, binding config.Bindin
 	default:
 		return InstallResult{}, fmt.Errorf("unsupported runtime for mcp install: %s", binding.RuntimeKind)
 	}
+}
+
+func installOpenClawServerWithCLI(homeDir string, binding config.Binding, server stdioServerConfig) (InstallResult, error) {
+	cliPath, err := exec.LookPath("openclaw")
+	if err != nil {
+		return InstallResult{}, err
+	}
+	raw, err := json.Marshal(map[string]any{
+		"command": server.Command,
+		"args":    server.Args,
+	})
+	if err != nil {
+		return InstallResult{}, err
+	}
+	cmd := exec.Command(cliPath, "mcp", "set", server.Name, string(raw))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return InstallResult{}, fmt.Errorf("openclaw mcp set: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: filepath.Join(homeDir, ".openclaw", "config.json"), ServerName: server.Name}, nil
 }
 
 func VerifyBinding(homeDir string, binding config.Binding) VerifyResult {
@@ -177,8 +216,11 @@ func upsertHermesServer(path string, server stdioServerConfig) error {
 	}
 	servers := ensureMap(root, "mcp_servers")
 	servers[server.Name] = map[string]any{
-		"command": server.Command,
-		"args":    server.Args,
+		"command":         server.Command,
+		"args":            server.Args,
+		"timeout":         120,
+		"connect_timeout": 60,
+		"enabled":         true,
 	}
 	removeLegacyNestedServer(root, server.Name)
 	output, err := yaml.Marshal(root)
@@ -287,6 +329,18 @@ func serverArgsMatchBinding(value any, bindingID config.ConnectionID) bool {
 		}
 	}
 	return false
+}
+
+func appendNote(parts ...string) string {
+	notes := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		notes = append(notes, trimmed)
+	}
+	return strings.Join(notes, "; ")
 }
 
 func ensureMap(parent map[string]any, key string) map[string]any {

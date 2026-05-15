@@ -129,14 +129,41 @@ func (s Session) RunAcceptedFrame(request externalagentprotocol.Frame, nativeRun
 	return frame
 }
 
-func (s Session) RunStartedFrame(request externalagentprotocol.Frame, nativeRunID string) externalagentprotocol.Frame {
+func (s Session) RunStartedFrame(request externalagentprotocol.Frame, nativeRunID string, startedAt time.Time) externalagentprotocol.Frame {
 	frame := s.baseFrame(externalagentprotocol.FrameTypeRunStarted, s.now())
 	frame.MessageID = strings.TrimSpace(request.MessageID)
 	frame.RunID = strings.TrimSpace(request.RunID)
 	frame.AssignmentID = strings.TrimSpace(request.AssignmentID)
+	if startedAt.IsZero() {
+		startedAt = frame.SentAt
+	}
 	frame.RunStarted = &externalagentprotocol.RunStartedPayload{
-		StartedAt:   frame.SentAt,
+		StartedAt:   startedAt.UTC(),
 		NativeRunID: strings.TrimSpace(nativeRunID),
+	}
+	return frame
+}
+
+func (s Session) RunOutputDeltaFrame(request externalagentprotocol.Frame, delta string) externalagentprotocol.Frame {
+	frame := s.baseFrame(externalagentprotocol.FrameTypeRunOutputDelta, s.now())
+	frame.MessageID = strings.TrimSpace(request.MessageID)
+	frame.RunID = strings.TrimSpace(request.RunID)
+	frame.AssignmentID = strings.TrimSpace(request.AssignmentID)
+	frame.RunOutputDelta = &externalagentprotocol.RunOutputDeltaPayload{
+		Delta: strings.TrimSpace(delta),
+	}
+	return frame
+}
+
+func (s Session) RunToolEventFrame(request externalagentprotocol.Frame, toolName string, phase string, summary string) externalagentprotocol.Frame {
+	frame := s.baseFrame(externalagentprotocol.FrameTypeRunToolEvent, s.now())
+	frame.MessageID = strings.TrimSpace(request.MessageID)
+	frame.RunID = strings.TrimSpace(request.RunID)
+	frame.AssignmentID = strings.TrimSpace(request.AssignmentID)
+	frame.RunToolEvent = &externalagentprotocol.RunToolEventPayload{
+		ToolName: strings.TrimSpace(toolName),
+		Phase:    strings.TrimSpace(phase),
+		Summary:  strings.TrimSpace(summary),
 	}
 	return frame
 }

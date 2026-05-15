@@ -53,6 +53,8 @@ jobs:
           cache: true
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+      - name: Check release policy
+        run: ./scripts/check-release-policy.sh
       - name: GoReleaser
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
@@ -65,8 +67,12 @@ jobs:
         run: ./scripts/smoke-release-artifacts.sh dist "${GITHUB_REF_NAME#v}"
       - name: Build release manifest
         run: go run ./cmd/release-manifest --dist dist --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" --output "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json"
+      - name: Check release manifest checksum
+        run: sha256sum "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" > "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sha256"
+      - name: Verify release manifest checksum
+        run: ./scripts/verify-release-manifest.sh dist "${GITHUB_REF_NAME#v}"
       - name: Upload release manifest
-        run: gh release upload "$GITHUB_REF_NAME" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" --clobber
+        run: gh release upload "$GITHUB_REF_NAME" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sha256" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Attest artifacts

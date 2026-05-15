@@ -104,7 +104,7 @@ func TestInstallerFallsBackToLinuxAutostart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install() error = %v", err)
 	}
-	if result.Kind != "linux-autostart" {
+	if result.Kind != "no_user_service_manager" {
 		t.Fatalf("kind = %q", result.Kind)
 	}
 	raw, err := os.ReadFile(filepath.Join(homeDir, ".config", "autostart", "personastack-connector.desktop"))
