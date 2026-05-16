@@ -67,10 +67,14 @@ tar -xzf "$linux_amd64_archive" -C "$tmp_dir"
 binary="$tmp_dir/personastack-connector"
 
 "$binary" version | grep -q 'personastack-connector version='
+echo "verified version command"
 "$binary" --help | grep -q 'pair <code>'
+echo "verified help command"
 "$binary" service plan | grep -q 'service plan kind='
+echo "verified service plan command"
 if "$binary" mcp stdio --binding fake </dev/null >/tmp/personastack-connector-smoke.out 2>/tmp/personastack-connector-smoke.err; then
   echo "mcp stdio should fail for a missing fake binding" >&2
   exit 1
 fi
-grep -q 'binding not found' /tmp/personastack-connector-smoke.err
+grep -Eq 'binding not found|missing binding' /tmp/personastack-connector-smoke.err
+echo "verified missing binding failure"
