@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	stdruntime "runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -527,6 +528,10 @@ func tempPathWithOpenClawCLI(t *testing.T) string {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "openclaw")
 	raw := []byte("#!/bin/sh\nprintf '%s\\n' '{\"meta\":{\"transport\":\"embedded\",\"fallbackFrom\":\"gateway\"},\"payloads\":[{\"text\":\"fallback output\"}]}'\n")
+	if stdruntime.GOOS == "windows" {
+		script += ".bat"
+		raw = []byte("@echo {\"meta\":{\"transport\":\"embedded\",\"fallbackFrom\":\"gateway\"},\"payloads\":[{\"text\":\"fallback output\"}]}\r\n")
+	}
 	if err := os.WriteFile(script, raw, 0o755); err != nil {
 		t.Fatalf("write fake openclaw: %v", err)
 	}
