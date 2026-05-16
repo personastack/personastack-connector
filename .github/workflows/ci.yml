@@ -13,6 +13,8 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    env:
+      PERSONASTACK_CONNECTOR_KEYRING_MOCK: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -24,7 +26,7 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Format
-        run: test -z "$(gofmt -l .)"
+        run: git ls-files '*.go' ':!:vendor/*' | xargs gofmt -l | tee /tmp/gofmt.out && test ! -s /tmp/gofmt.out
       - name: Race tests
         run: go test -race ./internal/bridge ./internal/daemon ./internal/mcp
       - name: Vet
@@ -91,3 +93,10 @@ jobs:
         run: ./scripts/smoke-release-artifacts.sh dist auto
       - name: Snapshot release manifest
         run: go run ./cmd/release-manifest --dist dist --version snapshot --commit "$GITHUB_SHA" --output dist/personastack-connector_snapshot_release_manifest.json
+      - name: Upload snapshot artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: personastack-connector-snapshot-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

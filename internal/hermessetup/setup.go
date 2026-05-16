@@ -40,6 +40,12 @@ var (
 	}
 )
 
+func init() {
+	if os.Getenv("PERSONASTACK_CONNECTOR_KEYRING_MOCK") == "1" {
+		keyring.MockInit()
+	}
+}
+
 type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }

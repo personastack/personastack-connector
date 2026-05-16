@@ -49,7 +49,8 @@ cancel support.
   `./scripts/smoke-release-artifacts.sh dist auto` for snapshot builds.
 - CI runs unit tests, formatting, targeted race tests, `go vet`,
   `govulncheck`, license-file validation, and a GoReleaser snapshot dry-run
-  with Syft installed for SBOM generation.
+  with Syft installed for SBOM generation, then uploads the generated `dist/`
+  snapshot as an Actions artifact.
 - Tagged `v*` releases publish draft GitHub Releases under
   `personastack/personastack-connector` with archives, Linux packages,
   checksums, SBOMs, a machine-readable release manifest plus manifest

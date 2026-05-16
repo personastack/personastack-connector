@@ -223,7 +223,11 @@ Adapter result states must be concrete typed enums, including:
 - V1 release targets are macOS, Linux, and native Windows.
 - Termux is unsupported as a Connector host even if Hermes can run there.
 - GitHub Actions must run unit tests and a GoReleaser snapshot dry-run on pull
-  requests and `main` pushes.
+  requests and `main` pushes, then upload the generated `dist/` snapshot as a
+  workflow artifact.
+- CI builds must be self-contained from the connector repository checkout;
+  private sibling protocol dependencies required by the local `replace` must be
+  vendored.
 - Tagged releases build GoReleaser archives for macOS/Linux/Windows plus Linux
   `.deb` and `.rpm` packages, publish checksum/SBOM artifacts to a draft GitHub
   Release, upload a machine-readable release manifest plus manifest checksum,
