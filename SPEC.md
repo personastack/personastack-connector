@@ -223,8 +223,8 @@ Adapter result states must be concrete typed enums, including:
 - V1 release targets are macOS, Linux, and native Windows.
 - Termux is unsupported as a Connector host even if Hermes can run there.
 - GitHub Actions must run unit tests and a GoReleaser snapshot dry-run on pull
-  requests and `main` pushes, then upload the generated `dist/` snapshot as a
-  workflow artifact.
+  requests and `main` pushes. Snapshot artifacts are validation outputs only
+  and must not be uploaded or documented as a distribution channel.
 - CI builds must be self-contained from the connector repository checkout;
   private sibling protocol dependencies required by the local `replace` must be
   vendored.
@@ -232,6 +232,12 @@ Adapter result states must be concrete typed enums, including:
   `.deb` and `.rpm` packages, publish checksum/SBOM artifacts to a draft GitHub
   Release, upload a machine-readable release manifest plus manifest checksum,
   and emit GitHub provenance attestations for `dist/*`.
+- Every upload batch is keyed by one shipping-agent-selected semver tag
+  `v<semver>` and matching release notes at `docs/release-notes/v<semver>.md`.
+  Canonical asset URLs are derived as
+  `https://github.com/personastack/personastack-connector/releases/download/v<semver>/personastack-connector_<semver>_<os>_<arch>.<ext>`,
+  with shared checksum, checksum signature, release-manifest, manifest checksum,
+  and manifest signature assets under the same tag path.
 - macOS archives are signed and notarized only when the release environment
   provides the Apple Developer ID and App Store Connect inputs; default install
   UX must remain gated until those inputs are present.
@@ -242,8 +248,9 @@ Adapter result states must be concrete typed enums, including:
   and the release manifest, so install guidance can verify the manifest bundle
   before it recommends any download command.
 - The release workflow must publish generated release-manifest metadata into
-  the PersonaStack API admin connector-release endpoint so the database
-  recommends the just-built GitHub Release artifacts.
+  the PersonaStack API admin connector-release endpoint by sending only the
+  semver, commit, and minimum protocol. The API owns derivation of every
+  recommended OS/arch/package asset URL and install command.
 - The binary must expose `personastack-connector version` so install flows and
   support diagnostics can verify the downloaded artifact.
 - V1 signed distribution channels are GitHub Release archives for macOS,

@@ -438,25 +438,20 @@ func TestPublishReleaseMetadataToAPI(t *testing.T) {
 		"Authorization: Bearer admin-token",
 		"https://api.personastack.test/v1/admin/external-agent-connector/releases",
 		`"version":"v0.2.0"`,
-		`"package_kind":"deb"`,
-		"cosign verify-blob",
-		"Wrong platform: this Connector asset requires linux/amd64.",
-		"personastack-connector_0.2.0_linux_amd64.deb",
-		"personastack-connector_0.2.0_release_manifest.json.sha256",
-		"personastack-connector_0.2.0_release_manifest.json.sigstore.json",
-		"cosign verify-blob --bundle personastack-connector_0.2.0_release_manifest.json.sigstore.json --certificate-identity https://github.com/personastack/personastack-connector/.github/workflows/release.yml@refs/tags/v0.2.0 --certificate-oidc-issuer https://token.actions.githubusercontent.com personastack-connector_0.2.0_release_manifest.json",
-		"cosign verify-blob --bundle personastack-connector_0.2.0_checksums.txt.sigstore.json --certificate-identity https://github.com/personastack/personastack-connector/.github/workflows/release.yml@refs/tags/v0.2.0 --certificate-oidc-issuer https://token.actions.githubusercontent.com personastack-connector_0.2.0_checksums.txt",
-		"Wrong platform: this Connector asset requires windows/amd64.",
-		"personastack-connector_0.2.0_windows_amd64.zip",
-		"$env:OS -ne 'Windows_NT'",
-		"SetEnvironmentVariable('Path'",
-		"personastack-connector.exe') version",
-		"Wrong platform: this Connector asset requires darwin/arm64.",
-		`test \"$(uname -m)\" = \"arm64\"`,
-		"mkdir -p ~/.local/bin",
+		`"git_commit":"commit-1"`,
+		`"minimum_protocol":"external-agent-v1"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("curl payload missing %q:\n%s", want, got)
+		}
+	}
+	for _, retired := range []string{
+		`"asset_url"`,
+		`"package_kind"`,
+		"cosign verify-blob",
+	} {
+		if strings.Contains(got, retired) {
+			t.Fatalf("curl payload kept retired metadata %q:\n%s", retired, got)
 		}
 	}
 }

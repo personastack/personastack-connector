@@ -49,13 +49,17 @@ cancel support.
   `./scripts/smoke-release-artifacts.sh dist auto` for snapshot builds.
 - CI runs unit tests, formatting, targeted race tests, `go vet`,
   `govulncheck`, license-file validation, and a GoReleaser snapshot dry-run
-  with Syft installed for SBOM generation, then uploads the generated `dist/`
-  snapshot as an Actions artifact.
+  with Syft installed for SBOM generation. Snapshot artifacts are validation
+  only and are not a distribution channel.
 - Tagged `v*` releases publish draft GitHub Releases under
   `personastack/personastack-connector` with archives, Linux packages,
   checksums, SBOMs, a machine-readable release manifest plus manifest
   checksum, signed checksum bundles, a signed release manifest bundle, and
   provenance attestations.
+- Each shippable upload is identified by one shipping-agent-selected semver
+  tag. Admin release activation sends only that semver to PersonaStack API,
+  which derives every canonical GitHub Release asset URL from the tag and
+  supported OS/arch/package matrix.
 - macOS binaries are signed and notarized through GoReleaser only when the
   release environment provides the Apple signing and App Store Connect inputs;
   default install metadata must stay gated off until that pipeline is enabled.
