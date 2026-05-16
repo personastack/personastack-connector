@@ -2,10 +2,6 @@ version: 2
 
 project_name: personastack-connector
 
-before:
-  hooks:
-    - go mod verify
-
 builds:
   - id: personastack-connector
     main: ./cmd/personastack-connector

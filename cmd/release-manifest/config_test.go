@@ -183,8 +183,8 @@ func TestGoReleaserConfigCoversReleaseMatrix(t *testing.T) {
 	if !cfg.Release.Draft || cfg.Release.Mode != "replace" {
 		t.Fatalf("unexpected release config: %+v", cfg.Release)
 	}
-	if !containsString(cfg.Before.Hooks, "go mod verify") {
-		t.Fatalf("missing go mod verify hook: %v", cfg.Before.Hooks)
+	if len(cfg.Before.Hooks) != 0 {
+		t.Fatalf("unexpected release before hooks: %v", cfg.Before.Hooks)
 	}
 }
 
