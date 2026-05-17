@@ -51,13 +51,13 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 unzip -q "$windows_amd64_archive" -d "$tmp_dir/windows"
 windows_binary="$tmp_dir/windows/personastack-connector.exe"
-if [[ -n "$version" && "$version" != "auto" ]]; then
+if [[ ! -s "$windows_binary" ]]; then
+  echo "windows binary missing from release archive: $windows_binary" >&2
+  exit 1
+fi
+if [[ -n "$version" && "$version" != "auto" && "${WINDOWS_CODE_SIGN_REQUIRED:-1}" == "1" ]]; then
   if ! command -v osslsigncode >/dev/null 2>&1; then
     echo "osslsigncode is required to verify Windows Authenticode signatures" >&2
-    exit 1
-  fi
-  if [[ ! -s "$windows_binary" ]]; then
-    echo "windows binary missing from release archive: $windows_binary" >&2
     exit 1
   fi
   osslsigncode verify -in "$windows_binary" >/tmp/personastack-connector-windows-signature.out 2>/tmp/personastack-connector-windows-signature.err
