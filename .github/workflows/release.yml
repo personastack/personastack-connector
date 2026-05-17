@@ -83,6 +83,7 @@ jobs:
       - name: Install osslsigncode
         run: sudo apt-get update && sudo apt-get install -y osslsigncode
       - name: Prepare Windows signing certificate
+        if: ${{ secrets.WINDOWS_CODE_SIGN_PFX_B64 != '' && secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD != '' }}
         run: |
           printf '%s' "$WINDOWS_CODE_SIGN_PFX_B64" | base64 -d > "$WINDOWS_CODE_SIGN_PFX_FILE"
           openssl pkcs12 -in "$WINDOWS_CODE_SIGN_PFX_FILE" -passin "pass:$WINDOWS_CODE_SIGN_PFX_PASSWORD" -noout
@@ -93,7 +94,7 @@ jobs:
       - name: Check Windows signing gate
         run: ./scripts/check-windows-signing.sh
         env:
-          WINDOWS_CODE_SIGN_REQUIRED: "1"
+          WINDOWS_CODE_SIGN_REQUIRED: ${{ secrets.WINDOWS_CODE_SIGN_PFX_B64 != '' && secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD != '' && '1' || '0' }}
           WINDOWS_CODE_SIGN_PFX_FILE: ${{ runner.temp }}/personastack-windows-signing.pfx
           WINDOWS_CODE_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD }}
           WINDOWS_CODE_SIGN_TIMESTAMP_URL: https://timestamp.digicert.com
@@ -121,7 +122,7 @@ jobs:
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
-          WINDOWS_CODE_SIGN_REQUIRED: "1"
+          WINDOWS_CODE_SIGN_REQUIRED: ${{ secrets.WINDOWS_CODE_SIGN_PFX_B64 != '' && secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD != '' && '1' || '0' }}
           WINDOWS_CODE_SIGN_PFX_FILE: ${{ runner.temp }}/personastack-windows-signing.pfx
           WINDOWS_CODE_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD }}
           WINDOWS_CODE_SIGN_TIMESTAMP_URL: https://timestamp.digicert.com
