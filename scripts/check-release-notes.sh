@@ -25,7 +25,7 @@ required_sections=(
 )
 
 for section in "${required_sections[@]}"; do
-  if ! rg -qi "^#+[[:space:]]+${section//\//\\/}\\b" "${notes_path}"; then
+  if ! grep -Eiq "^#+[[:space:]]+${section//\//\\/}\\b" "${notes_path}"; then
     echo "release notes ${notes_path} missing section: ${section}" >&2
     exit 1
   fi
