@@ -320,6 +320,7 @@ func TestReleaseWorkflowContainsDryRunValidationSteps(t *testing.T) {
 		"attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45",
 		"./scripts/check-release-policy.sh",
 		"release tag rulesets unavailable in GitHub Actions",
+		"release environment unavailable in GitHub Actions",
 		"environment:",
 		"name: release",
 		"PERSONASTACK_RELEASE_SIGNING: \"1\"",

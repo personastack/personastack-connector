@@ -111,6 +111,7 @@ jobs:
       - name: Check release policy
         env:
           RELEASE_POLICY_RULESETS_FALLBACK: release tag rulesets unavailable in GitHub Actions
+          RELEASE_POLICY_ENVIRONMENT_FALLBACK: release environment unavailable in GitHub Actions
         run: ./scripts/check-release-policy.sh
       - name: Check release notes
         run: ./scripts/check-release-notes.sh
