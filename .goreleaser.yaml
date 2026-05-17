@@ -94,7 +94,7 @@ signs:
 sboms:
   - artifacts: archive
     documents:
-      - "{{ .ProjectName }}_{{ .Version }}_sbom.spdx.json"
+      - "{{ .ArtifactName }}.spdx.json"
 
 release:
   github:

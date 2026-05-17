@@ -151,7 +151,7 @@ func TestGoReleaserConfigCoversReleaseMatrix(t *testing.T) {
 	if len(cfg.SBOMs) != 1 || cfg.SBOMs[0].Artifacts != "archive" {
 		t.Fatalf("unexpected sbom config: %+v", cfg.SBOMs)
 	}
-	if !containsString(cfg.SBOMs[0].Documents, "{{ .ProjectName }}_{{ .Version }}_sbom.spdx.json") {
+	if !containsString(cfg.SBOMs[0].Documents, "{{ .ArtifactName }}.spdx.json") {
 		t.Fatalf("unexpected sbom documents: %+v", cfg.SBOMs[0].Documents)
 	}
 	if len(cfg.Notarize.MacOS) != 1 {
