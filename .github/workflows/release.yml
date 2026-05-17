@@ -109,6 +109,8 @@ jobs:
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
       - name: Check release policy
+        env:
+          RELEASE_POLICY_RULESETS_FALLBACK: release tag rulesets unavailable in GitHub Actions
         run: ./scripts/check-release-policy.sh
       - name: Check release notes
         run: ./scripts/check-release-notes.sh
