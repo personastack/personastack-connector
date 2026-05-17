@@ -159,6 +159,10 @@ jobs:
         run: gh release upload "$GITHUB_REF_NAME" dist/package-manager/homebrew/personastack-connector.rb dist/package-manager/winget/PersonaStack.Connector/${GITHUB_REF_NAME#v}/*.yaml --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish GitHub Release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish API release metadata
         run: ./scripts/publish-release-metadata-to-api.sh dist "${GITHUB_REF_NAME#v}"
         env:

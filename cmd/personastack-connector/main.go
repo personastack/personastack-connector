@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -24,7 +25,7 @@ import (
 )
 
 const usage = `Usage:
-  personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--configure-mcp] [--openclaw-token <token>|--openclaw-password <password>|--openclaw-device-token <token>] [--openclaw-agent-id <id>]
+  personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--openclaw-token <token>|--openclaw-password <password>|--openclaw-device-token <token>] [--openclaw-agent-id <id>]
   personastack-connector status [--repair]
   personastack-connector diagnostics
   personastack-connector runtime detect
@@ -202,6 +203,15 @@ func (cmd command) runPair(args []string) error {
 	if !ok {
 		return errors.New("connector store is not writable")
 	}
+	pairOptions, err := cmd.resolveOpenClawPairOptions(kind, openClawPairOptions{
+		token:       openClawToken,
+		password:    openClawPassword,
+		deviceToken: openClawDeviceToken,
+		agentID:     openClawAgentID,
+	})
+	if err != nil {
+		return err
+	}
 	result, err := pairing.Client{GatewayBaseURL: gateway}.Exchange(context.Background(), pairing.Request{
 		Code:         pairingCode,
 		RuntimeKind:  kind,
@@ -211,12 +221,7 @@ func (cmd command) runPair(args []string) error {
 		return err
 	}
 	binding := result.Binding
-	if err := applyOpenClawPairOptions(&binding, openClawPairOptions{
-		token:       openClawToken,
-		password:    openClawPassword,
-		deviceToken: openClawDeviceToken,
-		agentID:     openClawAgentID,
-	}); err != nil {
+	if err := applyOpenClawPairOptions(&binding, pairOptions); err != nil {
 		return err
 	}
 	if err := writable.SaveBinding(binding); err != nil {
@@ -290,6 +295,25 @@ type openClawPairOptions struct {
 	agentID     string
 }
 
+func (cmd command) resolveOpenClawPairOptions(kind runtime.AdapterKind, options openClawPairOptions) (openClawPairOptions, error) {
+	if kind != runtime.AdapterKindOpenClaw {
+		return options, nil
+	}
+	if openClawPairCredentialAvailable(options, config.Binding{}) {
+		return options, nil
+	}
+	fmt.Fprint(cmd.stderr, "OpenClaw operator token: ")
+	credential, err := readLine(cmd.stdin)
+	if err != nil {
+		return options, errors.New("OpenClaw operator credential required; enter a token, rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN")
+	}
+	options.token = strings.TrimSpace(credential)
+	if openClawPairCredentialAvailable(options, config.Binding{}) {
+		return options, nil
+	}
+	return options, errors.New("OpenClaw operator credential required; enter a token, rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN")
+}
+
 func applyOpenClawPairOptions(binding *config.Binding, options openClawPairOptions) error {
 	if binding == nil || binding.RuntimeKind != runtime.AdapterKindOpenClaw {
 		return nil
@@ -298,10 +322,35 @@ func applyOpenClawPairOptions(binding *config.Binding, options openClawPairOptio
 	binding.OpenClawPassword = firstNonEmpty(options.password, binding.OpenClawPassword)
 	binding.OpenClawDeviceToken = firstNonEmpty(options.deviceToken, binding.OpenClawDeviceToken)
 	binding.OpenClawAgentID = firstNonEmpty(options.agentID, binding.OpenClawAgentID)
-	if firstNonEmpty(binding.OpenClawGatewayToken, binding.OpenClawPassword, binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN"), os.Getenv("OPENCLAW_GATEWAY_PASSWORD"), os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")) == "" {
+	if !openClawPairCredentialAvailable(options, *binding) {
 		return errors.New("OpenClaw operator credential required; rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN")
 	}
 	return nil
+}
+
+func openClawPairCredentialAvailable(options openClawPairOptions, binding config.Binding) bool {
+	return firstNonEmpty(
+		options.token,
+		options.password,
+		options.deviceToken,
+		binding.OpenClawGatewayToken,
+		binding.OpenClawPassword,
+		binding.OpenClawDeviceToken,
+		os.Getenv("OPENCLAW_GATEWAY_TOKEN"),
+		os.Getenv("OPENCLAW_GATEWAY_PASSWORD"),
+		os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN"),
+	) != ""
+}
+
+func readLine(reader io.Reader) (string, error) {
+	if reader == nil {
+		return "", io.EOF
+	}
+	line, err := bufio.NewReader(reader).ReadString('\n')
+	if err != nil && strings.TrimSpace(line) == "" {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
 }
 
 func (cmd command) runStatus(ctx context.Context, args []string) error {

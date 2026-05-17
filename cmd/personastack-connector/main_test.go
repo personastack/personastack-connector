@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +33,9 @@ func TestRunHelp(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("help output missing %q: %s", want, output)
 		}
+	}
+	if strings.Contains(output, "pair <code> [--runtime auto|hermes|openclaw] [--configure-mcp]") {
+		t.Fatalf("help output should not require --configure-mcp in primary pair usage: %s", output)
 	}
 	for _, want := range []string{"runtime hermes configure", "runtime openclaw configure"} {
 		if !strings.Contains(output, want) {
@@ -276,6 +280,89 @@ func TestRunPairReportsDegradedState(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("pair output missing %q: %s", want, output)
 		}
+	}
+}
+
+func TestRunPairOpenClawRequiresCredentialBeforePairingExchange(t *testing.T) {
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
+	t.Setenv("OPENCLAW_GATEWAY_DEVICE_TOKEN", "")
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "pairing code consumed", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		store:  &store,
+	}
+	err := cmd.runPair([]string{"PAIR-OPENCLAW", "--gateway", server.URL, "--runtime", "openclaw"})
+	if err == nil || !strings.Contains(err.Error(), "OpenClaw operator credential required") {
+		t.Fatalf("runPair() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("pairing exchange should not be called before OpenClaw credential validation; calls=%d", calls)
+	}
+}
+
+func TestRunPairOpenClawPromptsForTokenBeforePairingExchange(t *testing.T) {
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
+	t.Setenv("OPENCLAW_GATEWAY_DEVICE_TOKEN", "")
+	keyring.MockInit()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_OPENCLAW_GATEWAY_START", "1")
+	oldInstallService := installService
+	installService = func() (service.InstallResult, error) {
+		return service.InstallResult{Kind: "no_user_service_manager", Path: "/tmp/personastack-connector.desktop"}, nil
+	}
+	t.Cleanup(func() {
+		installService = oldInstallService
+	})
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"persona_id":                "persona-openclaw",
+			"connection_id":             "connection-openclaw",
+			"credential_id":             "cred-openclaw",
+			"runtime_kind":              "openclaw",
+			"connection_generation":     1,
+			"gateway_websocket_url":     "ws://example/v1/external-agent/ws",
+			"native_mcp_server_name":    "personastack-connection-openclaw",
+			"native_mcp_tool_namespace": "personastack",
+			"persona_mcp_url":           "https://mcp.example/mcp",
+			"persona_mcp_token":         "mcp-token-openclaw",
+		})
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdin:  strings.NewReader("token-from-prompt\n"),
+		stdout: io.Discard,
+		stderr: &stderr,
+		store:  &store,
+	}
+	err := cmd.runPair([]string{"PAIR-OPENCLAW", "--gateway", server.URL, "--runtime", "openclaw"})
+	if err != nil {
+		t.Fatalf("runPair() error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one pairing exchange after OpenClaw token prompt; calls=%d", calls)
+	}
+	bindings := store.ListBindings()
+	if len(bindings) != 1 || bindings[0].OpenClawGatewayToken != "token-from-prompt" {
+		t.Fatalf("expected prompted token to be stored as token: %+v", bindings)
+	}
+	if !strings.Contains(stderr.String(), "OpenClaw operator token:") {
+		t.Fatalf("expected token prompt, got %q", stderr.String())
 	}
 }
 

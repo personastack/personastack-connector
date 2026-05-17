@@ -81,9 +81,9 @@ external persona.
 
 ## CLI Surface
 
-- `personastack-connector pair <code> --runtime auto --configure-mcp`
-- `personastack-connector pair <code> --runtime hermes --configure-mcp`
-- `personastack-connector pair <code> --runtime openclaw --configure-mcp --openclaw-token <token>`
+- `personastack-connector pair <code> --runtime auto`
+- `personastack-connector pair <code> --runtime hermes`
+- `personastack-connector pair <code> --runtime openclaw`
 - `personastack-connector status`
 - `personastack-connector status --repair`
 - `personastack-connector runtime detect`
@@ -95,10 +95,14 @@ external persona.
 - `personastack-connector unpair`
 
 Default setup must require only package installation plus the pairing command.
-OpenClaw pairing must collect or locate an approved operator credential through
-`--openclaw-token`, `--openclaw-password`, `--openclaw-device-token`, or the
-matching `OPENCLAW_GATEWAY_*` environment variables before it reports local
-runtime setup as usable.
+Pairing configures PersonaStack MCP access by default; any future MCP opt-out or
+repair flag is advanced-only and must not be required by the primary setup
+command. OpenClaw pairing must collect or locate an approved operator credential
+locally through Connector CLI prompts, OS credential storage, local-only flags
+such as `--openclaw-token`, `--openclaw-password`, or `--openclaw-device-token`,
+or the matching `OPENCLAW_GATEWAY_*` environment variables before it reports
+local runtime setup as usable. Browser setup surfaces must not collect OpenClaw
+tokens, passwords, or device credentials.
 
 The V1 Connector does not expose a local HTTP UI/control listener. CLI control
 is local process execution and native MCP uses stdio; any future local control
