@@ -35,8 +35,10 @@ require_one "$(asset_pattern checksums.txt)" >/dev/null
 if [[ -n "$version" && "$version" != "auto" ]]; then
   require_one "$(asset_pattern checksums.txt.sigstore.json)" >/dev/null
 fi
-find "$dist_dir" -maxdepth 1 -name '*.deb' -print -quit | grep -q .
-find "$dist_dir" -maxdepth 1 -name '*.rpm' -print -quit | grep -q .
+require_one "$(asset_pattern linux_amd64.deb)" >/dev/null
+require_one "$(asset_pattern linux_arm64.deb)" >/dev/null
+require_one "$(asset_pattern linux_amd64.rpm)" >/dev/null
+require_one "$(asset_pattern linux_arm64.rpm)" >/dev/null
 
 if [[ -n "$version" && "$version" != "auto" ]]; then
   manifest="${dist_dir}/personastack-connector_${version}_release_manifest.json"

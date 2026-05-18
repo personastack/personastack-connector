@@ -340,8 +340,9 @@ func TestReleaseWorkflowContainsDryRunValidationSteps(t *testing.T) {
 	if attestIndex < 0 || publishIndex < 0 || attestIndex > publishIndex {
 		t.Fatalf("release workflow must attest artifacts before publishing the GitHub Release")
 	}
-	if !strings.HasSuffix(strings.TrimSpace(string(release)), `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}`) {
-		t.Fatalf("publishing the GitHub Release must remain the final release workflow step")
+	homebrewIndex := strings.Index(string(release), "name: Publish Homebrew tap formula")
+	if homebrewIndex < 0 || homebrewIndex < publishIndex {
+		t.Fatalf("release workflow must publish Homebrew only after the GitHub Release is public")
 	}
 }
 

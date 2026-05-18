@@ -134,6 +134,18 @@ jobs:
         run: gh release upload "$GITHUB_REF_NAME" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sha256" "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json.sigstore.json" "dist/personastack-connector_${GITHUB_REF_NAME#v}_checksums.txt.sigstore.json" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attest artifacts
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: "dist/*"
+      - name: Upload package-manager metadata
+        run: gh release upload "$GITHUB_REF_NAME" dist/package-manager/homebrew/personastack-connector.rb --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish GitHub Release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish Homebrew tap formula
         run: |
           test -n "$HOMEBREW_TAP_TOKEN"
@@ -152,15 +164,3 @@ jobs:
           git push origin HEAD:main
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      - name: Attest artifacts
-        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
-        with:
-          subject-path: "dist/*"
-      - name: Upload package-manager metadata
-        run: gh release upload "$GITHUB_REF_NAME" dist/package-manager/homebrew/personastack-connector.rb --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish GitHub Release
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
