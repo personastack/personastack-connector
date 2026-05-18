@@ -269,6 +269,13 @@ func (session *openClawRPCSession) call(ctx context.Context, request openClawReq
 		return openClawResponse{}, ctx.Err()
 	case <-session.closed:
 		session.removePending(request.ID)
+		select {
+		case response, ok := <-responseCh:
+			if ok {
+				return response, nil
+			}
+		default:
+		}
 		if err := session.currentError(); err != nil {
 			return openClawResponse{}, err
 		}
