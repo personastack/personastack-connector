@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/buildinfo"
 	"github.com/personastack/personastack-connector/internal/config"
+	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
 

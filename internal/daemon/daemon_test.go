@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/bridge"
 	"github.com/personastack/personastack-connector/internal/config"
+	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/zalando/go-keyring"
