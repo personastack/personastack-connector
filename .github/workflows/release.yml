@@ -149,7 +149,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish Homebrew tap formula
         run: |
-          test -n "$HOMEBREW_TAP_TOKEN"
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured; skipping Homebrew tap publish."
+            exit 0
+          fi
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/personastack/homebrew-tap.git" /tmp/personastack-homebrew-tap
           mkdir -p /tmp/personastack-homebrew-tap/Formula
           cp dist/package-manager/homebrew/personastack-connector.rb /tmp/personastack-homebrew-tap/Formula/personastack-connector.rb
