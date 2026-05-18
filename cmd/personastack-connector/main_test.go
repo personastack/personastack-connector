@@ -623,6 +623,21 @@ func TestApplyOpenClawPairOptionsStoresOperatorCredential(t *testing.T) {
 	}
 }
 
+func TestApplyOpenClawPairOptionsStoresEnvironmentCredential(t *testing.T) {
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "token-from-env")
+	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
+	t.Setenv("OPENCLAW_GATEWAY_DEVICE_TOKEN", "")
+	binding := config.Binding{RuntimeKind: runtime.AdapterKindOpenClaw}
+
+	err := applyOpenClawPairOptions(&binding, openClawPairOptions{})
+	if err != nil {
+		t.Fatalf("applyOpenClawPairOptions() error = %v", err)
+	}
+	if binding.OpenClawGatewayToken != "token-from-env" {
+		t.Fatalf("binding OpenClaw env token not stored: %+v", binding)
+	}
+}
+
 func TestApplyOpenClawPairOptionsRequiresOperatorCredential(t *testing.T) {
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")

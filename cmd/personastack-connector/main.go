@@ -346,9 +346,9 @@ func applyOpenClawPairOptions(binding *config.Binding, options openClawPairOptio
 	if binding == nil || binding.RuntimeKind != runtime.AdapterKindOpenClaw {
 		return nil
 	}
-	binding.OpenClawGatewayToken = firstNonEmpty(options.token, binding.OpenClawGatewayToken)
-	binding.OpenClawPassword = firstNonEmpty(options.password, binding.OpenClawPassword)
-	binding.OpenClawDeviceToken = firstNonEmpty(options.deviceToken, binding.OpenClawDeviceToken)
+	binding.OpenClawGatewayToken = firstNonEmpty(options.token, binding.OpenClawGatewayToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN"))
+	binding.OpenClawPassword = firstNonEmpty(options.password, binding.OpenClawPassword, os.Getenv("OPENCLAW_GATEWAY_PASSWORD"))
+	binding.OpenClawDeviceToken = firstNonEmpty(options.deviceToken, binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN"))
 	binding.OpenClawAgentID = firstNonEmpty(options.agentID, binding.OpenClawAgentID)
 	if !openClawPairCredentialAvailable(options, *binding) {
 		return errors.New("OpenClaw operator credential required; rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN")
