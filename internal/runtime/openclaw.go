@@ -224,16 +224,14 @@ func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 	}
 	defer conn.Close()
 	params := map[string]any{
-		"message":                strings.TrimSpace(runRequest.FullyComposedPrompt),
-		"idempotencyKey":         assignmentID,
-		"runId":                  assignmentID,
-		"nativeMcpServerName":    strings.TrimSpace(runRequest.NativeMCPServerName),
-		"nativeMcpToolNamespace": strings.TrimSpace(runRequest.NativeMCPToolNamespace),
-		"metadata":               runMetadata(runRequest),
+		"message":        strings.TrimSpace(runRequest.FullyComposedPrompt),
+		"idempotencyKey": assignmentID,
 	}
-	if adapter.AgentID != "" {
-		params["agentId"] = adapter.AgentID
+	agentID := strings.TrimSpace(adapter.AgentID)
+	if agentID == "" {
+		agentID = "main"
 	}
+	params["agentId"] = agentID
 	request := openClawRequest{
 		Type:   "req",
 		ID:     assignmentID,
@@ -804,6 +802,9 @@ func openClawRunResultFromResponse(raw json.RawMessage) (openClawRunResult, bool
 	case "completed", "success", "succeeded", "failed", "error", "cancelled", "canceled", "aborted", "timeout":
 		return result, true
 	default:
+		if strings.TrimSpace(result.Output) != "" || strings.TrimSpace(result.Error) != "" {
+			return result, true
+		}
 		return result, false
 	}
 }

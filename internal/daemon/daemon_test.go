@@ -51,7 +51,7 @@ func TestRunnerConfigRefreshUsesLatestLoopbackProxyState(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(homeDir, ".openclaw"), 0o700); err != nil {
 		t.Fatalf("mkdir openclaw: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", "config.json"), []byte("{invalid json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"), []byte("{invalid json"), 0o600); err != nil {
 		t.Fatalf("write invalid openclaw config: %v", err)
 	}
 	stale := config.Binding{
@@ -76,7 +76,7 @@ func TestRunnerConfigRefreshUsesLatestLoopbackProxyState(t *testing.T) {
 	if stored.LocalMCPProxyURL != latest.LocalMCPProxyURL || stored.LocalMCPProxyToken != latest.LocalMCPProxyToken {
 		t.Fatalf("loopback proxy changed: %+v", stored)
 	}
-	raw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "config.json"))
+	raw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"))
 	if err != nil {
 		t.Fatalf("read openclaw config: %v", err)
 	}

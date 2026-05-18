@@ -125,12 +125,13 @@ func TestOpenClawAdapterStartRunUsesAgentMethod(t *testing.T) {
 		if !ok {
 			t.Fatalf("unexpected params: %+v", request.Params)
 		}
-		metadata, ok := params["metadata"].(map[string]any)
-		if !ok {
-			t.Fatalf("missing metadata: %+v", params)
-		}
-		if params["message"] != "prompt" || params["idempotencyKey"] != "assignment-1" || params["runId"] != "assignment-1" || params["nativeMcpServerName"] != "personastack-conn-1" || metadata["personastack_run_id"] != "run-1" {
+		if params["message"] != "prompt" || params["idempotencyKey"] != "assignment-1" {
 			t.Fatalf("unexpected params: %+v", params)
+		}
+		for _, key := range []string{"runId", "nativeMcpServerName", "nativeMcpToolNamespace", "metadata"} {
+			if _, ok := params[key]; ok {
+				t.Fatalf("unexpected param %q: %+v", key, params)
+			}
 		}
 		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"accepted":true}`)})
 	}))

@@ -126,6 +126,9 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 		}
 		response, err := session.call(ctx, request)
 		if err != nil {
+			if openClawErrorIsTimeout(err.Error()) && strings.TrimSpace(session.output()) != "" {
+				return RunResult{Status: RunStatusSucceeded, Output: session.output()}, nil
+			}
 			if openClawErrorIsTimeout(err.Error()) && ctx.Err() == nil {
 				continue
 			}
@@ -147,6 +150,9 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 			return RunResult{}, err
 		}
 		if errText := response.errorString(); errText != "" {
+			if openClawErrorIsTimeout(errText) && strings.TrimSpace(session.output()) != "" {
+				return RunResult{Status: RunStatusSucceeded, Output: session.output()}, nil
+			}
 			if openClawErrorIsTimeout(errText) && ctx.Err() == nil {
 				continue
 			}
@@ -174,6 +180,12 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 		}
 		result, terminal := openClawRunResultFromResponse(response.payload())
 		if !terminal {
+			if output := strings.TrimSpace(session.output()); output != "" {
+				if err := session.emitStarted(handle, openClawRunStartedAtOrNow(response.payload())); err != nil {
+					return RunResult{}, err
+				}
+				return RunResult{Status: RunStatusSucceeded, Output: output}, nil
+			}
 			if err := ctx.Err(); err != nil {
 				return RunResult{}, err
 			}
@@ -196,16 +208,18 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 }
 
 type openClawRPCSession struct {
-	conn      *websocket.Conn
-	writeMu   sync.Mutex
-	pendingMu sync.Mutex
-	pending   map[string]chan openClawResponse
-	closed    chan struct{}
-	errMu     sync.Mutex
-	err       error
-	handle    RunEventHandler
-	startedMu sync.Mutex
-	started   bool
+	conn          *websocket.Conn
+	writeMu       sync.Mutex
+	pendingMu     sync.Mutex
+	pending       map[string]chan openClawResponse
+	closed        chan struct{}
+	errMu         sync.Mutex
+	err           error
+	handle        RunEventHandler
+	startedMu     sync.Mutex
+	started       bool
+	outputMu      sync.Mutex
+	outputBuilder strings.Builder
 }
 
 func newOpenClawRPCSession(conn *websocket.Conn, handle RunEventHandler) *openClawRPCSession {
@@ -342,11 +356,29 @@ func (session *openClawRPCSession) handleBroadcast(response openClawResponse) er
 		return err
 	}
 	for _, event := range events {
+		if event.Kind == RunEventOutputDelta && strings.TrimSpace(event.Delta) != "" {
+			session.appendOutput(event.Delta)
+		}
 		if err := handle(event); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (session *openClawRPCSession) appendOutput(delta string) {
+	session.outputMu.Lock()
+	defer session.outputMu.Unlock()
+	if session.outputBuilder.Len() > 0 {
+		session.outputBuilder.WriteString("\n")
+	}
+	session.outputBuilder.WriteString(strings.TrimSpace(delta))
+}
+
+func (session *openClawRPCSession) output() string {
+	session.outputMu.Lock()
+	defer session.outputMu.Unlock()
+	return strings.TrimSpace(session.outputBuilder.String())
 }
 
 func (session *openClawRPCSession) emitStarted(handle RunEventHandler, startedAt time.Time) error {

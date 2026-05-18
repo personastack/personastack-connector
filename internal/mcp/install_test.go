@@ -156,7 +156,7 @@ func TestInstallerWritesDistinctNativeMCPServersForMultipleBindings(t *testing.T
 	if args, ok := hermesServer["args"].([]any); !ok || len(args) != 4 || args[3] != "conn-1" {
 		t.Fatalf("unexpected Hermes args: %+v", hermesServer["args"])
 	}
-	openClawRaw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "config.json"))
+	openClawRaw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"))
 	if err != nil {
 		t.Fatalf("read OpenClaw config: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestInstallerWritesOpenClawStdioServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallAll() error = %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "config.json"))
+	raw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"))
 	if err != nil {
 		t.Fatalf("read OpenClaw config: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestInstallerReusesExistingLoopbackHTTPProxy(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(homeDir, ".openclaw"), 0o700); err != nil {
 		t.Fatalf("mkdir openclaw: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", "config.json"), []byte("{invalid json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"), []byte("{invalid json"), 0o600); err != nil {
 		t.Fatalf("write invalid openclaw config: %v", err)
 	}
 	binding := config.Binding{
@@ -429,7 +429,7 @@ func TestInstallerReusesExistingLoopbackHTTPProxy(t *testing.T) {
 	if stored.LocalMCPProxyURL != binding.LocalMCPProxyURL || stored.LocalMCPProxyToken != binding.LocalMCPProxyToken {
 		t.Fatalf("loopback proxy changed: %+v", stored)
 	}
-	raw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "config.json"))
+	raw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"))
 	if err != nil {
 		t.Fatalf("read OpenClaw config: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestInstallerFallsBackToOpenClawLoopbackHTTPWhenStdioConfigIsInvalid(t *tes
 	if err := os.MkdirAll(filepath.Join(homeDir, ".openclaw"), 0o700); err != nil {
 		t.Fatalf("mkdir openclaw: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", "config.json"), []byte("{invalid json"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"), []byte("{invalid json"), 0o600); err != nil {
 		t.Fatalf("write invalid openclaw config: %v", err)
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
@@ -459,7 +459,7 @@ func TestInstallerFallsBackToOpenClawLoopbackHTTPWhenStdioConfigIsInvalid(t *tes
 	if len(results) != 1 || !strings.Contains(results[0].Note, "loopback HTTP MCP proxy configured") || !strings.Contains(results[0].Note, "credential warning") {
 		t.Fatalf("unexpected results: %+v", results)
 	}
-	raw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "config.json"))
+	raw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"))
 	if err != nil {
 		t.Fatalf("read OpenClaw config: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestInstallerFallsBackToOpenClawLoopbackHTTPWhenStdioConfigIsInvalid(t *tes
 	if got := headers["Authorization"]; !strings.HasPrefix(got.(string), "Bearer ") || strings.Contains(got.(string), "secret-mcp-token") {
 		t.Fatalf("unexpected OpenClaw headers: %+v", headers)
 	}
-	info, err := os.Stat(filepath.Join(homeDir, ".openclaw", "config.json"))
+	info, err := os.Stat(filepath.Join(homeDir, ".openclaw", "openclaw.json"))
 	if err != nil {
 		t.Fatalf("stat OpenClaw config: %v", err)
 	}
@@ -509,10 +509,10 @@ func TestInstallerUsesOpenClawCLIWhenAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallAll() error = %v", err)
 	}
-	if len(results) != 1 || results[0].Path != filepath.Join(homeDir, ".openclaw", "config.json") {
+	if len(results) != 1 || results[0].Path != filepath.Join(homeDir, ".openclaw", "openclaw.json") {
 		t.Fatalf("unexpected results: %+v", results)
 	}
-	if _, err := os.Stat(filepath.Join(homeDir, ".openclaw", "config.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(homeDir, ".openclaw", "openclaw.json")); !os.IsNotExist(err) {
 		t.Fatalf("unexpected OpenClaw config write: %v", err)
 	}
 	raw, err := os.ReadFile(logPath)
@@ -580,7 +580,7 @@ func TestVerifyBindingRequiresRestartForOpenClawServer(t *testing.T) {
 
 func TestVerifyBindingAcceptsStreamableHTTPServer(t *testing.T) {
 	homeDir := t.TempDir()
-	path := filepath.Join(homeDir, ".openclaw", "config.json")
+	path := filepath.Join(homeDir, ".openclaw", "openclaw.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -817,7 +817,7 @@ func TestVerifyBindingWithLiveRequiresLiveVerificationForHermesAndOpenClaw(t *te
 		configPath  string
 	}{
 		{name: "hermes", runtimeKind: runtime.AdapterKindHermes, configPath: ".hermes/config.yaml"},
-		{name: "openclaw", runtimeKind: runtime.AdapterKindOpenClaw, configPath: ".openclaw/config.json"},
+		{name: "openclaw", runtimeKind: runtime.AdapterKindOpenClaw, configPath: ".openclaw/openclaw.json"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			homeDir := t.TempDir()
@@ -1016,7 +1016,7 @@ func TestVerifyBindingWithLiveMarksOpenClawVerifiedWhenCatalogAndMCPAreReachable
 	if err := os.MkdirAll(filepath.Join(homeDir, ".openclaw"), 0o700); err != nil {
 		t.Fatalf("mkdir openclaw config dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", "config.json"), rawConfig, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"), rawConfig, 0o600); err != nil {
 		t.Fatalf("write openclaw config: %v", err)
 	}
 	t.Setenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL", "ws"+gateway.URL[len("http"):])

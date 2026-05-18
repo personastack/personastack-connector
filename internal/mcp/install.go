@@ -57,6 +57,10 @@ const (
 
 const credentialStorageWarning = "credential warning: local MCP auth stays in owner-only connector config"
 
+func openClawConfigPath(homeDir string) string {
+	return filepath.Join(homeDir, ".openclaw", "openclaw.json")
+}
+
 func (installer Installer) InstallAll() ([]InstallResult, error) {
 	if installer.Store == nil {
 		return nil, fmt.Errorf("store required")
@@ -123,7 +127,7 @@ func (installer Installer) installBinding(homeDir string, executablePath string,
 		} else if transport == MCPProxyTransportStdio {
 			return InstallResult{}, err
 		}
-		path := filepath.Join(homeDir, ".openclaw", "config.json")
+		path := openClawConfigPath(homeDir)
 		if err := upsertOpenClawServer(path, server); err == nil {
 			return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name}, nil
 		} else if transport == MCPProxyTransportStdio {
@@ -140,6 +144,10 @@ func installOpenClawServerWithCLI(homeDir string, binding config.Binding, server
 	if err != nil {
 		return InstallResult{}, err
 	}
+	configPath := openClawConfigPath(homeDir)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		return InstallResult{}, fmt.Errorf("create OpenClaw config dir: %w", err)
+	}
 	raw, err := json.Marshal(map[string]any{
 		"command": server.Command,
 		"args":    server.Args,
@@ -148,10 +156,11 @@ func installOpenClawServerWithCLI(homeDir string, binding config.Binding, server
 		return InstallResult{}, err
 	}
 	cmd := exec.Command(cliPath, "mcp", "set", server.Name, string(raw))
+	cmd.Env = append(os.Environ(), "OPENCLAW_CONFIG_PATH="+configPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return InstallResult{}, fmt.Errorf("openclaw mcp set: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: filepath.Join(homeDir, ".openclaw", "config.json"), ServerName: server.Name}, nil
+	return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: configPath, ServerName: server.Name}, nil
 }
 
 func (installer Installer) installBindingLoopbackHTTP(homeDir string, binding config.Binding, server stdioServerConfig) (InstallResult, error) {
@@ -191,7 +200,7 @@ func (installer Installer) installBindingLoopbackHTTP(homeDir string, binding co
 		}
 		return result, nil
 	case runtime.AdapterKindOpenClaw:
-		path := filepath.Join(homeDir, ".openclaw", "config.json")
+		path := openClawConfigPath(homeDir)
 		if err := upsertOpenClawLoopbackHTTPServer(path, server, loopback); err != nil {
 			return InstallResult{}, err
 		}
@@ -227,7 +236,7 @@ func VerifyBinding(homeDir string, binding config.Binding) VerifyResult {
 		result.Path = filepath.Join(homeDir, ".hermes", "config.yaml")
 		result.State, result.Note = verifyHermesServer(result.Path, serverName, binding.ConnectionID)
 	case runtime.AdapterKindOpenClaw:
-		result.Path = filepath.Join(homeDir, ".openclaw", "config.json")
+		result.Path = openClawConfigPath(homeDir)
 		result.State, result.Note = verifyOpenClawServer(result.Path, serverName, binding.ConnectionID)
 	default:
 		result.Note = "unsupported runtime for mcp verification"
@@ -242,16 +251,16 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 	}
 	if binding.RuntimeKind == runtime.AdapterKindOpenClaw {
 		adapter := runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{
-			Token:       strings.TrimSpace(binding.OpenClawGatewayToken),
-			Password:    strings.TrimSpace(binding.OpenClawPassword),
-			DeviceToken: strings.TrimSpace(binding.OpenClawDeviceToken),
+			Token:       firstNonEmpty(binding.OpenClawGatewayToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN")),
+			Password:    firstNonEmpty(binding.OpenClawPassword, os.Getenv("OPENCLAW_GATEWAY_PASSWORD")),
+			DeviceToken: firstNonEmpty(binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")),
 		}, binding.OpenClawAgentID)
 		openClawLive := adapter.VerifyMCPCatalog(ctx, result.ServerName)
-		if !openClawLive.OK {
+		if openClawLive.OK {
 			result.Note = openClawLive.Note
-			return result
+		} else {
+			result.Note = appendNote(result.Note, openClawLive.Note)
 		}
-		result.Note = openClawLive.Note
 	}
 	live := VerifyBindingLive(ctx, binding, client)
 	if isLoopbackHTTPConfig(result.Note) {
