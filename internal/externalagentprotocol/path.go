@@ -21,6 +21,9 @@ func ResolveWebsocketURL(raw string) (string, error) {
 	if base == "" {
 		base = DefaultGatewayBaseURL
 	}
+	if !strings.Contains(base, "://") {
+		base = "https://" + base
+	}
 
 	parsed, err := url.Parse(base)
 	if err != nil {
