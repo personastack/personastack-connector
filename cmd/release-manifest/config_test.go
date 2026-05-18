@@ -315,9 +315,6 @@ func TestReleaseWorkflowContainsDryRunValidationSteps(t *testing.T) {
 		"personastack-connector_${GITHUB_REF_NAME#v}_checksums.txt.sigstore.json",
 		"./scripts/verify-release-manifest.sh dist \"${GITHUB_REF_NAME#v}\"",
 		"./scripts/render-package-manager-metadata.sh dist \"${GITHUB_REF_NAME#v}\"",
-		"./scripts/publish-release-metadata-to-api.sh dist \"${GITHUB_REF_NAME#v}\"",
-		"PERSONASTACK_API_URL: ${{ secrets.PERSONASTACK_API_URL }}",
-		"PERSONASTACK_ADMIN_BEARER_TOKEN: ${{ secrets.PERSONASTACK_ADMIN_BEARER_TOKEN }}",
 		"dist/package-manager/homebrew/personastack-connector.rb",
 		"COSIGN_CERTIFICATE_IDENTITY: https://github.com/personastack/personastack-connector/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}",
 	} {
@@ -330,10 +327,21 @@ func TestReleaseWorkflowContainsDryRunValidationSteps(t *testing.T) {
 		"WINDOWS_CODE_SIGN",
 		"osslsigncode",
 		"winget",
+		"./scripts/publish-release-metadata-to-api.sh dist \"${GITHUB_REF_NAME#v}\"",
+		"PERSONASTACK_API_URL: ${{ secrets.PERSONASTACK_API_URL }}",
+		"PERSONASTACK_ADMIN_BEARER_TOKEN: ${{ secrets.PERSONASTACK_ADMIN_BEARER_TOKEN }}",
 	} {
 		if strings.Contains(string(ci)+"\n"+string(release), retired) {
-			t.Fatalf("release workflow kept retired Windows metadata %q", retired)
+			t.Fatalf("release workflow kept retired metadata %q", retired)
 		}
+	}
+	attestIndex := strings.Index(string(release), "name: Attest artifacts")
+	publishIndex := strings.Index(string(release), "name: Publish GitHub Release")
+	if attestIndex < 0 || publishIndex < 0 || attestIndex > publishIndex {
+		t.Fatalf("release workflow must attest artifacts before publishing the GitHub Release")
+	}
+	if !strings.HasSuffix(strings.TrimSpace(string(release)), `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}`) {
+		t.Fatalf("publishing the GitHub Release must remain the final release workflow step")
 	}
 }
 

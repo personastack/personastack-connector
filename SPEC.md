@@ -256,9 +256,10 @@ Adapter result states must be concrete typed enums, including:
 - Tagged releases also publish cosign-bundled signatures for the checksum file
   and the release manifest, so advanced guidance can verify release artifacts
   without making verification part of the primary install command.
-- The release workflow must publish generated release-manifest metadata into
+- Post-release activation must publish generated release-manifest metadata into
   the PersonaStack API admin connector-release endpoint by sending only the
-  semver, commit, and minimum protocol. The API owns derivation of every
+  semver, commit, and minimum protocol after the release workflow has completed
+  and public assets have been verified. The API owns derivation of every
   recommended OS/arch/package asset URL and install command.
 - The binary must expose `personastack-connector version` so install flows and
   support diagnostics can verify the downloaded artifact.
