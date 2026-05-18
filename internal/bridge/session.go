@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"os"
 	stdruntime "runtime"
 	"strings"
 	"time"
@@ -77,6 +78,7 @@ func (s Session) ConnectFrame(nonce string) (externalagentprotocol.Frame, error)
 		ConnectorVersion:          buildinfo.VersionString(),
 		RuntimeKind:               runtimeKindForAdapter(s.Binding.RuntimeKind),
 		ConnectionGeneration:      s.Binding.ConnectionGeneration,
+		Hostname:                  localHostname(),
 		DevicePublicKey:           base64.StdEncoding.EncodeToString(s.Credential.PublicKey),
 		CredentialID:              strings.TrimSpace(s.Credential.ID),
 		CredentialProofNonce:      strings.TrimSpace(nonce),
@@ -95,6 +97,7 @@ func (s Session) HeartbeatFrame(state runtime.AdapterState, lastWakeProbeAt *tim
 		ReadinessStatus:        readinessForAdapterState(state, lastWakeProbeAt),
 		RuntimeKind:            runtimeKindForAdapter(s.Binding.RuntimeKind),
 		ConnectionGeneration:   s.Binding.ConnectionGeneration,
+		Hostname:               localHostname(),
 		NativeMCPServerName:    strings.TrimSpace(s.Binding.NativeMCPServer),
 		NativeMCPToolNamespace: strings.TrimSpace(s.Binding.NativeMCPNamespace),
 		NativeMCPToolPrefix:    nativeMCPToolPrefix(s.Binding.RuntimeKind, s.Binding.NativeMCPServer),
@@ -107,6 +110,14 @@ func (s Session) HeartbeatFrame(state runtime.AdapterState, lastWakeProbeAt *tim
 		LastWakeProbeAt:        lastWakeProbeAt,
 	}
 	return frame
+}
+
+func localHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(hostname)
 }
 
 func (s Session) WakeProbeAcceptedFrame(probeID string) externalagentprotocol.Frame {

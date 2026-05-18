@@ -12,8 +12,9 @@ external persona.
 - Open authenticated outbound websocket sessions to `agent-gateway`.
 - Negotiate a bounded Connector websocket protocol version with `agent-gateway`
   and reject connect responses that advertise an unsupported version.
-- Report runtime health, MCP configuration state, Connector version, connection
-  generation, native MCP server/tool naming metadata, and wake probe results.
+- Report runtime health, MCP configuration state, Connector version, local host
+  name, connection generation, native MCP server/tool naming metadata, and wake
+  probe results.
 - Receive API-composed run assignments from `agent-gateway`.
 - Dispatch fully composed prompts into the selected local runtime.
 - Stream or report local run events back through the Connector protocol.
@@ -49,6 +50,8 @@ external persona.
 - A Connector installation manages one external persona binding at a time.
   Pairing a new external persona replaces the previous local binding and local
   binding secrets for that machine.
+- Pairing, connect, and heartbeat payloads include the local machine hostname as
+  bounded non-secret operator-facing metadata.
 - Each binding has one PersonaStack connection id, persona id, external agent
   kind, bridge credential, PersonaStack MCP credential, native MCP server name,
   local runtime selection, and local readiness state.

@@ -80,6 +80,7 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 		OS:                  goruntime.GOOS,
 		Arch:                goruntime.GOARCH,
 		DevicePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
+		Hostname:            localHostname(),
 		HostnameHash:        hostnameHash(),
 		GatewayWebsocketURL: websocketURL,
 		ConfigureMCP:        request.ConfigureMCP,
@@ -175,10 +176,18 @@ func externalKindForRuntime(kind externalagentprotocol.RuntimeKind) config.Exter
 }
 
 func hostnameHash() string {
-	hostname, err := os.Hostname()
-	if err != nil {
+	hostname := localHostname()
+	if hostname == "" {
 		hostname = "unknown"
 	}
 	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(hostname))))
 	return hex.EncodeToString(sum[:])
+}
+
+func localHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(hostname)
 }

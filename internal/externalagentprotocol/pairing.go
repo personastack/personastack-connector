@@ -10,6 +10,7 @@ type PairingExchangeRequest struct {
 	Arch                string      `json:"arch,omitempty"`
 	DevicePublicKey     string      `json:"device_public_key"`
 	DeviceKeyProof      string      `json:"device_key_proof"`
+	Hostname            string      `json:"hostname,omitempty"`
 	HostnameHash        string      `json:"hostname_hash"`
 	GatewayWebsocketURL string      `json:"gateway_websocket_url"`
 	ConfigureMCP        bool        `json:"configure_mcp"`

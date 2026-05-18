@@ -231,6 +231,7 @@ type ConnectPayload struct {
 	ConnectorVersion          string      `json:"connector_version"`
 	RuntimeKind               RuntimeKind `json:"runtime_kind"`
 	ConnectionGeneration      int64       `json:"connection_generation"`
+	Hostname                  string      `json:"hostname,omitempty"`
 	DevicePublicKey           string      `json:"device_public_key"`
 	CredentialID              string      `json:"credential_id"`
 	CredentialProof           string      `json:"credential_proof"`
@@ -256,6 +257,7 @@ type HeartbeatPayload struct {
 	RuntimeKind            RuntimeKind          `json:"runtime_kind"`
 	ConnectionGeneration   int64                `json:"connection_generation"`
 	RuntimeLabel           string               `json:"runtime_label,omitempty"`
+	Hostname               string               `json:"hostname,omitempty"`
 	NativeMCPServerName    string               `json:"native_mcp_server_name,omitempty"`
 	NativeMCPToolNamespace string               `json:"native_mcp_tool_namespace,omitempty"`
 	NativeMCPToolPrefix    string               `json:"native_mcp_tool_prefix,omitempty"`
