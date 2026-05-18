@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/integrii/flaggy"
-	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
+	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 )
 
 type releaseManifest struct {
@@ -141,10 +141,7 @@ func defaultInstallEligible(osName string, packageKind string, macosDefaultInsta
 	}
 	switch packageKind {
 	case "archive":
-		if strings.EqualFold(osName, "darwin") {
-			return macosDefaultInstallEligible
-		}
-		return true
+		return strings.EqualFold(osName, "darwin") && macosDefaultInstallEligible
 	case "deb", "rpm":
 		return strings.EqualFold(osName, "linux")
 	default:
@@ -201,7 +198,7 @@ func readChecksums(distDir string) (map[string]string, error) {
 
 func packageKind(name string) string {
 	switch {
-	case strings.HasSuffix(name, ".tar.gz"), strings.HasSuffix(name, ".zip"):
+	case strings.HasSuffix(name, ".tar.gz"):
 		return "archive"
 	case strings.HasSuffix(name, ".deb"):
 		return "deb"
@@ -217,7 +214,7 @@ func packageKind(name string) string {
 }
 
 func osArch(name string) (string, string) {
-	for _, osName := range []string{"darwin", "linux", "windows"} {
+	for _, osName := range []string{"darwin", "linux"} {
 		for _, arch := range []string{"amd64", "arm64"} {
 			if strings.Contains(name, "_"+osName+"_"+arch) {
 				return osName, arch

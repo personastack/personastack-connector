@@ -551,6 +551,7 @@ func TestOpenClawAdapterDetectRequiresAgentSelection(t *testing.T) {
 		if err := conn.ReadJSON(&health); err != nil {
 			t.Fatalf("read health: %v", err)
 		}
+		_ = conn.WriteJSON(openClawResponse{Type: "event", Event: "health", Payload: json.RawMessage(`{"ok":true}`)})
 		_ = conn.WriteJSON(openClawResponse{ID: health.ID, Result: json.RawMessage(`{"ok":true}`)})
 		var status openClawRequest
 		if err := conn.ReadJSON(&status); err != nil {
@@ -659,7 +660,7 @@ func TestOpenClawAdapterAcceptsResHelloPayload(t *testing.T) {
 		if err := conn.ReadJSON(&connect); err != nil {
 			t.Fatalf("read connect: %v", err)
 		}
-		payload := `{"protocol":4,"role":"operator","scopes":["operator.read","operator.write"],"features":{"methods":["health","status","agents.list","agent","agent.wait","sessions.abort"]}}`
+		payload := `{"type":"hello-ok","protocol":4,"features":{"methods":["health","status","agents.list","agent","agent.wait","sessions.abort"]},"auth":{"role":"operator","scopes":["operator.read","operator.write"]}}`
 		_ = conn.WriteJSON(openClawResponse{Type: "res", ID: connect.ID, OK: boolRef(true), Payload: json.RawMessage(payload)})
 		var health openClawRequest
 		if err := conn.ReadJSON(&health); err != nil {
@@ -749,7 +750,14 @@ func openClawTestAcceptOperatorWithDevice(t *testing.T, conn *websocket.Conn, to
 	if connect.Method != "connect" {
 		t.Fatalf("expected connect, got %+v", connect)
 	}
+	if connect.Type != "req" {
+		t.Fatalf("expected request frame type, got %+v", connect)
+	}
 	params := connect.Params.(map[string]any)
+	client := params["client"].(map[string]any)
+	if client["id"] != "gateway-client" || client["mode"] != "backend" {
+		t.Fatalf("expected backend gateway-client connect, got %+v", client)
+	}
 	if params["role"] != "operator" {
 		t.Fatalf("expected operator connect, got %+v", params)
 	}

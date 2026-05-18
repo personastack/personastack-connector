@@ -1,9 +1,26 @@
-Proprietary License
+PersonaStack Connector Source-Available Audit License
 
-Copyright (c) 2026 PersonaStack
+Copyright (c) 2026 PersonaStack.
 
-All rights reserved.
+This repository is published so users can inspect the source code for the
+PersonaStack Connector they install.
 
-This software and associated documentation files are proprietary to PersonaStack.
-You may not copy, modify, distribute, sublicense, or use this software except as
-authorized in writing by PersonaStack or under a separate license agreement.
+Permission is granted to view this source code and to fork this repository only
+through GitHub features made available by GitHub's terms of service.
+
+No other rights are granted. Without prior written permission from PersonaStack,
+you may not use, copy, modify, publish, distribute, sublicense, sell, host,
+operate, or create derivative works from this software or substantial portions
+of it.
+
+This license does not grant trademark rights, patent rights, or rights to use
+PersonaStack services, names, logos, or branding.
+
+PersonaStack release binaries and install flows may be subject to additional
+service or distribution terms.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. IN NO EVENT SHALL PERSONASTACK BE
+LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM OR RELATED TO
+THE SOFTWARE OR THIS REPOSITORY.

@@ -16,37 +16,28 @@ type goReleaserConfig struct {
 		Hooks []string `yaml:"hooks"`
 	} `yaml:"before"`
 	Builds []struct {
-		ID     string   `yaml:"id"`
-		Main   string   `yaml:"main"`
-		Binary string   `yaml:"binary"`
-		Env    []string `yaml:"env"`
-		GoOS   []string `yaml:"goos"`
-		GoArch []string `yaml:"goarch"`
-		Ignore []struct {
-			GoOS   string `yaml:"goos"`
-			GoArch string `yaml:"goarch"`
-		} `yaml:"ignore"`
+		ID      string   `yaml:"id"`
+		Main    string   `yaml:"main"`
+		Binary  string   `yaml:"binary"`
+		Env     []string `yaml:"env"`
+		GoOS    []string `yaml:"goos"`
+		GoArch  []string `yaml:"goarch"`
 		LdFlags []string `yaml:"ldflags"`
-		Hooks   struct {
-			Post []struct {
-				Cmd    string `yaml:"cmd"`
-				Output bool   `yaml:"output"`
-			} `yaml:"post"`
-		} `yaml:"hooks"`
 	} `yaml:"builds"`
 	Archives []struct {
-		ID              string `yaml:"id"`
-		NameTemplate    string `yaml:"name_template"`
-		FormatOverrides []struct {
-			GoOS    string   `yaml:"goos"`
-			Formats []string `yaml:"formats"`
-		} `yaml:"format_overrides"`
+		ID           string `yaml:"id"`
+		NameTemplate string `yaml:"name_template"`
 	} `yaml:"archives"`
 	NFPMs []struct {
 		ID          string   `yaml:"id"`
 		PackageName string   `yaml:"package_name"`
 		Formats     []string `yaml:"formats"`
 		BinDir      string   `yaml:"bindir"`
+		License     string   `yaml:"license"`
+		Contents    []struct {
+			Src string `yaml:"src"`
+			Dst string `yaml:"dst"`
+		} `yaml:"contents"`
 	} `yaml:"nfpms"`
 	Checksum struct {
 		NameTemplate string `yaml:"name_template"`
@@ -104,8 +95,11 @@ func TestGoReleaserConfigCoversReleaseMatrix(t *testing.T) {
 	if build.ID != "personastack-connector" || build.Main != "./cmd/personastack-connector" || build.Binary != "personastack-connector" {
 		t.Fatalf("unexpected build identity: %+v", build)
 	}
-	if !containsAll(build.GoOS, "darwin", "linux", "windows") {
+	if !containsAll(build.GoOS, "darwin", "linux") {
 		t.Fatalf("unexpected goos matrix: %v", build.GoOS)
+	}
+	if containsString(build.GoOS, "windows") {
+		t.Fatalf("windows must not be in the release matrix: %v", build.GoOS)
 	}
 	if !containsAll(build.GoArch, "amd64", "arm64") {
 		t.Fatalf("unexpected goarch matrix: %v", build.GoArch)
@@ -116,12 +110,6 @@ func TestGoReleaserConfigCoversReleaseMatrix(t *testing.T) {
 	if !containsString(build.LdFlags, "-X github.com/personastack/personastack-connector/internal/buildinfo.Version={{ .Version }}") {
 		t.Fatalf("missing buildinfo ldflags: %v", build.LdFlags)
 	}
-	if !hasIgnoreTarget(build.Ignore, "windows", "arm64") {
-		t.Fatalf("expected windows/arm64 ignore entry: %+v", build.Ignore)
-	}
-	if len(build.Hooks.Post) != 1 || build.Hooks.Post[0].Cmd != "./scripts/sign-windows-binary.sh \"{{ .Path }}\"" || !build.Hooks.Post[0].Output {
-		t.Fatalf("unexpected build hooks: %+v", build.Hooks.Post)
-	}
 
 	if len(cfg.Archives) != 1 {
 		t.Fatalf("archive count = %d, want 1", len(cfg.Archives))
@@ -130,9 +118,6 @@ func TestGoReleaserConfigCoversReleaseMatrix(t *testing.T) {
 	if !strings.Contains(archive.NameTemplate, "personastack-connector_{{ .Version }}_") {
 		t.Fatalf("unexpected archive name template: %q", archive.NameTemplate)
 	}
-	if !hasArchiveOverride(archive.FormatOverrides, "windows", "zip") {
-		t.Fatalf("expected windows zip override: %+v", archive.FormatOverrides)
-	}
 
 	if len(cfg.NFPMs) != 1 {
 		t.Fatalf("nfpm count = %d, want 1", len(cfg.NFPMs))
@@ -140,6 +125,14 @@ func TestGoReleaserConfigCoversReleaseMatrix(t *testing.T) {
 	nfpm := cfg.NFPMs[0]
 	if nfpm.PackageName != "personastack-connector" || nfpm.BinDir != "/usr/local/bin" {
 		t.Fatalf("unexpected nfpm metadata: %+v", nfpm)
+	}
+	if nfpm.License != "Source-Available" {
+		t.Fatalf("unexpected nfpm license: %q", nfpm.License)
+	}
+	for _, want := range []string{"README.md", "LICENSE", "SECURITY.md", "DEVELOPMENT.md", "SPEC.md"} {
+		if !hasNFPMContent(nfpm.Contents, want) {
+			t.Fatalf("nfpm contents missing %q: %+v", want, nfpm.Contents)
+		}
 	}
 	if !containsAll(nfpm.Formats, "deb", "rpm") {
 		t.Fatalf("unexpected nfpm formats: %v", nfpm.Formats)
@@ -194,11 +187,9 @@ func TestBuildManifestGatesDefaultInstallEligibilityUntilReleaseSigningIsEnabled
 		"personastack-connector_0.2.0_darwin_arm64.tar.gz": "artifact",
 		"personastack-connector_0.2.0_linux_amd64.deb":     "artifact",
 		"personastack-connector_0.2.0_linux_amd64.rpm":     "artifact",
-		"personastack-connector_0.2.0_windows_amd64.zip":   "artifact",
 		"personastack-connector_0.2.0_checksums.txt": "aaa111  personastack-connector_0.2.0_darwin_arm64.tar.gz\n" +
 			"bbb222  personastack-connector_0.2.0_linux_amd64.deb\n" +
-			"ccc333  personastack-connector_0.2.0_linux_amd64.rpm\n" +
-			"ddd444  personastack-connector_0.2.0_windows_amd64.zip\n",
+			"ccc333  personastack-connector_0.2.0_linux_amd64.rpm\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(distDir, name), []byte(body), 0o644); err != nil {
@@ -220,9 +211,6 @@ func TestBuildManifestGatesDefaultInstallEligibilityUntilReleaseSigningIsEnabled
 	if assetsByName["personastack-connector_0.2.0_linux_amd64.rpm"].DefaultInstallEligible {
 		t.Fatalf("linux rpm should not be default-install eligible without release signing inputs: %+v", assetsByName["personastack-connector_0.2.0_linux_amd64.rpm"])
 	}
-	if assetsByName["personastack-connector_0.2.0_windows_amd64.zip"].DefaultInstallEligible {
-		t.Fatalf("windows archive should not be default-install eligible without release signing inputs: %+v", assetsByName["personastack-connector_0.2.0_windows_amd64.zip"])
-	}
 	if assetsByName["personastack-connector_0.2.0_darwin_arm64.tar.gz"].DefaultInstallEligible {
 		t.Fatalf("darwin archive should not be default-install eligible without macOS signing inputs: %+v", assetsByName["personastack-connector_0.2.0_darwin_arm64.tar.gz"])
 	}
@@ -241,11 +229,9 @@ func TestBuildManifestMarksInstallerDefaultsWhenReleaseSigningConfigured(t *test
 		"personastack-connector_0.2.0_darwin_arm64.tar.gz": "artifact",
 		"personastack-connector_0.2.0_linux_amd64.deb":     "artifact",
 		"personastack-connector_0.2.0_linux_amd64.rpm":     "artifact",
-		"personastack-connector_0.2.0_windows_amd64.zip":   "artifact",
 		"personastack-connector_0.2.0_checksums.txt": "aaa111  personastack-connector_0.2.0_darwin_arm64.tar.gz\n" +
 			"bbb222  personastack-connector_0.2.0_linux_amd64.deb\n" +
-			"ccc333  personastack-connector_0.2.0_linux_amd64.rpm\n" +
-			"ddd444  personastack-connector_0.2.0_windows_amd64.zip\n",
+			"ccc333  personastack-connector_0.2.0_linux_amd64.rpm\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(distDir, name), []byte(body), 0o644); err != nil {
@@ -265,7 +251,6 @@ func TestBuildManifestMarksInstallerDefaultsWhenReleaseSigningConfigured(t *test
 		"personastack-connector_0.2.0_darwin_arm64.tar.gz",
 		"personastack-connector_0.2.0_linux_amd64.deb",
 		"personastack-connector_0.2.0_linux_amd64.rpm",
-		"personastack-connector_0.2.0_windows_amd64.zip",
 	} {
 		if !assetsByName[name].DefaultInstallEligible {
 			t.Fatalf("expected default-install eligibility when release signing inputs are present: %+v", assetsByName[name])
@@ -273,7 +258,7 @@ func TestBuildManifestMarksInstallerDefaultsWhenReleaseSigningConfigured(t *test
 	}
 }
 
-func TestGoReleaserConfigStillExcludesWindowsArm64(t *testing.T) {
+func TestGoReleaserConfigExcludesWindows(t *testing.T) {
 	raw, err := os.ReadFile("../../.goreleaser.yaml")
 	if err != nil {
 		t.Fatalf("read goreleaser config: %v", err)
@@ -286,8 +271,8 @@ func TestGoReleaserConfigStillExcludesWindowsArm64(t *testing.T) {
 	if len(cfg.Builds) != 1 {
 		t.Fatalf("build count = %d, want 1", len(cfg.Builds))
 	}
-	if !hasIgnoreTarget(cfg.Builds[0].Ignore, "windows", "arm64") {
-		t.Fatalf("expected windows/arm64 ignore entry: %+v", cfg.Builds[0].Ignore)
+	if containsString(cfg.Builds[0].GoOS, "windows") {
+		t.Fatalf("windows must not be in the release matrix: %v", cfg.Builds[0].GoOS)
 	}
 }
 
@@ -310,12 +295,6 @@ func TestReleaseWorkflowContainsDryRunValidationSteps(t *testing.T) {
 		"./scripts/fake-runtime-smoke.sh",
 		"ubuntu-latest",
 		"macos-latest",
-		"windows-latest",
-		"Install osslsigncode",
-		"Prepare Windows signing certificate",
-		"Check Windows signing gate",
-		"WINDOWS_CODE_SIGN_REQUIRED=1",
-		"WINDOWS_CODE_SIGN_REQUIRED=0",
 		"./scripts/smoke-release-artifacts.sh dist auto",
 		"attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45",
 		"./scripts/check-release-policy.sh",
@@ -340,11 +319,20 @@ func TestReleaseWorkflowContainsDryRunValidationSteps(t *testing.T) {
 		"PERSONASTACK_API_URL: ${{ secrets.PERSONASTACK_API_URL }}",
 		"PERSONASTACK_ADMIN_BEARER_TOKEN: ${{ secrets.PERSONASTACK_ADMIN_BEARER_TOKEN }}",
 		"dist/package-manager/homebrew/personastack-connector.rb",
-		"dist/package-manager/winget/PersonaStack.Connector/${GITHUB_REF_NAME#v}/*.yaml",
 		"COSIGN_CERTIFICATE_IDENTITY: https://github.com/personastack/personastack-connector/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}",
 	} {
 		if !strings.Contains(string(ci)+"\n"+string(release), want) {
 			t.Fatalf("missing release validation step %q", want)
+		}
+	}
+	for _, retired := range []string{
+		"windows-latest",
+		"WINDOWS_CODE_SIGN",
+		"osslsigncode",
+		"winget",
+	} {
+		if strings.Contains(string(ci)+"\n"+string(release), retired) {
+			t.Fatalf("release workflow kept retired Windows metadata %q", retired)
 		}
 	}
 }
@@ -354,7 +342,8 @@ func TestRenderPackageManagerMetadata(t *testing.T) {
 	checksums := strings.Join([]string{
 		"1111111111111111111111111111111111111111111111111111111111111111  personastack-connector_0.2.0_darwin_arm64.tar.gz",
 		"2222222222222222222222222222222222222222222222222222222222222222  personastack-connector_0.2.0_darwin_amd64.tar.gz",
-		"3333333333333333333333333333333333333333333333333333333333333333  personastack-connector_0.2.0_windows_amd64.zip",
+		"3333333333333333333333333333333333333333333333333333333333333333  personastack-connector_0.2.0_linux_arm64.tar.gz",
+		"4444444444444444444444444444444444444444444444444444444444444444  personastack-connector_0.2.0_linux_amd64.tar.gz",
 		"",
 	}, "\n")
 	if err := os.WriteFile(filepath.Join(dist, "personastack-connector_0.2.0_checksums.txt"), []byte(checksums), 0o600); err != nil {
@@ -371,27 +360,21 @@ func TestRenderPackageManagerMetadata(t *testing.T) {
 		t.Fatalf("read homebrew metadata: %v", err)
 	}
 	for _, want := range []string{
+		"class PersonastackConnector < Formula",
 		`version "0.2.0"`,
 		"personastack-connector_0.2.0_darwin_arm64.tar.gz",
 		"1111111111111111111111111111111111111111111111111111111111111111",
+		"personastack-connector_0.2.0_linux_amd64.tar.gz",
+		"4444444444444444444444444444444444444444444444444444444444444444",
+		"license :cannot_represent",
+		`bin.install "personastack-connector"`,
 	} {
 		if !strings.Contains(string(homebrew), want) {
 			t.Fatalf("homebrew metadata missing %q: %s", want, string(homebrew))
 		}
 	}
-	winget, err := os.ReadFile(filepath.Join(dist, "package-manager", "winget", "PersonaStack.Connector", "0.2.0", "PersonaStack.Connector.installer.yaml"))
-	if err != nil {
-		t.Fatalf("read winget metadata: %v", err)
-	}
-	for _, want := range []string{
-		"PackageIdentifier: PersonaStack.Connector",
-		"InstallerType: zip",
-		"personastack-connector_0.2.0_windows_amd64.zip",
-		"3333333333333333333333333333333333333333333333333333333333333333",
-	} {
-		if !strings.Contains(string(winget), want) {
-			t.Fatalf("winget metadata missing %q: %s", want, string(winget))
-		}
+	if _, err := os.Stat(filepath.Join(dist, "package-manager", "winget")); !os.IsNotExist(err) {
+		t.Fatalf("winget metadata must not be generated: %v", err)
 	}
 }
 
@@ -400,7 +383,6 @@ func TestPublishReleaseMetadataToAPI(t *testing.T) {
 	manifest := `{
   "assets": [
     {"arch":"amd64","checksum":"aaa","default_install_eligible":true,"name":"personastack-connector_0.2.0_linux_amd64.deb","os":"linux","package_kind":"deb","path":"personastack-connector_0.2.0_linux_amd64.deb"},
-    {"arch":"amd64","checksum":"bbb","default_install_eligible":true,"name":"personastack-connector_0.2.0_windows_amd64.zip","os":"windows","package_kind":"archive","path":"personastack-connector_0.2.0_windows_amd64.zip"},
     {"arch":"arm64","checksum":"ccc","default_install_eligible":true,"name":"personastack-connector_0.2.0_darwin_arm64.tar.gz","os":"darwin","package_kind":"archive","path":"personastack-connector_0.2.0_darwin_arm64.tar.gz"},
     {"name":"personastack-connector_0.2.0_checksums.txt","package_kind":"checksum","path":"personastack-connector_0.2.0_checksums.txt"}
   ],
@@ -472,39 +454,22 @@ func containsAll(values []string, want ...string) bool {
 	return true
 }
 
+func hasNFPMContent(values []struct {
+	Src string `yaml:"src"`
+	Dst string `yaml:"dst"`
+}, source string) bool {
+	for _, value := range values {
+		if value.Src == source {
+			return true
+		}
+	}
+	return false
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if strings.TrimSpace(value) == want {
 			return true
-		}
-	}
-	return false
-}
-
-func hasIgnoreTarget(entries []struct {
-	GoOS   string `yaml:"goos"`
-	GoArch string `yaml:"goarch"`
-}, goOS string, goArch string) bool {
-	for _, entry := range entries {
-		if entry.GoOS == goOS && entry.GoArch == goArch {
-			return true
-		}
-	}
-	return false
-}
-
-func hasArchiveOverride(entries []struct {
-	GoOS    string   `yaml:"goos"`
-	Formats []string `yaml:"formats"`
-}, goOS string, format string) bool {
-	for _, entry := range entries {
-		if entry.GoOS != goOS {
-			continue
-		}
-		for _, candidate := range entry.Formats {
-			if candidate == format {
-				return true
-			}
 		}
 	}
 	return false

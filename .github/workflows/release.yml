@@ -45,7 +45,6 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          - windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -80,28 +79,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Install osslsigncode
-        run: sudo apt-get update && sudo apt-get install -y osslsigncode
-      - name: Prepare Windows signing certificate
-        run: |
-          if [[ -z "$WINDOWS_CODE_SIGN_PFX_B64" || -z "$WINDOWS_CODE_SIGN_PFX_PASSWORD" ]]; then
-            echo "WINDOWS_CODE_SIGN_REQUIRED=0" >> "$GITHUB_ENV"
-            echo "Windows Authenticode signing secrets are not configured; release will rely on sigstore checksum and manifest bundles."
-            exit 0
-          fi
-          echo "WINDOWS_CODE_SIGN_REQUIRED=1" >> "$GITHUB_ENV"
-          printf '%s' "$WINDOWS_CODE_SIGN_PFX_B64" | base64 -d > "$WINDOWS_CODE_SIGN_PFX_FILE"
-          openssl pkcs12 -in "$WINDOWS_CODE_SIGN_PFX_FILE" -passin "pass:$WINDOWS_CODE_SIGN_PFX_PASSWORD" -noout
-        env:
-          WINDOWS_CODE_SIGN_PFX_B64: ${{ secrets.WINDOWS_CODE_SIGN_PFX_B64 }}
-          WINDOWS_CODE_SIGN_PFX_FILE: ${{ runner.temp }}/personastack-windows-signing.pfx
-          WINDOWS_CODE_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD }}
-      - name: Check Windows signing gate
-        run: ./scripts/check-windows-signing.sh
-        env:
-          WINDOWS_CODE_SIGN_PFX_FILE: ${{ runner.temp }}/personastack-windows-signing.pfx
-          WINDOWS_CODE_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD }}
-          WINDOWS_CODE_SIGN_TIMESTAMP_URL: https://timestamp.digicert.com
       - name: Install Cosign
         run: |
           go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
@@ -129,11 +106,6 @@ jobs:
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
-          WINDOWS_CODE_SIGN_PFX_FILE: ${{ runner.temp }}/personastack-windows-signing.pfx
-          WINDOWS_CODE_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODE_SIGN_PFX_PASSWORD }}
-          WINDOWS_CODE_SIGN_TIMESTAMP_URL: https://timestamp.digicert.com
-          WINDOWS_CODE_SIGN_DESCRIPTION: PersonaStack Connector
-          WINDOWS_CODE_SIGN_URL: https://personastack.ai
           COSIGN_EXPERIMENTAL: "1"
       - name: Release package smoke
         run: ./scripts/smoke-release-artifacts.sh dist "${GITHUB_REF_NAME#v}"
@@ -163,13 +135,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload package-manager metadata
-        run: gh release upload "$GITHUB_REF_NAME" dist/package-manager/homebrew/personastack-connector.rb dist/package-manager/winget/PersonaStack.Connector/${GITHUB_REF_NAME#v}/*.yaml --clobber
+        run: gh release upload "$GITHUB_REF_NAME" dist/package-manager/homebrew/personastack-connector.rb --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish GitHub Release
         run: gh release edit "$GITHUB_REF_NAME" --draft=false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish Homebrew tap formula
+        run: |
+          test -n "$HOMEBREW_TAP_TOKEN"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/personastack/homebrew-tap.git" /tmp/personastack-homebrew-tap
+          mkdir -p /tmp/personastack-homebrew-tap/Formula
+          cp dist/package-manager/homebrew/personastack-connector.rb /tmp/personastack-homebrew-tap/Formula/personastack-connector.rb
+          cd /tmp/personastack-homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Formula/personastack-connector.rb; then
+            echo "Homebrew tap formula already current."
+            exit 0
+          fi
+          git add Formula/personastack-connector.rb
+          git commit -m "feat: update connector formula ${GITHUB_REF_NAME}"
+          git push origin HEAD:main
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       - name: Publish API release metadata
         run: ./scripts/publish-release-metadata-to-api.sh dist "${GITHUB_REF_NAME#v}"
         env:

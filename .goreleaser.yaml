@@ -11,25 +11,15 @@ builds:
     goos:
       - darwin
       - linux
-      - windows
     goarch:
       - amd64
       - arm64
-    ignore:
-      # Windows/arm64 remains excluded until signing, installer behavior,
-      # credential storage, and runtime probes are proven.
-      - goos: windows
-        goarch: arm64
     ldflags:
       - -s -w
       - -X github.com/personastack/personastack-connector/internal/buildinfo.Version={{ .Version }}
       - -X github.com/personastack/personastack-connector/internal/buildinfo.GitCommit={{ .Commit }}
       - -X github.com/personastack/personastack-connector/internal/buildinfo.BuildDate={{ .Date }}
       - -X github.com/personastack/personastack-connector/internal/buildinfo.ReleaseChannel=stable
-    hooks:
-      post:
-        - cmd: ./scripts/sign-windows-binary.sh "{{ .Path }}"
-          output: true
 
 notarize:
   macos:
@@ -53,10 +43,6 @@ archives:
       personastack-connector_{{ .Version }}_
       {{- .Os }}_
       {{- .Arch }}
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
 
 nfpms:
   - id: linux-packages
@@ -67,7 +53,7 @@ nfpms:
     homepage: https://personastack.ai
     maintainer: PersonaStack <security@personastack.ai>
     description: User-installed Connector for PersonaStack external personas.
-    license: Proprietary
+    license: Source-Available
     formats:
       - deb
       - rpm
@@ -75,6 +61,12 @@ nfpms:
     contents:
       - src: README.md
         dst: /usr/share/doc/personastack-connector/README.md
+      - src: LICENSE
+        dst: /usr/share/doc/personastack-connector/LICENSE
+      - src: SECURITY.md
+        dst: /usr/share/doc/personastack-connector/SECURITY.md
+      - src: DEVELOPMENT.md
+        dst: /usr/share/doc/personastack-connector/DEVELOPMENT.md
       - src: SPEC.md
         dst: /usr/share/doc/personastack-connector/SPEC.md
 

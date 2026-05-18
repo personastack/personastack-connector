@@ -85,11 +85,11 @@ func (adapter OpenClawAdapter) Detect() Detection {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeMissing, Note: err.Error()}
 	}
 	defer conn.Close()
-	if err := conn.WriteJSON(openClawRequest{ID: "detect-1", Method: "health"}); err != nil {
+	if err := conn.WriteJSON(openClawRequest{Type: "req", ID: "detect-1", Method: "health"}); err != nil {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: err.Error()}
 	}
 	var health openClawResponse
-	if err := conn.ReadJSON(&health); err != nil {
+	if err := readOpenClawResponse(conn, "detect-1", &health); err != nil {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateRuntimeStopped, Note: err.Error()}
 	}
 	if errText := health.errorString(); errText != "" {
@@ -113,11 +113,11 @@ func (adapter OpenClawAdapter) Detect() Detection {
 }
 
 func (adapter OpenClawAdapter) probeOpenClawMethod(conn *websocket.Conn, requestID string, method string) (json.RawMessage, Detection, bool) {
-	if err := conn.WriteJSON(openClawRequest{ID: requestID, Method: method}); err != nil {
+	if err := conn.WriteJSON(openClawRequest{Type: "req", ID: requestID, Method: method}); err != nil {
 		return nil, Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}, true
 	}
 	var response openClawResponse
-	if err := conn.ReadJSON(&response); err != nil {
+	if err := readOpenClawResponse(conn, requestID, &response); err != nil {
 		return nil, Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}, true
 	}
 	if errText := response.errorString(); errText != "" {
@@ -171,6 +171,7 @@ func (adapter OpenClawAdapter) VerifyMCPCatalog(ctx context.Context, serverName 
 		params["agentId"] = trimmed
 	}
 	if err := conn.WriteJSON(openClawRequest{
+		Type:   "req",
 		ID:     "verify-mcp-catalog-1",
 		Method: "tools.catalog",
 		Params: params,
@@ -178,7 +179,7 @@ func (adapter OpenClawAdapter) VerifyMCPCatalog(ctx context.Context, serverName 
 		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog request failed: " + err.Error()}
 	}
 	var response openClawResponse
-	if err := conn.ReadJSON(&response); err != nil {
+	if err := readOpenClawResponse(conn, "verify-mcp-catalog-1", &response); err != nil {
 		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog response failed: " + err.Error()}
 	}
 	if errText := response.errorString(); errText != "" {
@@ -234,6 +235,7 @@ func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 		params["agentId"] = adapter.AgentID
 	}
 	request := openClawRequest{
+		Type:   "req",
 		ID:     assignmentID,
 		Method: "agent",
 		Params: params,
@@ -242,7 +244,7 @@ func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 		return "", fmt.Errorf("OpenClaw agent dispatch: %w", err)
 	}
 	var response openClawResponse
-	if err := conn.ReadJSON(&response); err != nil {
+	if err := readOpenClawResponse(conn, assignmentID, &response); err != nil {
 		return "", fmt.Errorf("OpenClaw agent ack: %w", err)
 	}
 	if errText := response.errorString(); errText != "" {
@@ -274,6 +276,7 @@ func (adapter OpenClawAdapter) CancelRun(nativeRunID string) error {
 	}
 	defer conn.Close()
 	request := openClawRequest{
+		Type:   "req",
 		ID:     "cancel-" + strings.TrimSpace(nativeRunID),
 		Method: "sessions.abort",
 		Params: map[string]string{
@@ -284,7 +287,7 @@ func (adapter OpenClawAdapter) CancelRun(nativeRunID string) error {
 		return fmt.Errorf("OpenClaw cancel: %w", err)
 	}
 	var response openClawResponse
-	if err := conn.ReadJSON(&response); err != nil {
+	if err := readOpenClawResponse(conn, request.ID, &response); err != nil {
 		return fmt.Errorf("OpenClaw cancel response: %w", err)
 	}
 	if errText := response.errorString(); errText != "" {
@@ -460,10 +463,10 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 			"minProtocol": minOpenClawProtocolVersion,
 			"maxProtocol": maxOpenClawProtocolVersion,
 			"client": map[string]string{
-				"id":       "personastack-connector",
+				"id":       "gateway-client",
 				"version":  "dev",
 				"platform": runtime.GOOS,
-				"mode":     "operator",
+				"mode":     "backend",
 			},
 			"role":   "operator",
 			"scopes": []string{"operator.read", "operator.write"},
@@ -564,6 +567,22 @@ func (response openClawResponse) isEvent(event string) bool {
 	return response.Type == "event" && response.Event == event || response.Type == event || response.Method == event
 }
 
+func readOpenClawResponse(conn *websocket.Conn, requestID string, response *openClawResponse) error {
+	for {
+		var next openClawResponse
+		if err := conn.ReadJSON(&next); err != nil {
+			return err
+		}
+		if next.Type == "event" && next.ID == "" {
+			continue
+		}
+		if requestID == "" || next.ID == requestID {
+			*response = next
+			return nil
+		}
+	}
+}
+
 func (response openClawResponse) isResponseOK() bool {
 	if response.OK != nil && !*response.OK {
 		return false
@@ -648,7 +667,9 @@ func openClawHelloFromResult(raw json.RawMessage) (openClawHello, error) {
 			Methods any `json:"methods"`
 		} `json:"features"`
 		Auth struct {
-			DeviceToken string `json:"deviceToken"`
+			DeviceToken string   `json:"deviceToken"`
+			Role        string   `json:"role"`
+			Scopes      []string `json:"scopes"`
 		} `json:"auth"`
 		Role   string   `json:"role"`
 		Scopes []string `json:"scopes"`
@@ -664,8 +685,11 @@ func openClawHelloFromResult(raw json.RawMessage) (openClawHello, error) {
 		return hello, err
 	}
 	hello.Protocol = envelope.Protocol
-	hello.Role = strings.TrimSpace(envelope.Role)
+	hello.Role = strings.TrimSpace(firstNonEmpty(envelope.Role, envelope.Auth.Role))
 	hello.Scopes = envelope.Scopes
+	if len(hello.Scopes) == 0 {
+		hello.Scopes = envelope.Auth.Scopes
+	}
 	hello.Features = features
 	hello.Auth.DeviceToken = strings.TrimSpace(envelope.Auth.DeviceToken)
 	return hello, nil

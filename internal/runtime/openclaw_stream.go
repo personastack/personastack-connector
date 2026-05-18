@@ -116,6 +116,7 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 		}
 		setOpenClawDeadline(conn, ctx, 35*time.Second)
 		request := openClawRequest{
+			Type:   "req",
 			ID:     "wait-" + strings.TrimSpace(nativeRunID),
 			Method: "agent.wait",
 			Params: map[string]any{

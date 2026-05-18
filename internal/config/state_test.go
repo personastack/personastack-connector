@@ -244,7 +244,7 @@ func TestFileStoreDeleteBindingDeletesSecrets(t *testing.T) {
 	}
 }
 
-func TestFileStoreKeepsSecretsDistinctPerBinding(t *testing.T) {
+func TestFileStoreReplacesExistingBindingAndDeletesOldSecrets(t *testing.T) {
 	secrets := map[string]string{}
 	originalGet := keyringGet
 	originalSet := keyringSet
@@ -294,18 +294,88 @@ func TestFileStoreKeepsSecretsDistinctPerBinding(t *testing.T) {
 	if err := store.SaveBinding(second); err != nil {
 		t.Fatalf("save second: %v", err)
 	}
-	loadedFirst, ok := store.Binding("conn-1")
-	if !ok {
-		t.Fatalf("expected first binding")
+	if _, ok := store.Binding("conn-1"); ok {
+		t.Fatalf("expected first binding to be replaced")
 	}
 	loadedSecond, ok := store.Binding("conn-2")
 	if !ok {
 		t.Fatalf("expected second binding")
 	}
-	if loadedFirst.PersonaMCPToken != "mcp-token-1" || loadedFirst.ActiveRunMCPToken != "run-token-1" {
-		t.Fatalf("first binding secrets wrong: %+v", loadedFirst)
-	}
 	if loadedSecond.PersonaMCPToken != "mcp-token-2" || loadedSecond.ActiveRunMCPToken != "run-token-2" {
 		t.Fatalf("second binding secrets wrong: %+v", loadedSecond)
+	}
+	if _, ok := secrets[keyringService+":conn-1:persona-mcp-token"]; ok {
+		t.Fatalf("expected first persona MCP token deleted")
+	}
+	if _, ok := secrets[keyringService+":conn-1:active-run-mcp-token"]; ok {
+		t.Fatalf("expected first active run MCP token deleted")
+	}
+	bindings := store.ListBindings()
+	if len(bindings) != 1 || bindings[0].ConnectionID != "conn-2" {
+		t.Fatalf("expected one active binding, got %+v", bindings)
+	}
+}
+
+func TestFileStorePreservesOldBindingSecretsWhenReplacementWriteFails(t *testing.T) {
+	secrets := map[string]string{}
+	originalGet := keyringGet
+	originalSet := keyringSet
+	originalDelete := keyringDelete
+	keyringGet = func(service string, user string) (string, error) {
+		value, ok := secrets[service+":"+user]
+		if !ok {
+			return "", os.ErrNotExist
+		}
+		return value, nil
+	}
+	keyringSet = func(service string, user string, password string) error {
+		secrets[service+":"+user] = password
+		return nil
+	}
+	keyringDelete = func(service string, user string) error {
+		delete(secrets, service+":"+user)
+		return nil
+	}
+	t.Cleanup(func() {
+		keyringGet = originalGet
+		keyringSet = originalSet
+		keyringDelete = originalDelete
+	})
+
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewFileStore(path)
+	first := Binding{
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		PersonaMCPToken:    "mcp-token-1",
+		HasPersonaMCPToken: true,
+	}
+	second := Binding{
+		ConnectionID:       "conn-2",
+		PersonaID:          "persona-2",
+		PersonaMCPToken:    "mcp-token-2",
+		HasPersonaMCPToken: true,
+	}
+	if err := store.SaveBinding(first); err != nil {
+		t.Fatalf("save first: %v", err)
+	}
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatalf("chmod state file: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(path, 0o600)
+	})
+	if err := store.SaveBinding(second); err == nil {
+		t.Fatalf("expected replacement write failure")
+	}
+	if secrets[keyringService+":conn-1:persona-mcp-token"] != "mcp-token-1" {
+		t.Fatalf("expected first binding secret preserved: %+v", secrets)
+	}
+	if _, ok := secrets[keyringService+":conn-2:persona-mcp-token"]; ok {
+		t.Fatalf("expected failed replacement secret deleted: %+v", secrets)
+	}
+	loaded, ok := store.Binding("conn-1")
+	if !ok || loaded.PersonaMCPToken != "mcp-token-1" {
+		t.Fatalf("expected first binding to remain readable, got ok=%t binding=%+v", ok, loaded)
 	}
 }

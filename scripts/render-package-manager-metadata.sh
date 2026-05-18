@@ -31,72 +31,52 @@ require_checksum() {
 
 darwin_arm="personastack-connector_${version}_darwin_arm64.tar.gz"
 darwin_amd="personastack-connector_${version}_darwin_amd64.tar.gz"
-windows_amd="personastack-connector_${version}_windows_amd64.zip"
+linux_arm="personastack-connector_${version}_linux_arm64.tar.gz"
+linux_amd="personastack-connector_${version}_linux_amd64.tar.gz"
 
 darwin_arm_sha="$(require_checksum "${darwin_arm}")"
 darwin_amd_sha="$(require_checksum "${darwin_amd}")"
-windows_amd_sha="$(require_checksum "${windows_amd}")"
+linux_arm_sha="$(require_checksum "${linux_arm}")"
+linux_amd_sha="$(require_checksum "${linux_amd}")"
 
 homebrew_dir="${dist_dir}/package-manager/homebrew"
-winget_dir="${dist_dir}/package-manager/winget/PersonaStack.Connector/${version}"
-mkdir -p "${homebrew_dir}" "${winget_dir}"
+mkdir -p "${homebrew_dir}"
 
 cat >"${homebrew_dir}/personastack-connector.rb" <<EOF
-cask "personastack-connector" do
-  version "${version}"
-
-  on_arm do
-    sha256 "${darwin_arm_sha}"
-    url "${base_url}/${darwin_arm}"
-  end
-
-  on_intel do
-    sha256 "${darwin_amd_sha}"
-    url "${base_url}/${darwin_amd}"
-  end
-
-  name "PersonaStack Connector"
+class PersonastackConnector < Formula
   desc "Local Connector for PersonaStack external personas"
   homepage "https://personastack.ai"
+  version "${version}"
+  license :cannot_represent
 
-  binary "personastack-connector"
+  on_macos do
+    if Hardware::CPU.arm?
+      url "${base_url}/${darwin_arm}"
+      sha256 "${darwin_arm_sha}"
+    else
+      url "${base_url}/${darwin_amd}"
+      sha256 "${darwin_amd_sha}"
+    end
+  end
+
+  on_linux do
+    if Hardware::CPU.arm?
+      url "${base_url}/${linux_arm}"
+      sha256 "${linux_arm_sha}"
+    else
+      url "${base_url}/${linux_amd}"
+      sha256 "${linux_amd_sha}"
+    end
+  end
+
+  def install
+    bin.install "personastack-connector"
+  end
+
+  test do
+    assert_match "personastack-connector version=", shell_output("#{bin}/personastack-connector version")
+  end
 end
-EOF
-
-cat >"${winget_dir}/PersonaStack.Connector.yaml" <<EOF
-PackageIdentifier: PersonaStack.Connector
-PackageVersion: ${version}
-DefaultLocale: en-US
-ManifestType: version
-ManifestVersion: 1.9.0
-EOF
-
-cat >"${winget_dir}/PersonaStack.Connector.locale.en-US.yaml" <<EOF
-PackageIdentifier: PersonaStack.Connector
-PackageVersion: ${version}
-PackageLocale: en-US
-Publisher: PersonaStack
-PackageName: PersonaStack Connector
-License: Proprietary
-ShortDescription: Local Connector for PersonaStack external personas
-ManifestType: defaultLocale
-ManifestVersion: 1.9.0
-EOF
-
-cat >"${winget_dir}/PersonaStack.Connector.installer.yaml" <<EOF
-PackageIdentifier: PersonaStack.Connector
-PackageVersion: ${version}
-InstallerType: zip
-NestedInstallerType: portable
-NestedInstallerFiles:
-  - RelativeFilePath: personastack-connector.exe
-    PortableCommandAlias: personastack-connector
-Installers:
-  - Architecture: x64
-    InstallerUrl: ${base_url}/${windows_amd}
-    InstallerSha256: ${windows_amd_sha}
-ManifestType: installer
-ManifestVersion: 1.9.0
 EOF
 
 echo "wrote package-manager metadata under ${dist_dir}/package-manager"

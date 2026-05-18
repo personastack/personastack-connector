@@ -14,7 +14,7 @@ fi
 repo="${GITHUB_REPOSITORY:-personastack/personastack-connector}"
 
 rulesets_json="$(gh api "repos/${repo}/rulesets" 2>/dev/null || true)"
-if [[ -z "${rulesets_json}" ]]; then
+if [[ -z "${rulesets_json}" || "$(jq -r 'type' <<<"${rulesets_json}")" != "array" ]]; then
   if [[ "${GITHUB_ACTIONS:-}" != "true" || "${GITHUB_REF_TYPE:-}" != "tag" || "${GITHUB_REF_NAME:-}" != v* ]]; then
     echo "release tag rulesets unavailable" >&2
     exit 1
@@ -47,7 +47,7 @@ else
 fi
 
 environment_json="$(gh api "repos/${repo}/environments/release" 2>/dev/null || true)"
-if [[ -z "${environment_json}" ]]; then
+if [[ -z "${environment_json}" || "$(jq -r 'type' <<<"${environment_json}")" != "object" || "$(jq -r 'has("protection_rules")' <<<"${environment_json}")" != "true" ]]; then
   if [[ "${GITHUB_ACTIONS:-}" != "true" || "${GITHUB_REF_TYPE:-}" != "tag" || "${GITHUB_REF_NAME:-}" != v* ]]; then
     echo "release environment unavailable" >&2
     exit 1

@@ -13,12 +13,10 @@ func TestBuildManifestScansReleaseAssets(t *testing.T) {
 		"personastack-connector_0.2.0_darwin_arm64.tar.gz": "artifact",
 		"personastack-connector_0.2.0_linux_amd64.deb":     "artifact",
 		"personastack-connector_0.2.0_linux_amd64.rpm":     "artifact",
-		"personastack-connector_0.2.0_windows_amd64.zip":   "artifact",
 		"personastack-connector_0.2.0_sbom.spdx.json":      "{}",
 		"personastack-connector_0.2.0_checksums.txt": "aaa111  personastack-connector_0.2.0_darwin_arm64.tar.gz\n" +
 			"bbb222  personastack-connector_0.2.0_linux_amd64.deb\n" +
 			"ccc333  personastack-connector_0.2.0_linux_amd64.rpm\n" +
-			"ddd444  personastack-connector_0.2.0_windows_amd64.zip\n" +
 			"eee555  personastack-connector_0.2.0_sbom.spdx.json\n",
 		"personastack-connector_0.2.0_checksums.txt.sigstore.json": "signature",
 	}
@@ -38,7 +36,7 @@ func TestBuildManifestScansReleaseAssets(t *testing.T) {
 	if manifest.MinimumProtocol != "external-agent-v1" {
 		t.Fatalf("minimum protocol = %q", manifest.MinimumProtocol)
 	}
-	if len(manifest.Assets) != 6 {
+	if len(manifest.Assets) != 5 {
 		t.Fatalf("assets len = %d", len(manifest.Assets))
 	}
 	var checksumAsset releaseAsset
@@ -80,7 +78,9 @@ func TestBuildManifestMarksMacOSArchivesDefaultEligibleWhenSigningConfigured(t *
 	distDir := t.TempDir()
 	files := map[string]string{
 		"personastack-connector_0.2.0_darwin_arm64.tar.gz": "artifact",
-		"personastack-connector_0.2.0_checksums.txt":       "aaa111  personastack-connector_0.2.0_darwin_arm64.tar.gz\n",
+		"personastack-connector_0.2.0_linux_amd64.tar.gz":  "artifact",
+		"personastack-connector_0.2.0_checksums.txt": "aaa111  personastack-connector_0.2.0_darwin_arm64.tar.gz\n" +
+			"bbb222  personastack-connector_0.2.0_linux_amd64.tar.gz\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(distDir, name), []byte(body), 0o644); err != nil {
@@ -92,17 +92,23 @@ func TestBuildManifestMarksMacOSArchivesDefaultEligibleWhenSigningConfigured(t *
 	if err != nil {
 		t.Fatalf("build manifest: %v", err)
 	}
-	if len(manifest.Assets) != 2 {
-		t.Fatalf("assets len = %d, want 2", len(manifest.Assets))
+	if len(manifest.Assets) != 3 {
+		t.Fatalf("assets len = %d, want 3", len(manifest.Assets))
 	}
-	var archive releaseAsset
+	var darwinArchive releaseAsset
+	var linuxArchive releaseAsset
 	for _, asset := range manifest.Assets {
-		if asset.PackageKind == "archive" {
-			archive = asset
-			break
+		if asset.Name == "personastack-connector_0.2.0_darwin_arm64.tar.gz" {
+			darwinArchive = asset
+		}
+		if asset.Name == "personastack-connector_0.2.0_linux_amd64.tar.gz" {
+			linuxArchive = asset
 		}
 	}
-	if archive.Name != "personastack-connector_0.2.0_darwin_arm64.tar.gz" || !archive.DefaultInstallEligible {
-		t.Fatalf("expected macOS archive default-install eligibility when signing inputs are present: %+v", archive)
+	if darwinArchive.Name != "personastack-connector_0.2.0_darwin_arm64.tar.gz" || !darwinArchive.DefaultInstallEligible {
+		t.Fatalf("expected macOS archive default-install eligibility when signing inputs are present: %+v", darwinArchive)
+	}
+	if linuxArchive.Name != "personastack-connector_0.2.0_linux_amd64.tar.gz" || linuxArchive.DefaultInstallEligible {
+		t.Fatalf("linux archive must not be default-install eligible: %+v", linuxArchive)
 	}
 }

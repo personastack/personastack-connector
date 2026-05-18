@@ -230,7 +230,7 @@ func (adapter PlaceholderAdapter) Detect() Detection {
 	return Detection{
 		Kind:  adapter.kind,
 		State: AdapterStateRuntimeMissing,
-		Note:  "runtime networking is not implemented in this scaffold",
+		Note:  "runtime adapter is unsupported",
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
+	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
 

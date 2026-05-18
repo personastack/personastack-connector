@@ -79,6 +79,34 @@ func TestRunServicePlan(t *testing.T) {
 	}
 }
 
+func TestRunUnpairDeletesBindings(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	store := config.NewMemoryStore(config.State{
+		Bindings: []config.Binding{
+			{ConnectionID: "conn-1", PersonaID: "persona-1"},
+			{ConnectionID: "conn-2", PersonaID: "persona-2"},
+		},
+	})
+	cmd := command{
+		stdout: &stdout,
+		stderr: &stderr,
+		store:  &store,
+	}
+
+	if err := cmd.runUnpair(nil); err != nil {
+		t.Fatalf("runUnpair() error = %v", err)
+	}
+	if len(store.ListBindings()) != 0 {
+		t.Fatalf("bindings were not deleted: %+v", store.ListBindings())
+	}
+	for _, want := range []string{"unpaired connection=conn-1 persona=persona-1", "unpaired connection=conn-2 persona=persona-2"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("unpair output missing %q: %s", want, stdout.String())
+		}
+	}
+}
+
 func TestRunStatusIncludesActiveAssignmentState(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -219,6 +247,14 @@ func TestRunPairReportsSuccessState(t *testing.T) {
 	}
 	output := stdout.String()
 	for _, want := range []string{
+		"Connector paired successfully.",
+		"Persona: persona-1",
+		"Connection: connection-1",
+		"Runtime: hermes",
+		"Local link: active",
+		"MCP: configured",
+		"Status: waiting for bridge wake probe",
+		"Details:",
 		"installed mcp binding=connection-1 runtime=hermes",
 		"service installed kind=launchagent path=/tmp/personastack-connector.plist",
 		"paired persona=persona-1 connection=connection-1 runtime=hermes configure_mcp=true setup_state=pending_bridge_wake_probe",
@@ -274,12 +310,67 @@ func TestRunPairReportsDegradedState(t *testing.T) {
 	}
 	output := stdout.String()
 	for _, want := range []string{
+		"Connector paired successfully.",
+		"Local link: active",
+		"Status: waiting for bridge wake probe",
+		"Details:",
 		"service installed kind=no_user_service_manager path=/tmp/personastack-connector.desktop",
 		"paired persona=persona-2 connection=connection-2 runtime=hermes configure_mcp=true setup_state=pending_bridge_wake_probe",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("pair output missing %q: %s", want, output)
 		}
+	}
+}
+
+func TestRunPairReplacesPreviousLocalBinding(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+	oldInstallService := installService
+	installService = func() (service.InstallResult, error) {
+		return service.InstallResult{Kind: "launchagent", Path: "/tmp/personastack-connector.plist"}, nil
+	}
+	t.Cleanup(func() {
+		installService = oldInstallService
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"persona_id":                "persona-2",
+			"connection_id":             "connection-2",
+			"credential_id":             "cred-2",
+			"runtime_kind":              "hermes",
+			"connection_generation":     1,
+			"gateway_websocket_url":     "ws://example/v1/external-agent/ws",
+			"native_mcp_server_name":    "personastack-connection-2",
+			"native_mcp_tool_namespace": "personastack",
+			"persona_mcp_url":           "https://mcp.example/mcp",
+			"persona_mcp_token":         "mcp-token-2",
+		})
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID: "connection-1",
+		PersonaID:    "persona-1",
+		RuntimeKind:  runtime.AdapterKindHermes,
+	}}})
+	cmd := command{
+		stdout: &stdout,
+		stderr: io.Discard,
+		store:  &store,
+	}
+	if err := cmd.runPair([]string{"PAIR-2345", "--gateway", server.URL, "--runtime", "hermes"}); err != nil {
+		t.Fatalf("runPair() error = %v", err)
+	}
+	bindings := store.ListBindings()
+	if len(bindings) != 1 || bindings[0].ConnectionID != "connection-2" {
+		t.Fatalf("expected new binding only, got %+v", bindings)
+	}
+	if !strings.Contains(stdout.String(), "Local link: replaced 1 previous binding") {
+		t.Fatalf("expected replacement output, got %s", stdout.String())
 	}
 }
 

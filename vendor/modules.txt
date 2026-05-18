@@ -13,9 +13,6 @@ github.com/gorilla/websocket
 # github.com/integrii/flaggy v1.8.0
 ## explicit; go 1.25
 github.com/integrii/flaggy
-# github.com/personastack/agent-gateway v0.0.0 => ../agent-gateway
-## explicit; go 1.25.1
-github.com/personastack/agent-gateway/pkg/externalagentprotocol
 # github.com/zalando/go-keyring v0.2.8
 ## explicit; go 1.18
 github.com/zalando/go-keyring
@@ -28,4 +25,3 @@ golang.org/x/sys/windows
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
-# github.com/personastack/agent-gateway => ../agent-gateway

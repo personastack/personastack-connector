@@ -12,10 +12,10 @@ import (
 	"sync"
 
 	"github.com/integrii/flaggy"
-	"github.com/personastack/agent-gateway/pkg/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/buildinfo"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/daemon"
+	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/hermessetup"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/pairing"
@@ -224,6 +224,7 @@ func (cmd command) runPair(args []string) error {
 	if err := applyOpenClawPairOptions(&binding, pairOptions); err != nil {
 		return err
 	}
+	replaced := replacedBindingCount(cmd.store.ListBindings(), binding.ConnectionID)
 	if err := writable.SaveBinding(binding); err != nil {
 		return err
 	}
@@ -231,11 +232,38 @@ func (cmd command) runPair(args []string) error {
 	if err != nil {
 		return err
 	}
+	fmt.Fprintln(cmd.stdout, "Connector paired successfully.")
+	fmt.Fprintf(cmd.stdout, "Persona: %s\n", binding.PersonaID)
+	fmt.Fprintf(cmd.stdout, "Connection: %s\n", binding.ConnectionID)
+	fmt.Fprintf(cmd.stdout, "Runtime: %s\n", binding.RuntimeKind)
+	if replaced > 0 {
+		fmt.Fprintf(cmd.stdout, "Local link: replaced %d previous binding\n", replaced)
+	} else {
+		fmt.Fprintln(cmd.stdout, "Local link: active")
+	}
+	if configureMCP {
+		fmt.Fprintln(cmd.stdout, "MCP: configured")
+	} else {
+		fmt.Fprintln(cmd.stdout, "MCP: skipped")
+	}
+	fmt.Fprintln(cmd.stdout, "Status: waiting for bridge wake probe")
+	fmt.Fprintln(cmd.stdout)
+	fmt.Fprintln(cmd.stdout, "Details:")
 	for _, repairResult := range repairResults {
 		fmt.Fprintln(cmd.stdout, repairResult)
 	}
 	fmt.Fprintf(cmd.stdout, "paired persona=%s connection=%s runtime=%s configure_mcp=%t setup_state=pending_bridge_wake_probe\n", binding.PersonaID, binding.ConnectionID, binding.RuntimeKind, configureMCP)
 	return nil
+}
+
+func replacedBindingCount(bindings []config.Binding, connectionID config.ConnectionID) int {
+	count := 0
+	for _, binding := range bindings {
+		if binding.ConnectionID != connectionID {
+			count++
+		}
+	}
+	return count
 }
 
 type runtimeDetectionReport struct {
@@ -729,7 +757,7 @@ func (cmd command) runDaemon(ctx context.Context, args []string) error {
 		return err
 	}
 	if !foreground {
-		return errors.New("run requires --foreground in this scaffold")
+		return errors.New("run requires --foreground")
 	}
 
 	if err := (daemon.Runner{Store: cmd.store}).RunForeground(ctx); err != nil {
@@ -743,7 +771,21 @@ func (cmd command) runUnpair(args []string) error {
 	if len(args) != 0 {
 		return errors.New("unpair accepts no arguments")
 	}
-	fmt.Fprintln(cmd.stdout, "unpair scaffold: no persisted bindings")
+	deleting, ok := cmd.store.(config.DeletingStore)
+	if !ok {
+		return errors.New("connector store does not support unpair")
+	}
+	bindings := cmd.store.ListBindings()
+	if len(bindings) == 0 {
+		fmt.Fprintln(cmd.stdout, "no bindings")
+		return nil
+	}
+	for _, binding := range bindings {
+		if err := deleting.DeleteBinding(binding.ConnectionID); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.stdout, "unpaired connection=%s persona=%s\n", binding.ConnectionID, binding.PersonaID)
+	}
 	return nil
 }
 

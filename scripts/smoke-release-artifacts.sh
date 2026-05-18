@@ -26,11 +26,10 @@ require_one() {
   printf '%s' "${matches[0]}"
 }
 
-require_one "$(asset_pattern darwin_amd64.tar.gz)" >/dev/null
-require_one "$(asset_pattern darwin_arm64.tar.gz)" >/dev/null
+darwin_amd64_archive="$(require_one "$(asset_pattern darwin_amd64.tar.gz)")"
+darwin_arm64_archive="$(require_one "$(asset_pattern darwin_arm64.tar.gz)")"
 linux_amd64_archive="$(require_one "$(asset_pattern linux_amd64.tar.gz)")"
 require_one "$(asset_pattern linux_arm64.tar.gz)" >/dev/null
-windows_amd64_archive="$(require_one "$(asset_pattern windows_amd64.zip)")"
 
 require_one "$(asset_pattern checksums.txt)" >/dev/null
 if [[ -n "$version" && "$version" != "auto" ]]; then
@@ -49,21 +48,24 @@ fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
-unzip -q "$windows_amd64_archive" -d "$tmp_dir/windows"
-windows_binary="$tmp_dir/windows/personastack-connector.exe"
-if [[ ! -s "$windows_binary" ]]; then
-  echo "windows binary missing from release archive: $windows_binary" >&2
-  exit 1
-fi
-if [[ -n "$version" && "$version" != "auto" && "${WINDOWS_CODE_SIGN_REQUIRED:-1}" == "1" ]]; then
-  if ! command -v osslsigncode >/dev/null 2>&1; then
-    echo "osslsigncode is required to verify Windows Authenticode signatures" >&2
+host_os="$(uname -s)"
+host_arch="$(uname -m)"
+case "${host_os}/${host_arch}" in
+  Darwin/arm64)
+    smoke_archive="$darwin_arm64_archive"
+    ;;
+  Darwin/x86_64)
+    smoke_archive="$darwin_amd64_archive"
+    ;;
+  Linux/x86_64)
+    smoke_archive="$linux_amd64_archive"
+    ;;
+  *)
+    echo "unsupported smoke host ${host_os}/${host_arch}" >&2
     exit 1
-  fi
-  osslsigncode verify -in "$windows_binary" >/tmp/personastack-connector-windows-signature.out 2>/tmp/personastack-connector-windows-signature.err
-  grep -q 'Signature verification: ok' /tmp/personastack-connector-windows-signature.out /tmp/personastack-connector-windows-signature.err
-fi
-tar -xzf "$linux_amd64_archive" -C "$tmp_dir"
+    ;;
+esac
+tar -xzf "$smoke_archive" -C "$tmp_dir"
 binary="$tmp_dir/personastack-connector"
 
 "$binary" version | grep -q 'personastack-connector version='

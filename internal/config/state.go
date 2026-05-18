@@ -119,13 +119,7 @@ func (store *MemoryStore) SaveBinding(binding Binding) error {
 	if store == nil {
 		return fmt.Errorf("memory store required")
 	}
-	for i, existing := range store.state.Bindings {
-		if existing.ConnectionID == binding.ConnectionID {
-			store.state.Bindings[i] = binding
-			return nil
-		}
-	}
-	store.state.Bindings = append(store.state.Bindings, binding)
+	store.state.Bindings = []Binding{binding}
 	return nil
 }
 
@@ -172,19 +166,37 @@ func (store FileStore) SaveBinding(binding Binding) error {
 		return err
 	}
 	state := store.load()
-	memory := NewMemoryStore(state)
-	if err := (&memory).SaveBinding(storedBinding); err != nil {
-		return err
+	replacedBindings := make([]Binding, 0, len(state.Bindings))
+	replacingExistingConnection := false
+	for _, existing := range state.Bindings {
+		if existing.ConnectionID != storedBinding.ConnectionID {
+			replacedBindings = append(replacedBindings, existing)
+			continue
+		}
+		replacingExistingConnection = true
 	}
+	state.Bindings = []Binding{storedBinding}
 	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
+		if !replacingExistingConnection {
+			deleteBindingSecrets(storedBinding)
+		}
 		return fmt.Errorf("create connector config dir: %w", err)
 	}
-	raw, err := json.MarshalIndent(memory.state, "", "  ")
+	raw, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
+		if !replacingExistingConnection {
+			deleteBindingSecrets(storedBinding)
+		}
 		return fmt.Errorf("encode connector state: %w", err)
 	}
 	if err := os.WriteFile(store.path, raw, 0o600); err != nil {
+		if !replacingExistingConnection {
+			deleteBindingSecrets(storedBinding)
+		}
 		return fmt.Errorf("write connector state: %w", err)
+	}
+	for _, replaced := range replacedBindings {
+		deleteBindingSecrets(replaced)
 	}
 	return nil
 }

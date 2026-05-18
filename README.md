@@ -2,13 +2,17 @@
 
 PersonaStack Connector is the local bridge for external personas.
 
-It runs on a user's macOS, Linux, or Windows machine, pairs with PersonaStack,
+This repository is public source for user audit. It is not open source: the
+license permits inspection, but does not grant reuse, modification,
+redistribution, hosting, or commercial rights without written permission.
+
+It runs on a user's macOS or Linux machine, pairs with PersonaStack,
 configures a supported local agent runtime, and keeps that runtime wakeable as a
 PersonaStack stack member.
 
 Hermes Termux installs are not Connector hosts. OpenClaw mobile nodes are also
 not Connector hosts because the Gateway still has to run on macOS, Linux,
-Windows, or Windows/WSL2.
+or the Linux Connector inside WSL2.
 
 Initial supported runtime targets:
 
@@ -40,9 +44,10 @@ Hermes fallback through responses or chat completions is degraded-only. OpenClaw
 CLI fallback is also degraded-only and does not imply full Gateway streaming or
 cancel support.
 
-## Build and Release
+## Build, Audit, and Release
 
 - Local validation: `go test ./...`
+- Public clone validation: `go list -mod=mod ./...`
 - Race-sensitive validation: `go test -race ./internal/bridge ./internal/daemon ./internal/mcp`
 - Security validation: `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`
 - Release config validation: `go run github.com/goreleaser/goreleaser/v2@latest check`
@@ -66,14 +71,14 @@ cancel support.
   default install metadata must stay gated off until that pipeline is enabled.
 - macOS release artifacts stay split by `darwin/amd64` and `darwin/arm64`;
   Connector setup still uses LaunchAgent registration after installation.
-- V1 signed distribution channels are GitHub Release archives for macOS,
-  Linux, and Windows plus Linux `.deb` and `.rpm` packages; tagged releases
-  also publish Homebrew cask and winget metadata generated from the signed
-  checksum file.
+- V1 signed distribution channels are GitHub Release archives for macOS and
+  Linux plus Linux `.deb` and `.rpm` packages; tagged releases also generate
+  and push a Homebrew formula to the public `personastack/homebrew-tap`
+  repository from the signed checksum file.
 - Release metadata only promotes installer defaults when the release signing
   gate is active; Linux package defaults stay off until that gate is enabled.
-- Default install guidance must verify the signed release manifest and
-  checksum bundle before recommending install commands.
+- Default install guidance must stay a simple one-line Homebrew, `.deb`, or
+  `.rpm` command. Advanced verification can use signed release metadata.
 - Release notes must enumerate supported OS/arch, known runtime caveats,
   upgrade notes, and a rollback command.
 - V1 binary distribution stays GitHub Releases only; mirrored binary hosts are

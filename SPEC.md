@@ -8,7 +8,7 @@ external persona.
 
 ## Responsibilities
 
-- Pair a local machine to one or more API-owned external persona bindings.
+- Pair a local machine to one API-owned external persona binding at a time.
 - Open authenticated outbound websocket sessions to `agent-gateway`.
 - Negotiate a bounded Connector websocket protocol version with `agent-gateway`
   and reject connect responses that advertise an unsupported version.
@@ -21,6 +21,7 @@ external persona.
 - Keep local daemon startup persistent across user login or system restart.
 - Keep the default connector setup CLI-first and headless.
 - Store local secrets in OS credential storage.
+- Keep the repository public source for user audit, not open source.
 
 ## Non-Goals
 
@@ -40,10 +41,14 @@ external persona.
 - `agent-gateway` owns pairing exchange ingress, websocket transport, routing,
   dispatch/cancel frames, protocol versioning, and Gateway-to-API callbacks.
 - `mcp` owns PersonaStack MCP authentication, authorization, and tool execution.
+- This repository owns its Connector protocol DTO package for public build
+  reproducibility. `agent-gateway` owns protocol behavior and compatibility.
 
 ## Local Object Model
 
-- A Connector installation may manage multiple external persona bindings.
+- A Connector installation manages one external persona binding at a time.
+  Pairing a new external persona replaces the previous local binding and local
+  binding secrets for that machine.
 - Each binding has one PersonaStack connection id, persona id, external agent
   kind, bridge credential, PersonaStack MCP credential, native MCP server name,
   local runtime selection, and local readiness state.
@@ -224,15 +229,15 @@ Adapter result states must be concrete typed enums, including:
 
 ## Packaging
 
-- V1 release targets are macOS, Linux, and native Windows.
+- V1 release targets are macOS and Linux.
 - Termux is unsupported as a Connector host even if Hermes can run there.
 - GitHub Actions must run unit tests and a GoReleaser snapshot dry-run on pull
   requests and `main` pushes. Snapshot artifacts are validation outputs only
   and must not be uploaded or documented as a distribution channel.
 - CI builds must be self-contained from the connector repository checkout;
-  private sibling protocol dependencies required by the local `replace` must be
-  vendored.
-- Tagged releases build GoReleaser archives for macOS/Linux/Windows plus Linux
+  clean public clones must pass `go list -mod=mod ./...` without sibling
+  repository checkouts.
+- Tagged releases build GoReleaser archives for macOS/Linux plus Linux
   `.deb` and `.rpm` packages, publish checksum/SBOM artifacts to a draft GitHub
   Release, upload a machine-readable release manifest plus manifest checksum,
   and emit GitHub provenance attestations for `dist/*`.
@@ -249,23 +254,26 @@ Adapter result states must be concrete typed enums, including:
   setup continues to register a LaunchAgent after installation instead of
   shipping an app bundle or DMG path.
 - Tagged releases also publish cosign-bundled signatures for the checksum file
-  and the release manifest, so install guidance can verify the manifest bundle
-  before it recommends any download command.
+  and the release manifest, so advanced guidance can verify release artifacts
+  without making verification part of the primary install command.
 - The release workflow must publish generated release-manifest metadata into
   the PersonaStack API admin connector-release endpoint by sending only the
   semver, commit, and minimum protocol. The API owns derivation of every
   recommended OS/arch/package asset URL and install command.
 - The binary must expose `personastack-connector version` so install flows and
   support diagnostics can verify the downloaded artifact.
-- V1 signed distribution channels are GitHub Release archives for macOS,
-  Linux, and Windows plus Linux `.deb` and `.rpm` packages. Tagged releases
-  also publish Homebrew cask and winget metadata generated from the signed
-  checksum file.
+- V1 signed distribution channels are GitHub Release archives for macOS and
+  Linux plus Linux `.deb` and `.rpm` packages. Tagged releases generate and
+  push a Homebrew formula to the public `personastack/homebrew-tap` repository
+  from the signed checksum file.
 - Connector release metadata must only mark installer defaults eligible when
   signed release metadata is active; Linux package defaults stay off until the
   release signing gate is enabled.
 - V1 binary distribution stays GitHub Releases only; mirrored binary hosts are
   a later decision, not part of the public install path.
+- Public source visibility is for audit only. Repository docs and package
+  metadata must not describe the Connector as open source unless the license
+  changes to an OSI-style open-source grant.
 - Signed auto-update launch scope stays deferred until a separate
   `personastack-ship` decision; package-manager/manual update prompts remain
   the default guidance.
@@ -275,12 +283,12 @@ Adapter result states must be concrete typed enums, including:
 - Linux service installation prefers `systemd --user` and falls back to an XDG
   autostart desktop entry when user systemd is unavailable.
 - OpenClaw mobile nodes are not Connector hosts; they require Gateway on
-  macOS, Linux, Windows, or Windows/WSL2.
+  macOS, Linux, or the Linux Connector inside WSL2.
 - iOS and Android are not Connector host targets in V1.
-- `windows/arm64` stays excluded until signing, installer, credential storage,
-  and runtime probes are proven.
-- Default setup must verify the signed release manifest and checksum bundle
-  before it recommends an install command.
+- Native Windows release artifacts are not supported in V1.
+- Default setup must render a simple one-line Homebrew, `.deb`, or `.rpm`
+  command. Advanced verification may use signed release metadata, but it must
+  not be part of the primary install command.
 - The release workflow must declare the protected `release` environment, and
   release policy checks must use GitHub CLI metadata to fail closed when active
   `v*` tag rulesets or required release reviewers are missing.

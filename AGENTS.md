@@ -1,7 +1,4 @@
-# AGENTS Instructions
-
-This repository inherits the shared PersonaStack workspace rules from
-`/Users/eg/git/personastack/AGENTS.md`.
+# Agent Instructions
 
 ## Scope
 
@@ -41,5 +38,4 @@ This repository inherits the shared PersonaStack workspace rules from
 - Add focused tests for Connector core, protocol handling, local MCP proxying,
   Hermes adapter behavior, OpenClaw adapter behavior, OS service planning, and
   config mutation rollback.
-- Use repository-local `just` targets once they exist.
 - Commit coherent slices with Conventional Commit subjects.
