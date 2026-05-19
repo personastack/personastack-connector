@@ -18,6 +18,7 @@ import (
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/hermessetup"
 	"github.com/personastack/personastack-connector/internal/mcp"
+	"github.com/personastack/personastack-connector/internal/openclawauth"
 	"github.com/personastack/personastack-connector/internal/pairing"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/service"
@@ -277,7 +278,7 @@ func collectRuntimeDetectionReport() runtimeDetectionReport {
 		readyKinds: make([]runtime.AdapterKind, 0, 2),
 	}
 	for _, kind := range []runtime.AdapterKind{runtime.AdapterKindHermes, runtime.AdapterKindOpenClaw} {
-		detection := runtime.NewAdapter(kind).Detect()
+		detection := adapterForRuntimeKind(kind).Detect()
 		report.detections = append(report.detections, detection)
 		if detection.State == runtime.AdapterStateReady {
 			report.readyKinds = append(report.readyKinds, kind)
@@ -327,19 +328,38 @@ func (cmd command) resolveOpenClawPairOptions(kind runtime.AdapterKind, options 
 	if kind != runtime.AdapterKindOpenClaw {
 		return options, nil
 	}
-	if openClawPairCredentialAvailable(options, config.Binding{}) {
+	resolved, err := openclawauth.Resolve(openclawauth.Options{
+		Binding: firstOpenClawBinding(cmd.store.ListBindings()),
+		Explicit: openclawauth.Explicit{
+			Token:       options.token,
+			Password:    options.password,
+			DeviceToken: options.deviceToken,
+		},
+	})
+	if err != nil {
+		return options, err
+	}
+	if resolved.Found() {
+		if err := validateResolvedOpenClawAuth(resolved.Auth, options.agentID); err != nil {
+			return options, err
+		}
+		options.token = resolved.Auth.Token
+		options.password = resolved.Auth.Password
+		options.deviceToken = resolved.Auth.DeviceToken
 		return options, nil
 	}
 	fmt.Fprint(cmd.stderr, "OpenClaw operator token: ")
+	fmt.Fprint(cmd.stderr, "Run `openclaw config get gateway.auth.token` and paste the token. If that is empty, run `openclaw devices list`, then `openclaw devices rotate --device <id> --role operator --scope operator.read --scope operator.write --json` and paste the returned token.\n")
+	fmt.Fprint(cmd.stderr, "Token: ")
 	credential, err := readLine(cmd.stdin)
 	if err != nil {
-		return options, errors.New("OpenClaw operator credential required; enter a token, rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN")
+		return options, errors.New(openClawCredentialRequiredMessage())
 	}
 	options.token = strings.TrimSpace(credential)
 	if openClawPairCredentialAvailable(options, config.Binding{}) {
 		return options, nil
 	}
-	return options, errors.New("OpenClaw operator credential required; enter a token, rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN")
+	return options, errors.New(openClawCredentialRequiredMessage())
 }
 
 func applyOpenClawPairOptions(binding *config.Binding, options openClawPairOptions) error {
@@ -351,7 +371,7 @@ func applyOpenClawPairOptions(binding *config.Binding, options openClawPairOptio
 	binding.OpenClawDeviceToken = firstNonEmpty(options.deviceToken, binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN"))
 	binding.OpenClawAgentID = firstNonEmpty(options.agentID, binding.OpenClawAgentID)
 	if !openClawPairCredentialAvailable(options, *binding) {
-		return errors.New("OpenClaw operator credential required; rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN")
+		return errors.New(openClawCredentialRequiredMessage())
 	}
 	return nil
 }
@@ -368,6 +388,31 @@ func openClawPairCredentialAvailable(options openClawPairOptions, binding config
 		os.Getenv("OPENCLAW_GATEWAY_PASSWORD"),
 		os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN"),
 	) != ""
+}
+
+func firstOpenClawBinding(bindings []config.Binding) config.Binding {
+	for _, binding := range bindings {
+		if binding.RuntimeKind == runtime.AdapterKindOpenClaw {
+			return binding
+		}
+	}
+	return config.Binding{}
+}
+
+func openClawCredentialRequiredMessage() string {
+	return "OpenClaw operator credential required; run `openclaw config get gateway.auth.token`, rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN"
+}
+
+func validateResolvedOpenClawAuth(auth runtime.OpenClawAuth, agentID string) error {
+	gatewayURL := os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL")
+	if !openclawauth.GatewayIsLoopback(gatewayURL) || !openclawauth.GatewayReachable(gatewayURL) {
+		return nil
+	}
+	detection := runtime.NewOpenClawAdapterWithAuth(gatewayURL, auth, agentID).Detect()
+	if detection.State == runtime.AdapterStateAuthMissing {
+		return fmt.Errorf("OpenClaw operator credential rejected by local Gateway: %s", detection.Note)
+	}
+	return nil
 }
 
 func readLine(reader io.Reader) (string, error) {
@@ -533,11 +578,23 @@ func (cmd command) runRuntimeOpenClaw(args []string) error {
 		return nil
 	}
 	for _, binding := range bindings {
-		detection := runtime.NewOpenClawAdapterWithAuth(gateway, runtime.OpenClawAuth{
-			Token:       firstNonEmpty(binding.OpenClawGatewayToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN")),
-			Password:    firstNonEmpty(binding.OpenClawPassword, os.Getenv("OPENCLAW_GATEWAY_PASSWORD")),
-			DeviceToken: firstNonEmpty(binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")),
-		}, binding.OpenClawAgentID).Detect()
+		resolved := openclawauth.Result{}
+		if openclawauth.GatewayIsLoopback(gateway) {
+			var err error
+			resolved, err = openclawauth.Resolve(openclawauth.Options{Binding: binding})
+			if err != nil {
+				return err
+			}
+		}
+		detection := runtime.NewOpenClawAdapterWithAuth(gateway, resolved.Auth, binding.OpenClawAgentID).Detect()
+		if resolved.Found() {
+			if writable, ok := cmd.store.(config.WritableStore); ok && openClawCredentialValidatedByDetection(detection) {
+				binding = openclawauth.ApplyToBinding(binding, resolved)
+				if err := writable.SaveBinding(binding); err != nil {
+					return err
+				}
+			}
+		}
 		fmt.Fprintf(cmd.stdout, "runtime openclaw configure binding=%s gateway=%s state=%s note=%q\n", binding.ConnectionID, strings.TrimSpace(gateway), detection.State, detection.Note)
 	}
 	if configureMCP {
@@ -568,11 +625,37 @@ func adapterForBinding(binding config.Binding) runtime.Adapter {
 	if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
 		return runtime.NewAdapter(binding.RuntimeKind)
 	}
-	return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{
-		Token:       firstNonEmpty(binding.OpenClawGatewayToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN")),
-		Password:    firstNonEmpty(binding.OpenClawPassword, os.Getenv("OPENCLAW_GATEWAY_PASSWORD")),
-		DeviceToken: firstNonEmpty(binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")),
-	}, binding.OpenClawAgentID)
+	if !openclawauth.GatewayIsLoopback(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL")) {
+		return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{}, binding.OpenClawAgentID)
+	}
+	resolved, err := openclawauth.Resolve(openclawauth.Options{Binding: binding})
+	if err != nil {
+		return runtime.NewErrorAdapter(runtime.AdapterKindOpenClaw, runtime.AdapterStateAuthMissing, err.Error())
+	}
+	return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, binding.OpenClawAgentID)
+}
+
+func adapterForRuntimeKind(kind runtime.AdapterKind) runtime.Adapter {
+	if kind != runtime.AdapterKindOpenClaw {
+		return runtime.NewAdapter(kind)
+	}
+	if !openclawauth.GatewayIsLoopback(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL")) {
+		return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{}, os.Getenv("OPENCLAW_AGENT_ID"))
+	}
+	resolved, err := openclawauth.Resolve(openclawauth.Options{})
+	if err != nil {
+		return runtime.NewErrorAdapter(runtime.AdapterKindOpenClaw, runtime.AdapterStateAuthMissing, err.Error())
+	}
+	return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, os.Getenv("OPENCLAW_AGENT_ID"))
+}
+
+func openClawCredentialValidatedByDetection(detection runtime.Detection) bool {
+	switch detection.State {
+	case runtime.AdapterStateReady, runtime.AdapterStateCapabilityMissing, runtime.AdapterStateRuntimeStopped:
+		return true
+	default:
+		return false
+	}
 }
 
 func filterBindingsByRuntime(bindings []config.Binding, kind runtime.AdapterKind) []config.Binding {

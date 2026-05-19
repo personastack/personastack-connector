@@ -13,8 +13,8 @@ external persona.
 - Negotiate a bounded Connector websocket protocol version with `agent-gateway`
   and reject connect responses that advertise an unsupported version.
 - Report runtime health, MCP configuration state, Connector version, local host
-  name, connection generation, native MCP server/tool naming metadata, and wake
-  probe results.
+  name, connection generation, native MCP server/tool naming metadata, prompt-safe
+  external runtime capability summaries, and wake probe results.
 - Receive API-composed run assignments from `agent-gateway`.
 - Dispatch fully composed prompts into the selected local runtime.
 - Stream or report local run events back through the Connector protocol.
@@ -105,12 +105,14 @@ external persona.
 Default setup must require only package installation plus the pairing command.
 Pairing configures PersonaStack MCP access by default; any future MCP opt-out or
 repair flag is advanced-only and must not be required by the primary setup
-command. OpenClaw pairing must collect or locate an approved operator credential
-locally through Connector CLI prompts, OS credential storage, local-only flags
-such as `--openclaw-token`, `--openclaw-password`, or `--openclaw-device-token`,
-or the matching `OPENCLAW_GATEWAY_*` environment variables before it reports
-local runtime setup as usable. Browser setup surfaces must not collect OpenClaw
-tokens, passwords, or device credentials.
+command. OpenClaw pairing must locate an approved operator credential locally
+before prompting the user. Discovery must prefer Connector credential storage,
+local-only flags such as `--openclaw-token`, `--openclaw-password`, or
+`--openclaw-device-token`, the matching `OPENCLAW_GATEWAY_*` environment
+variables, and OpenClaw-owned user config, env, device auth, or service env
+files. If no local credential is found, the CLI prompt must tell the user the
+easiest OpenClaw command to retrieve or rotate one. Browser setup surfaces must
+not collect OpenClaw tokens, passwords, or device credentials.
 
 The V1 Connector does not expose a local HTTP UI/control listener. CLI control
 is local process execution and native MCP uses stdio; any future local control
@@ -127,6 +129,7 @@ Adapters implement the same finite runtime operations:
 - `stream_or_poll_run`
 - `cancel_run`
 - `diagnose`
+- optional prompt-safe native capability discovery; transient discovery errors must leave native capabilities unreported rather than reporting an empty list
 
 Native MCP configuration and verification are Connector-level operations owned
 by `internal/mcp`, not runtime-adapter methods. The daemon combines adapter
@@ -202,6 +205,9 @@ Adapter result states must be concrete typed enums, including:
 - Map Hermes native run events to Connector protocol run events.
 - Treat cancellation as best-effort until Hermes returns terminal state or the
   Connector cancellation timeout expires.
+- Hermes capability discovery uses only `/v1/capabilities` and reports verified
+  runtime features such as delegated task acceptance, status, streaming, and
+  cancellation. It must not parse local Hermes config to infer native tools.
 
 ## OpenClaw Runtime
 
@@ -216,6 +222,9 @@ Adapter result states must be concrete typed enums, including:
   write success alone.
 - OpenClaw CLI fallback is degraded only and must not claim Gateway streaming or
   cancel parity unless the same native run id can be waited and cancelled.
+- OpenClaw capability discovery uses Gateway `tools.catalog` with plugins
+  included, filters out the PersonaStack injected MCP server, and reports one
+  prompt-safe capability summary per remaining tool group.
 
 ## Security
 

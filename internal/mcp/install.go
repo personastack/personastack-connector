@@ -17,6 +17,7 @@ import (
 
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/hermessetup"
+	"github.com/personastack/personastack-connector/internal/openclawauth"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/service"
 	"gopkg.in/yaml.v3"
@@ -250,11 +251,19 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 		return result
 	}
 	if binding.RuntimeKind == runtime.AdapterKindOpenClaw {
-		adapter := runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{
-			Token:       firstNonEmpty(binding.OpenClawGatewayToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN")),
-			Password:    firstNonEmpty(binding.OpenClawPassword, os.Getenv("OPENCLAW_GATEWAY_PASSWORD")),
-			DeviceToken: firstNonEmpty(binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")),
-		}, binding.OpenClawAgentID)
+		resolved := openclawauth.Result{}
+		if openclawauth.GatewayIsLoopback(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL")) {
+			var err error
+			resolved, err = openclawauth.Resolve(openclawauth.Options{
+				Binding: binding,
+				HomeDir: homeDir,
+			})
+			if err != nil {
+				result.Note = appendNote(result.Note, err.Error())
+				return result
+			}
+		}
+		adapter := runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, binding.OpenClawAgentID)
 		openClawLive := adapter.VerifyMCPCatalog(ctx, result.ServerName)
 		if openClawLive.OK {
 			result.Note = openClawLive.Note

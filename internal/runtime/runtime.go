@@ -100,6 +100,32 @@ type Adapter interface {
 	Diagnose() Detection
 }
 
+type NativeCapabilitySource string
+
+const (
+	NativeCapabilitySourceOpenClawToolsCatalog NativeCapabilitySource = "openclaw_tools_catalog"
+	NativeCapabilitySourceHermesRuntimeAPI     NativeCapabilitySource = "hermes_runtime_api"
+)
+
+type NativeCapabilityKind string
+
+const (
+	NativeCapabilityKindToolGroup      NativeCapabilityKind = "tool_group"
+	NativeCapabilityKindRuntimeFeature NativeCapabilityKind = "runtime_feature"
+)
+
+type NativeCapability struct {
+	Source       NativeCapabilitySource
+	Kind         NativeCapabilityKind
+	CapabilityID string
+	Label        string
+	Summary      string
+}
+
+type NativeCapabilityDescriber interface {
+	DescribeNativeCapabilities(ctx context.Context, nativeMCPServerName string) ([]NativeCapability, error)
+}
+
 type RunEventKind int
 
 const (
@@ -200,11 +226,7 @@ func NewAdapter(kind AdapterKind) Adapter {
 	case AdapterKindHermes:
 		return NewHermesAdapter(os.Getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), hermessetup.LoadAPIKey())
 	case AdapterKindOpenClaw:
-		return NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), OpenClawAuth{
-			Token:       os.Getenv("OPENCLAW_GATEWAY_TOKEN"),
-			Password:    os.Getenv("OPENCLAW_GATEWAY_PASSWORD"),
-			DeviceToken: os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN"),
-		}, os.Getenv("OPENCLAW_AGENT_ID"))
+		return NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), OpenClawAuth{}, os.Getenv("OPENCLAW_AGENT_ID"))
 	default:
 		return NewPlaceholderAdapter(kind)
 	}
@@ -247,5 +269,43 @@ func (adapter PlaceholderAdapter) CancelRun(nativeRunID string) error {
 }
 
 func (adapter PlaceholderAdapter) Diagnose() Detection {
+	return adapter.Detect()
+}
+
+type ErrorAdapter struct {
+	kind  AdapterKind
+	state AdapterState
+	note  string
+}
+
+func NewErrorAdapter(kind AdapterKind, state AdapterState, note string) ErrorAdapter {
+	return ErrorAdapter{kind: kind, state: state, note: strings.TrimSpace(note)}
+}
+
+func (adapter ErrorAdapter) Kind() AdapterKind {
+	return adapter.kind
+}
+
+func (adapter ErrorAdapter) Detect() Detection {
+	note := adapter.note
+	if note == "" {
+		note = "runtime adapter error"
+	}
+	return Detection{Kind: adapter.kind, State: adapter.state, Note: note}
+}
+
+func (adapter ErrorAdapter) StartRun(RunRequest) (string, error) {
+	return "", fmt.Errorf("%s run dispatch unavailable: %s", adapter.kind, adapter.Detect().Note)
+}
+
+func (adapter ErrorAdapter) StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error) {
+	return RunResult{}, fmt.Errorf("%s run wait unavailable: %s", adapter.kind, adapter.Detect().Note)
+}
+
+func (adapter ErrorAdapter) CancelRun(nativeRunID string) error {
+	return fmt.Errorf("%s run cancellation unavailable: %s", adapter.kind, adapter.Detect().Note)
+}
+
+func (adapter ErrorAdapter) Diagnose() Detection {
 	return adapter.Detect()
 }

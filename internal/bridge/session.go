@@ -130,6 +130,15 @@ func (s Session) WakeProbeAcceptedFrame(probeID string) externalagentprotocol.Fr
 	return frame
 }
 
+func (s Session) CapabilitiesFrame(capabilities []externalagentprotocol.CapabilityReport, nativeCapabilities []externalagentprotocol.NativeCapabilityReport) externalagentprotocol.Frame {
+	frame := s.baseFrame(externalagentprotocol.FrameTypeCapabilitiesReport, s.now())
+	frame.Capabilities = &externalagentprotocol.CapabilitiesPayload{
+		Capabilities:       capabilities,
+		NativeCapabilities: nativeCapabilities,
+	}
+	return frame
+}
+
 func (s Session) RunAcceptedFrame(request externalagentprotocol.Frame, nativeRunID string) externalagentprotocol.Frame {
 	frame := s.baseFrame(externalagentprotocol.FrameTypeRunAccepted, s.now())
 	frame.MessageID = strings.TrimSpace(request.MessageID)

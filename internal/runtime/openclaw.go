@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os/exec"
@@ -79,6 +80,9 @@ func (adapter OpenClawAdapter) Detect() Detection {
 	defer cancel()
 	conn, err := adapter.connectOperatorWithRetry(connectCtx)
 	if err != nil {
+		if openClawConnectErrorIsAuth(err) {
+			return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateAuthMissing, Note: "OpenClaw operator credential rejected"}
+		}
 		if openClawConnectErrorIsCapability(err) {
 			return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateCapabilityMissing, Note: err.Error()}
 		}
@@ -159,35 +163,9 @@ func (adapter OpenClawAdapter) VerifyMCPCatalog(ctx context.Context, serverName 
 	if expectedServerName == "" {
 		return OpenClawMCPVerificationResult{Note: "OpenClaw native MCP server name required"}
 	}
-	connectCtx, cancel := context.WithTimeout(ctx, openClawSetupRetryBudget)
-	defer cancel()
-	conn, err := adapter.connectOperatorWithRetry(connectCtx)
+	catalog, err := adapter.fetchOpenClawToolsCatalog(ctx, "verify-mcp-catalog-1")
 	if err != nil {
-		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog connect failed: " + err.Error()}
-	}
-	defer conn.Close()
-	params := map[string]any{"includePlugins": true}
-	if trimmed := strings.TrimSpace(adapter.AgentID); trimmed != "" {
-		params["agentId"] = trimmed
-	}
-	if err := conn.WriteJSON(openClawRequest{
-		Type:   "req",
-		ID:     "verify-mcp-catalog-1",
-		Method: "tools.catalog",
-		Params: params,
-	}); err != nil {
-		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog request failed: " + err.Error()}
-	}
-	var response openClawResponse
-	if err := readOpenClawResponse(conn, "verify-mcp-catalog-1", &response); err != nil {
-		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog response failed: " + err.Error()}
-	}
-	if errText := response.errorString(); errText != "" {
-		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog error: " + errText}
-	}
-	catalog, err := openClawToolsCatalogFromResult(response.payload())
-	if err != nil {
-		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog invalid: " + err.Error()}
+		return OpenClawMCPVerificationResult{Note: err.Error()}
 	}
 	if !catalog.hasNativeMCPServer(expectedServerName) {
 		return OpenClawMCPVerificationResult{Note: "OpenClaw tools.catalog missing configured MCP server " + expectedServerName}
@@ -196,6 +174,54 @@ func (adapter OpenClawAdapter) VerifyMCPCatalog(ctx context.Context, serverName 
 		OK:   true,
 		Note: "OpenClaw effective tool catalog visible for " + expectedServerName,
 	}
+}
+
+func (adapter OpenClawAdapter) DescribeNativeCapabilities(ctx context.Context, nativeMCPServerName string) ([]NativeCapability, error) {
+	catalog, err := adapter.fetchOpenClawToolsCatalog(ctx, "native-capabilities-1")
+	if err != nil {
+		return nil, err
+	}
+	return catalog.nativeCapabilitySummaries(nativeMCPServerName), nil
+}
+
+func (adapter OpenClawAdapter) fetchOpenClawToolsCatalog(ctx context.Context, requestID string) (openClawToolsCatalogResult, error) {
+	connectCtx, cancel := context.WithTimeout(ctx, openClawSetupRetryBudget)
+	defer cancel()
+	conn, err := adapter.connectOperatorWithRetry(connectCtx)
+	if err != nil {
+		return openClawToolsCatalogResult{}, fmt.Errorf("OpenClaw tools.catalog connect failed: %w", err)
+	}
+	defer conn.Close()
+	params := map[string]any{"includePlugins": true}
+	if trimmed := strings.TrimSpace(adapter.AgentID); trimmed != "" {
+		params["agentId"] = trimmed
+	}
+	trimmedRequestID := strings.TrimSpace(requestID)
+	if trimmedRequestID == "" {
+		trimmedRequestID = "tools-catalog-1"
+	}
+	err = conn.WriteJSON(openClawRequest{
+		Type:   "req",
+		ID:     trimmedRequestID,
+		Method: "tools.catalog",
+		Params: params,
+	})
+	if err != nil {
+		return openClawToolsCatalogResult{}, fmt.Errorf("OpenClaw tools.catalog request failed: %w", err)
+	}
+	var response openClawResponse
+	err = readOpenClawResponse(conn, trimmedRequestID, &response)
+	if err != nil {
+		return openClawToolsCatalogResult{}, fmt.Errorf("OpenClaw tools.catalog response failed: %w", err)
+	}
+	if errText := response.errorString(); errText != "" {
+		return openClawToolsCatalogResult{}, fmt.Errorf("OpenClaw tools.catalog error: %s", errText)
+	}
+	catalog, err := openClawToolsCatalogFromResult(response.payload())
+	if err != nil {
+		return openClawToolsCatalogResult{}, fmt.Errorf("OpenClaw tools.catalog invalid: %w", err)
+	}
+	return catalog, nil
 }
 
 func (adapter OpenClawAdapter) StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error) {
@@ -451,7 +477,7 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 	case adapter.Password != "":
 		auth["password"] = adapter.Password
 	default:
-		return fmt.Errorf("OpenClaw operator auth missing")
+		return openClawAuthError{message: "OpenClaw operator auth missing"}
 	}
 	request := openClawRequest{
 		Type:   "req",
@@ -489,7 +515,7 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 				RetryAfter: retryAfter,
 			}}
 		}
-		return fmt.Errorf("OpenClaw connect error: %s", errText)
+		return openClawAuthError{message: "OpenClaw operator credential rejected"}
 	}
 	payload := hello.payload()
 	payloadType := openClawPayloadType(payload)
@@ -513,7 +539,7 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 		return err
 	}
 	if !helloResult.hasScope("operator.read") || !helloResult.hasScope("operator.write") {
-		return fmt.Errorf("OpenClaw operator.read and operator.write scopes required")
+		return openClawAuthError{message: "OpenClaw operator.read and operator.write scopes required"}
 	}
 	missing := helloResult.Features.missingRequiredMethods()
 	if len(missing) > 0 {
@@ -525,6 +551,14 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 		}
 	}
 	return nil
+}
+
+type openClawAuthError struct {
+	message string
+}
+
+func (err openClawAuthError) Error() string {
+	return err.message
 }
 
 func setOpenClawDeadline(conn *websocket.Conn, ctx context.Context, fallback time.Duration) {
@@ -743,6 +777,54 @@ func (catalog openClawToolsCatalogResult) hasNativeMCPServer(expectedServerName 
 	return false
 }
 
+func (catalog openClawToolsCatalogResult) nativeCapabilitySummaries(nativeMCPServerName string) []NativeCapability {
+	const maxOpenClawCapabilityGroups = 20
+	out := []NativeCapability{}
+	seen := map[string]bool{}
+	for _, group := range catalog.Groups {
+		if group.matchesNativeMCPServer(nativeMCPServerName) {
+			continue
+		}
+		toolCount := len(group.Tools)
+		if toolCount == 0 {
+			continue
+		}
+		id := boundedCapabilityText(firstNonEmpty(group.PluginID, group.ID), 96)
+		label := boundedCapabilityText(firstNonEmpty(group.Label, group.ID, group.PluginID), 80)
+		if id == "" || label == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, NativeCapability{
+			Source:       NativeCapabilitySourceOpenClawToolsCatalog,
+			Kind:         NativeCapabilityKindToolGroup,
+			CapabilityID: id,
+			Label:        label,
+			Summary:      boundedCapabilityText(fmt.Sprintf("%s (%d OpenClaw tools)", label, toolCount), 160),
+		})
+		if len(out) >= maxOpenClawCapabilityGroups {
+			break
+		}
+	}
+	return out
+}
+
+func (group openClawToolsCatalogGroup) matchesNativeMCPServer(nativeMCPServerName string) bool {
+	target := strings.TrimSpace(nativeMCPServerName)
+	if target == "" {
+		return false
+	}
+	return strings.TrimSpace(group.PluginID) == target || strings.TrimSpace(group.Label) == target || strings.TrimSpace(group.ID) == "plugin:"+target
+}
+
+func boundedCapabilityText(value string, limit int) string {
+	trimmed := strings.TrimSpace(value)
+	if limit <= 0 || len(trimmed) <= limit {
+		return trimmed
+	}
+	return strings.TrimSpace(trimmed[:limit])
+}
+
 func (hello openClawHello) hasScope(scope string) bool {
 	for _, candidate := range hello.Scopes {
 		if strings.TrimSpace(candidate) == scope {
@@ -816,6 +898,20 @@ func openClawErrorIsTimeout(value string) bool {
 func openClawConnectErrorIsCapability(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, " missing") || strings.Contains(message, "protocol") || strings.Contains(message, "features.")
+}
+
+func openClawConnectErrorIsAuth(err error) bool {
+	var authErr openClawAuthError
+	if errors.As(err, &authErr) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unauthorized") ||
+		strings.Contains(message, "forbidden") ||
+		strings.Contains(message, "invalid token") ||
+		strings.Contains(message, "invalid auth") ||
+		strings.Contains(message, "invalid credential") ||
+		strings.Contains(message, "authentication")
 }
 
 func (features openClawFeatures) missingRequiredMethods() []string {

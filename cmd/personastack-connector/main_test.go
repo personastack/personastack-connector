@@ -8,12 +8,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/mcp"
+	"github.com/personastack/personastack-connector/internal/openclawauth"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/service"
 	"github.com/zalando/go-keyring"
@@ -375,6 +379,10 @@ func TestRunPairReplacesPreviousLocalBinding(t *testing.T) {
 }
 
 func TestRunPairOpenClawRequiresCredentialBeforePairingExchange(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENCLAW_CONFIG_PATH", "")
+	t.Setenv("OPENCLAW_HOME", "")
+	t.Setenv("OPENCLAW_STATE_DIR", "")
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
 	t.Setenv("OPENCLAW_GATEWAY_DEVICE_TOKEN", "")
@@ -401,11 +409,14 @@ func TestRunPairOpenClawRequiresCredentialBeforePairingExchange(t *testing.T) {
 }
 
 func TestRunPairOpenClawPromptsForTokenBeforePairingExchange(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENCLAW_CONFIG_PATH", "")
+	t.Setenv("OPENCLAW_HOME", "")
+	t.Setenv("OPENCLAW_STATE_DIR", "")
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
 	t.Setenv("OPENCLAW_GATEWAY_DEVICE_TOKEN", "")
 	keyring.MockInit()
-	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_OPENCLAW_GATEWAY_START", "1")
 	oldInstallService := installService
 	installService = func() (service.InstallResult, error) {
@@ -454,6 +465,132 @@ func TestRunPairOpenClawPromptsForTokenBeforePairingExchange(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "OpenClaw operator token:") {
 		t.Fatalf("expected token prompt, got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "openclaw config get gateway.auth.token") {
+		t.Fatalf("expected token source guidance, got %q", stderr.String())
+	}
+}
+
+func TestRunPairOpenClawDetectsTokenBeforePrompt(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("OPENCLAW_CONFIG_PATH", "")
+	t.Setenv("OPENCLAW_HOME", "")
+	t.Setenv("OPENCLAW_STATE_DIR", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
+	t.Setenv("OPENCLAW_GATEWAY_DEVICE_TOKEN", "")
+	t.Setenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL", "ws://127.0.0.1:1")
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_OPENCLAW_GATEWAY_START", "1")
+	if err := os.MkdirAll(filepath.Join(homeDir, ".openclaw"), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", ".env"), []byte("OPENCLAW_GATEWAY_TOKEN=detected-token\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	oldInstallService := installService
+	installService = func() (service.InstallResult, error) {
+		return service.InstallResult{Kind: "no_user_service_manager", Path: "/tmp/personastack-connector.desktop"}, nil
+	}
+	t.Cleanup(func() {
+		installService = oldInstallService
+	})
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"persona_id":                "persona-openclaw",
+			"connection_id":             "connection-openclaw",
+			"credential_id":             "cred-openclaw",
+			"runtime_kind":              "openclaw",
+			"connection_generation":     1,
+			"gateway_websocket_url":     "ws://example/v1/external-agent/ws",
+			"native_mcp_server_name":    "personastack-connection-openclaw",
+			"native_mcp_tool_namespace": "personastack",
+			"persona_mcp_url":           "https://mcp.example/mcp",
+			"persona_mcp_token":         "mcp-token-openclaw",
+		})
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdin:  strings.NewReader("should-not-be-read\n"),
+		stdout: io.Discard,
+		stderr: &stderr,
+		store:  &store,
+	}
+	err := cmd.runPair([]string{"PAIR-OPENCLAW", "--gateway", server.URL, "--runtime", "openclaw"})
+	if err != nil {
+		t.Fatalf("runPair() error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one pairing exchange after OpenClaw token detection; calls=%d", calls)
+	}
+	bindings := store.ListBindings()
+	if len(bindings) != 1 || bindings[0].OpenClawGatewayToken != "detected-token" {
+		t.Fatalf("expected detected token to be stored: %+v", bindings)
+	}
+	if stderr.String() != "" {
+		t.Fatalf("expected no prompt, got %q", stderr.String())
+	}
+}
+
+func TestRunPairOpenClawRejectsDetectedInvalidTokenWhenGatewayReachable(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("OPENCLAW_CONFIG_PATH", "")
+	t.Setenv("OPENCLAW_HOME", "")
+	t.Setenv("OPENCLAW_STATE_DIR", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
+	t.Setenv("OPENCLAW_GATEWAY_DEVICE_TOKEN", "")
+	if err := os.MkdirAll(filepath.Join(homeDir, ".openclaw"), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".openclaw", ".env"), []byte("OPENCLAW_GATEWAY_TOKEN=stale-token\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{"type": "connect.challenge"})
+		var connect map[string]any
+		if err := conn.ReadJSON(&connect); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		_ = conn.WriteJSON(map[string]any{"id": connect["id"], "type": "res", "ok": false, "error": "invalid token"})
+	}))
+	defer gateway.Close()
+	t.Setenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL", "ws"+gateway.URL[len("http"):])
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "pairing code consumed", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdin:  strings.NewReader("should-not-be-read\n"),
+		stdout: io.Discard,
+		stderr: io.Discard,
+		store:  &store,
+	}
+	err := cmd.runPair([]string{"PAIR-OPENCLAW", "--gateway", server.URL, "--runtime", "openclaw"})
+	if err == nil || !strings.Contains(err.Error(), "credential rejected") {
+		t.Fatalf("runPair() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("pairing exchange should not be called with rejected auth; calls=%d", calls)
 	}
 }
 
@@ -581,6 +718,14 @@ func TestRunRuntimeHermesConfigure(t *testing.T) {
 }
 
 func TestRunRuntimeOpenClawConfigure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENCLAW_CONFIG_PATH", "")
+	t.Setenv("OPENCLAW_HOME", "")
+	t.Setenv("OPENCLAW_STATE_DIR", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
+	t.Setenv("OPENCLAW_GATEWAY_DEVICE_TOKEN", "")
+
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd := command{
@@ -647,5 +792,20 @@ func TestApplyOpenClawPairOptionsRequiresOperatorCredential(t *testing.T) {
 	err := applyOpenClawPairOptions(&binding, openClawPairOptions{})
 	if err == nil || !strings.Contains(err.Error(), "OpenClaw operator credential required") {
 		t.Fatalf("applyOpenClawPairOptions() error = %v", err)
+	}
+}
+
+func TestOpenClawGatewayLoopbackDetection(t *testing.T) {
+	if !openclawauth.GatewayIsLoopback("ws://127.0.0.1:18789") {
+		t.Fatal("expected 127.0.0.1 to be loopback")
+	}
+	if !openclawauth.GatewayIsLoopback("ws://localhost:18789") {
+		t.Fatal("expected localhost to be loopback")
+	}
+	if !openclawauth.GatewayIsLoopback("ws://[::1]:18789") {
+		t.Fatal("expected ::1 to be loopback")
+	}
+	if openclawauth.GatewayIsLoopback("ws://example.com:18789") {
+		t.Fatal("expected example.com to be non-loopback")
 	}
 }

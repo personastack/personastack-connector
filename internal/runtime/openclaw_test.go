@@ -105,6 +105,32 @@ func TestOpenClawAdapterDetectRejectsMissingFeature(t *testing.T) {
 	}
 }
 
+func TestOpenClawAdapterDetectReportsInvalidAuth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(openClawResponse{Type: "connect.challenge"})
+		var connect openClawRequest
+		if err := conn.ReadJSON(&connect); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: connect.ID, Type: "res", OK: boolRef(false), Error: "invalid token"})
+	}))
+	defer server.Close()
+
+	detection := NewOpenClawAdapter("ws"+server.URL[len("http"):], "stale-token").Detect()
+	if detection.State != AdapterStateAuthMissing {
+		t.Fatalf("expected auth missing, got %+v", detection)
+	}
+	if strings.Contains(detection.Note, "invalid token") {
+		t.Fatalf("auth note leaked gateway error: %q", detection.Note)
+	}
+}
+
 func TestOpenClawAdapterStartRunUsesAgentMethod(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -733,6 +759,59 @@ func TestOpenClawAdapterVerifyMCPCatalogUsesLiveCatalogNames(t *testing.T) {
 	}
 	if !strings.Contains(result.Note, "effective tool catalog visible") {
 		t.Fatalf("unexpected note: %q", result.Note)
+	}
+}
+
+func TestOpenClawAdapterDescribeNativeCapabilitiesFiltersPersonaStackMCP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read tools.catalog: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{
+			ID: request.ID,
+			Result: json.RawMessage(`{
+  "agentId":"agent-1",
+  "groups":[
+    {
+      "id":"plugin:personastack-conn-1",
+      "label":"personastack-conn-1",
+      "source":"plugin",
+      "pluginId":"personastack-conn-1",
+      "tools":[{"id":"persona","label":"PersonaStack","source":"plugin","pluginId":"personastack-conn-1"}]
+    },
+    {
+      "id":"plugin:github",
+      "label":"GitHub tools",
+      "source":"plugin",
+      "pluginId":"github",
+      "tools":[
+        {"id":"issues","label":"Issues","source":"plugin","pluginId":"github"},
+        {"id":"pulls","label":"Pull Requests","source":"plugin","pluginId":"github"}
+      ]
+    }
+  ]
+}`),
+		})
+	}))
+	defer server.Close()
+
+	capabilities, err := NewOpenClawAdapterWithAuth("ws"+server.URL[len("http"):], OpenClawAuth{Token: "token-1"}, "agent-1").DescribeNativeCapabilities(context.Background(), "personastack-conn-1")
+	if err != nil {
+		t.Fatalf("DescribeNativeCapabilities() error = %v", err)
+	}
+	if len(capabilities) != 1 {
+		t.Fatalf("expected one native capability, got %#v", capabilities)
+	}
+	if capabilities[0].CapabilityID != "github" || capabilities[0].Summary != "GitHub tools (2 OpenClaw tools)" {
+		t.Fatalf("unexpected capability summary: %#v", capabilities[0])
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -83,6 +84,76 @@ func TestRunnerConfigRefreshUsesLatestLoopbackProxyState(t *testing.T) {
 	if !strings.Contains(string(raw), latest.LocalMCPProxyURL) {
 		t.Fatalf("refresh did not use latest loopback url:\n%s", string(raw))
 	}
+}
+
+func TestWriteCapabilitiesFrameKeepsNativeCapabilitiesUnknownOnDiscoveryError(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session, err := bridge.NewSession(config.Binding{
+		ConnectionID: "conn-1",
+		PersonaID:    "persona-1",
+		RuntimeKind:  runtime.AdapterKindHermes,
+	}, bridge.Credential{
+		ID:         "cred-1",
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+	})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	var got externalagentprotocol.Frame
+	err = (Runner{}).writeCapabilitiesFrame(
+		context.Background(),
+		session,
+		failingCapabilityAdapter{},
+		config.Binding{NativeMCPServer: "personastack-conn-1"},
+		runtime.Detection{Kind: runtime.AdapterKindHermes, State: runtime.AdapterStateReady},
+		func(frame externalagentprotocol.Frame) error {
+			got = frame
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("write capabilities frame: %v", err)
+	}
+	if got.Capabilities == nil {
+		t.Fatal("missing capabilities payload")
+	}
+	if got.Capabilities.NativeCapabilities != nil {
+		t.Fatalf("expected nil native capabilities on discovery error, got %#v", got.Capabilities.NativeCapabilities)
+	}
+}
+
+type failingCapabilityAdapter struct{}
+
+func (failingCapabilityAdapter) Kind() runtime.AdapterKind {
+	return runtime.AdapterKindHermes
+}
+
+func (failingCapabilityAdapter) Detect() runtime.Detection {
+	return runtime.Detection{Kind: runtime.AdapterKindHermes, State: runtime.AdapterStateReady}
+}
+
+func (failingCapabilityAdapter) StartRun(runtime.RunRequest) (string, error) {
+	return "", fmt.Errorf("not used")
+}
+
+func (failingCapabilityAdapter) StreamOrPollRun(context.Context, string, runtime.RunEventHandler) (runtime.RunResult, error) {
+	return runtime.RunResult{}, fmt.Errorf("not used")
+}
+
+func (failingCapabilityAdapter) CancelRun(string) error {
+	return fmt.Errorf("not used")
+}
+
+func (failingCapabilityAdapter) Diagnose() runtime.Detection {
+	return runtime.Detection{Kind: runtime.AdapterKindHermes, State: runtime.AdapterStateReady}
+}
+
+func (failingCapabilityAdapter) DescribeNativeCapabilities(context.Context, string) ([]runtime.NativeCapability, error) {
+	return nil, fmt.Errorf("catalog unavailable")
 }
 
 func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {

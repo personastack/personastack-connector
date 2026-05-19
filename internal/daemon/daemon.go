@@ -16,6 +16,7 @@ import (
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/mcp"
+	"github.com/personastack/personastack-connector/internal/openclawauth"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
 
@@ -196,8 +197,9 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				return
 			case <-ticker.C:
 				_ = r.recordHeartbeat(binding.ConnectionID, r.now())
-				state := r.bindingReadiness(adapter, binding).State
-				_ = writeFrame(session.HeartbeatFrame(state, lastSessionWakeProbeAt()))
+				readiness := r.bindingReadiness(adapter, binding)
+				_ = writeFrame(session.HeartbeatFrame(readiness.State, lastSessionWakeProbeAt()))
+				_ = r.writeCapabilitiesFrame(ctx, session, adapter, binding, readiness, writeFrame)
 			}
 		}
 	}()
@@ -757,11 +759,18 @@ func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
 	if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
 		return runtime.NewAdapter(binding.RuntimeKind)
 	}
-	adapter := runtime.NewOpenClawAdapterWithAuth(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{
-		Token:       firstNonEmpty(binding.OpenClawGatewayToken, getenv("OPENCLAW_GATEWAY_TOKEN")),
-		Password:    firstNonEmpty(binding.OpenClawPassword, getenv("OPENCLAW_GATEWAY_PASSWORD")),
-		DeviceToken: firstNonEmpty(binding.OpenClawDeviceToken, getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN")),
-	}, binding.OpenClawAgentID)
+	resolved := openclawauth.Result{}
+	if openclawauth.GatewayIsLoopback(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL")) {
+		var err error
+		resolved, err = openclawauth.Resolve(openclawauth.Options{
+			Binding: binding,
+			Env:     getenv,
+		})
+		if err != nil {
+			return runtime.NewErrorAdapter(runtime.AdapterKindOpenClaw, runtime.AdapterStateAuthMissing, err.Error())
+		}
+	}
+	adapter := runtime.NewOpenClawAdapterWithAuth(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, binding.OpenClawAgentID)
 	adapter.DeviceTokenSink = func(deviceToken string) error {
 		writable, ok := r.Store.(config.WritableStore)
 		if !ok {
@@ -776,6 +785,75 @@ func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
 		return writable.SaveBinding(latest)
 	}
 	return adapter
+}
+
+func (r Runner) writeCapabilitiesFrame(
+	ctx context.Context,
+	session bridge.Session,
+	adapter runtime.Adapter,
+	binding config.Binding,
+	detection runtime.Detection,
+	writeFrame func(externalagentprotocol.Frame) error,
+) error {
+	var nativeCapabilities []externalagentprotocol.NativeCapabilityReport
+	describer, ok := adapter.(runtime.NativeCapabilityDescriber)
+	if ok {
+		describeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		capabilities, err := describer.DescribeNativeCapabilities(describeCtx, binding.NativeMCPServer)
+		cancel()
+		if err == nil {
+			nativeCapabilities = nativeCapabilityReports(capabilities, r.now())
+		}
+	}
+	frame := session.CapabilitiesFrame(detectionCapabilities(detection, r.now()), nativeCapabilities)
+	if err := writeFrame(frame); err != nil {
+		return fmt.Errorf("write capabilities frame: %w", err)
+	}
+	return nil
+}
+
+func detectionCapabilities(detection runtime.Detection, reportedAt time.Time) []externalagentprotocol.CapabilityReport {
+	status := externalagentprotocol.ReadinessStatusRuntimeHealthy
+	if detection.State == runtime.AdapterStateReady {
+		status = externalagentprotocol.ReadinessStatusWakeable
+	}
+	if detection.State == runtime.AdapterStateMCPVerified || detection.State == runtime.AdapterStateMCPRestartRequired {
+		status = externalagentprotocol.ReadinessStatusMCPConfigured
+	}
+	if detection.State == runtime.AdapterStateRuntimeMissing || detection.State == runtime.AdapterStateRuntimeStopped || detection.State == runtime.AdapterStateAuthMissing || detection.State == runtime.AdapterStateCapabilityMissing || detection.State == runtime.AdapterStateWakeProbeFailed {
+		status = externalagentprotocol.ReadinessStatusRuntimeError
+	}
+	return []externalagentprotocol.CapabilityReport{
+		{
+			Kind:       externalagentprotocol.CapabilityKindRuntimeHealth,
+			Status:     status,
+			Label:      strings.TrimSpace(detection.Note),
+			ReportedAt: reportedAt.UTC(),
+		},
+	}
+}
+
+func nativeCapabilityReports(capabilities []runtime.NativeCapability, reportedAt time.Time) []externalagentprotocol.NativeCapabilityReport {
+	reports := make([]externalagentprotocol.NativeCapabilityReport, 0, len(capabilities))
+	for _, capability := range capabilities {
+		report := externalagentprotocol.NativeCapabilityReport{
+			Source:       externalagentprotocol.NativeCapabilitySource(strings.TrimSpace(string(capability.Source))),
+			Kind:         externalagentprotocol.NativeCapabilityKind(strings.TrimSpace(string(capability.Kind))),
+			CapabilityID: strings.TrimSpace(capability.CapabilityID),
+			Label:        strings.TrimSpace(capability.Label),
+			Summary:      strings.TrimSpace(capability.Summary),
+			Status:       externalagentprotocol.ReadinessStatusWakeable,
+			ReportedAt:   reportedAt.UTC(),
+		}
+		if report.Source == "" || report.Kind == "" || report.CapabilityID == "" || report.Label == "" {
+			continue
+		}
+		if report.Summary == "" {
+			report.Summary = report.Label
+		}
+		reports = append(reports, report)
+	}
+	return reports
 }
 
 func firstNonEmpty(values ...string) string {

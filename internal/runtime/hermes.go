@@ -96,6 +96,41 @@ func (adapter HermesAdapter) Detect() Detection {
 	return Detection{Kind: AdapterKindHermes, State: AdapterStateReady, Note: "Hermes API ready"}
 }
 
+func (adapter HermesAdapter) DescribeNativeCapabilities(ctx context.Context, nativeMCPServerName string) ([]NativeCapability, error) {
+	_ = nativeMCPServerName
+	capabilities, err := adapter.fetchHermesCapabilities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return capabilities.nativeCapabilitySummaries(), nil
+}
+
+func (adapter HermesAdapter) fetchHermesCapabilities(ctx context.Context) (hermesCapabilities, error) {
+	if err := adapter.validateLoopbackBaseURL(); err != nil {
+		return hermesCapabilities{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, adapter.BaseURL+"/v1/capabilities", nil)
+	if err != nil {
+		return hermesCapabilities{}, err
+	}
+	if adapter.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
+	}
+	resp, err := adapter.client().Do(req)
+	if err != nil {
+		return hermesCapabilities{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return hermesCapabilities{}, fmt.Errorf("Hermes capabilities status %d", resp.StatusCode)
+	}
+	var capabilities hermesCapabilities
+	if err := json.NewDecoder(resp.Body).Decode(&capabilities); err != nil {
+		return hermesCapabilities{}, err
+	}
+	return capabilities, nil
+}
+
 func (adapter HermesAdapter) probeOptionalAuthenticatedEndpoint(path string) (Detection, bool) {
 	req, err := http.NewRequest(http.MethodGet, adapter.BaseURL+path, nil)
 	if err != nil {
@@ -854,6 +889,33 @@ func (capabilities hermesCapabilities) degradedFallbackFeatures() []string {
 		missing = append(missing, hermesDegradedRunStopFeature)
 	}
 	return missing
+}
+
+func (capabilities hermesCapabilities) nativeCapabilitySummaries() []NativeCapability {
+	out := []NativeCapability{}
+	if capabilities.Features.RunSubmission {
+		out = append(out, hermesNativeCapability("run_submission", "Task delegation", "can accept delegated tasks"))
+	}
+	if capabilities.Features.RunStatus {
+		out = append(out, hermesNativeCapability("run_status", "Task status", "can report task status"))
+	}
+	if capabilities.Features.RunEventsSSE {
+		out = append(out, hermesNativeCapability("run_events_sse", "Progress streaming", "can stream progress updates"))
+	}
+	if capabilities.Features.RunStop {
+		out = append(out, hermesNativeCapability("run_stop", "Task cancellation", "can cancel delegated tasks"))
+	}
+	return out
+}
+
+func hermesNativeCapability(id string, label string, summary string) NativeCapability {
+	return NativeCapability{
+		Source:       NativeCapabilitySourceHermesRuntimeAPI,
+		Kind:         NativeCapabilityKindRuntimeFeature,
+		CapabilityID: strings.TrimSpace(id),
+		Label:        strings.TrimSpace(label),
+		Summary:      strings.TrimSpace(summary),
+	}
 }
 
 type hermesRunResponse struct {

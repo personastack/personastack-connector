@@ -43,6 +43,32 @@ func TestHermesAdapterDetectsRunSubmission(t *testing.T) {
 	}
 }
 
+func TestHermesAdapterDescribeNativeCapabilitiesUsesRuntimeFeatures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/capabilities":
+			if r.Header.Get("Authorization") != "Bearer key-1" {
+				t.Fatalf("missing auth header: %q", r.Header.Get("Authorization"))
+			}
+			_, _ = w.Write([]byte(`{"features":{"run_submission":true,"run_status":true,"run_events_sse":true,"run_stop":false}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	capabilities, err := NewHermesAdapter(server.URL, "key-1").DescribeNativeCapabilities(context.Background(), "")
+	if err != nil {
+		t.Fatalf("DescribeNativeCapabilities() error = %v", err)
+	}
+	if len(capabilities) != 3 {
+		t.Fatalf("expected three runtime features, got %#v", capabilities)
+	}
+	if capabilities[0].Summary != "can accept delegated tasks" || capabilities[2].Summary != "can stream progress updates" {
+		t.Fatalf("unexpected Hermes capability summaries: %#v", capabilities)
+	}
+}
+
 func TestHermesAdapterDetectRequiresRunLifecycleFeatures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

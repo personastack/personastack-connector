@@ -194,6 +194,22 @@ const (
 	CapabilityKindWakeProbe     CapabilityKind = "wake_probe"
 )
 
+// NativeCapabilitySource identifies the runtime authority used for prompt-safe capability summaries.
+type NativeCapabilitySource string
+
+const (
+	NativeCapabilitySourceOpenClawToolsCatalog NativeCapabilitySource = "openclaw_tools_catalog"
+	NativeCapabilitySourceHermesRuntimeAPI     NativeCapabilitySource = "hermes_runtime_api"
+)
+
+// NativeCapabilityKind identifies a bounded external runtime delegation capability shape.
+type NativeCapabilityKind string
+
+const (
+	NativeCapabilityKindToolGroup      NativeCapabilityKind = "tool_group"
+	NativeCapabilityKindRuntimeFeature NativeCapabilityKind = "runtime_feature"
+)
+
 // Frame is the typed envelope for all Connector websocket messages.
 type Frame struct {
 	MessageID    string    `json:"message_id"`
@@ -272,7 +288,8 @@ type HeartbeatPayload struct {
 }
 
 type CapabilitiesPayload struct {
-	Capabilities []CapabilityReport `json:"capabilities"`
+	Capabilities       []CapabilityReport       `json:"capabilities"`
+	NativeCapabilities []NativeCapabilityReport `json:"native_capabilities"`
 }
 
 type CapabilityReport struct {
@@ -281,6 +298,16 @@ type CapabilityReport struct {
 	Label      string          `json:"label,omitempty"`
 	Reason     RejectionReason `json:"reason,omitempty"`
 	ReportedAt time.Time       `json:"reported_at"`
+}
+
+type NativeCapabilityReport struct {
+	Source       NativeCapabilitySource `json:"source"`
+	Kind         NativeCapabilityKind   `json:"kind"`
+	CapabilityID string                 `json:"capability_id"`
+	Label        string                 `json:"label"`
+	Summary      string                 `json:"summary"`
+	Status       ReadinessStatus        `json:"status"`
+	ReportedAt   time.Time              `json:"reported_at"`
 }
 
 type WakeProbePayload struct {
