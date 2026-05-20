@@ -200,7 +200,7 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 		case "cancelled", "canceled", "aborted":
 			return RunResult{Status: RunStatusCancelled}, nil
 		case "timeout":
-			return RunResult{}, fmt.Errorf("OpenClaw wait timed out")
+			continue
 		default:
 			return RunResult{Status: RunStatusSucceeded, Output: strings.TrimSpace(result.Output)}, nil
 		}

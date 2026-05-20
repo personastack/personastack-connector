@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -595,6 +596,20 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for runner shutdown")
+	}
+}
+
+func TestContextForRunDeadlineExpires(t *testing.T) {
+	ctx, cancel := contextForRunDeadline(t.Context(), time.Now().Add(10*time.Millisecond))
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for deadline context")
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("ctx err = %v", ctx.Err())
 	}
 }
 

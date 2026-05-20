@@ -366,7 +366,9 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				defer func() {
 					_ = r.clearRunMCPToken(binding, frame.RunID)
 				}()
-				result, err := adapter.StreamOrPollRun(ctx, nativeRunID, func(event runtime.RunEvent) error {
+				observeCtx, cancelObserve := contextForRunDeadline(ctx, frame.RunStart.DeadlineAt)
+				defer cancelObserve()
+				result, err := adapter.StreamOrPollRun(observeCtx, nativeRunID, func(event runtime.RunEvent) error {
 					switch event.Kind {
 					case runtime.RunEventStarted:
 						return writeStarted(event.StartedAt)
@@ -379,7 +381,13 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 					}
 				})
 				if err != nil {
-					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+					reason := externalagentprotocol.TerminalReasonFailed
+					output := err.Error()
+					if errors.Is(err, context.DeadlineExceeded) {
+						reason = externalagentprotocol.TerminalReasonExpired
+						output = "external agent run deadline exceeded"
+					}
+					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, reason, output)
 					_ = writeFrame(failed)
 					return
 				}
@@ -609,6 +617,13 @@ func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Bin
 		reason = externalagentprotocol.TerminalReasonCancelled
 	}
 	_ = writeFrame(session.RunTerminalFrame(frame, status, reason, result.Output))
+}
+
+func contextForRunDeadline(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+	if deadline.IsZero() {
+		return context.WithCancel(parent)
+	}
+	return context.WithDeadline(parent, deadline.UTC())
 }
 
 func (r Runner) revokeBinding(binding config.Binding, adapter runtime.Adapter, reason string) error {

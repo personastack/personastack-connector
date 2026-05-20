@@ -307,6 +307,97 @@ func TestOpenClawAdapterWaitRunFailedOutputFallback(t *testing.T) {
 	}
 }
 
+func TestOpenClawAdapterWaitRunRetriesTimeoutStatus(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		for {
+			var request openClawRequest
+			if err := conn.ReadJSON(&request); err != nil {
+				t.Fatalf("read request: %v", err)
+			}
+			if request.Method != "agent.wait" || request.ID != "wait-run-1" {
+				t.Fatalf("unexpected request: %+v", request)
+			}
+			switch atomic.AddInt32(&attempts, 1) {
+			case 1:
+				_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"status":"timeout"}`)})
+			case 2:
+				_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"status":"completed","output":"done after retry"}`)})
+				return
+			default:
+				t.Fatalf("unexpected attempt %d", attempts)
+			}
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").WaitRun(context.Background(), "run-1")
+	if err != nil {
+		t.Fatalf("wait run: %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done after retry" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if atomic.LoadInt32(&attempts) != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+}
+
+func TestOpenClawAdapterWaitRunDoesNotCompleteTimeoutFromBufferedOutput(t *testing.T) {
+	var attempts int32
+	events := []RunEvent{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		for {
+			var request openClawRequest
+			if err := conn.ReadJSON(&request); err != nil {
+				t.Fatalf("read request: %v", err)
+			}
+			switch atomic.AddInt32(&attempts, 1) {
+			case 1:
+				_ = conn.WriteJSON(openClawResponse{Type: "event", Event: "chat", Payload: json.RawMessage(`{"deltaText":"partial"}`)})
+				_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"status":"timeout"}`)})
+			case 2:
+				_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"status":"completed","output":"final"}`)})
+				return
+			default:
+				t.Fatalf("unexpected attempt %d", attempts)
+			}
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StreamOrPollRun(context.Background(), "run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("wait run: %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "final" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if atomic.LoadInt32(&attempts) != 2 {
+		t.Fatalf("attempts = %d", attempts)
+	}
+	if len(events) != 2 || events[1].Kind != RunEventOutputDelta || events[1].Delta != "partial" {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+}
+
 func TestOpenClawAdapterWaitRunDoesNotSucceedAfterContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
