@@ -123,10 +123,12 @@ func bindingSecretKey(connectionID string, name string) string {
 }
 
 func storeSecret(secretKey string, value string) error {
+	if shouldForceFallbackSecretStore() {
+		_ = keyringDelete(keyringService, secretKey)
+		return fallbackSecretSet(secretKey, value)
+	}
 	if err := keyringSet(keyringService, secretKey, value); err == nil {
-		if shouldUseFallbackSecretStore() {
-			_ = fallbackSecretDelete(secretKey)
-		}
+		_ = fallbackSecretDelete(secretKey)
 		return nil
 	} else if shouldUseFallbackSecretStore() {
 		if fallbackErr := fallbackSecretSet(secretKey, value); fallbackErr == nil {
@@ -140,24 +142,29 @@ func storeSecret(secretKey string, value string) error {
 }
 
 func loadSecret(secretKey string) string {
-	if secret, err := keyringGet(keyringService, secretKey); err == nil && strings.TrimSpace(secret) != "" {
-		return strings.TrimSpace(secret)
-	}
-	if shouldUseFallbackSecretStore() {
+	if shouldForceFallbackSecretStore() {
 		if secret, err := fallbackSecretGet(secretKey); err == nil && strings.TrimSpace(secret) != "" {
 			return strings.TrimSpace(secret)
 		}
+		return ""
+	}
+	if secret, err := keyringGet(keyringService, secretKey); err == nil && strings.TrimSpace(secret) != "" {
+		return strings.TrimSpace(secret)
+	}
+	if secret, err := fallbackSecretGet(secretKey); err == nil && strings.TrimSpace(secret) != "" {
+		return strings.TrimSpace(secret)
 	}
 	return ""
 }
 
 func deleteSecret(secretKey string) error {
+	if shouldForceFallbackSecretStore() {
+		_ = keyringDelete(keyringService, secretKey)
+		return fallbackSecretDelete(secretKey)
+	}
 	keyringErr := keyringDelete(keyringService, secretKey)
-	if shouldUseFallbackSecretStore() {
-		if fallbackErr := fallbackSecretDelete(secretKey); fallbackErr != nil {
-			return fallbackErr
-		}
-		return nil
+	if fallbackErr := fallbackSecretDelete(secretKey); fallbackErr != nil {
+		return fallbackErr
 	}
 	return keyringErr
 }
