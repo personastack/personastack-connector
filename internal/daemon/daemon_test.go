@@ -551,6 +551,20 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 		if terminal.MessageType != externalagentprotocol.FrameTypeRunCompleted || terminal.RunTerminal == nil || terminal.RunTerminal.Status != externalagentprotocol.RunStatusCompleted || terminal.RunTerminal.Output != "done" {
 			t.Fatalf("unexpected run terminal frame: %+v", terminal)
 		}
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "terminal-ack-1",
+			MessageType:  externalagentprotocol.FrameTypeRunTerminalAck,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			RunID:        terminal.RunID,
+			AssignmentID: terminal.AssignmentID,
+			SentAt:       time.Now().UTC(),
+			RunTerminalAck: &externalagentprotocol.RunTerminalAckPayload{
+				AcknowledgedAt: time.Now().UTC(),
+			},
+		}); err != nil {
+			t.Fatalf("write terminal ack: %v", err)
+		}
 		terminalSeen <- struct{}{}
 	}))
 	defer gatewayServer.Close()
@@ -597,56 +611,430 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for runner shutdown")
 	}
-}
-
-func TestContextForRunDeadlineExtendsShortServerDeadline(t *testing.T) {
-	parent, cancelParent := context.WithCancel(t.Context())
-	ctx, cancel := contextForRunDeadline(parent, time.Now().Add(10*time.Millisecond))
-	defer cancel()
-
-	select {
-	case <-ctx.Done():
-		t.Fatalf("short server deadline expired: %v", ctx.Err())
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	cancelParent()
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for parent cancellation")
-	}
-	if !errors.Is(ctx.Err(), context.Canceled) {
-		t.Fatalf("ctx err = %v", ctx.Err())
+	stored, ok := store.Binding("conn-1")
+	if !ok || stored.ActiveRunID != "" || stored.ActiveNativeRunID != "" || stored.ActiveRunMCPToken != "" {
+		t.Fatalf("active run was not cleared after terminal ack: %+v", stored)
 	}
 }
 
-func TestContextForRunDeadlinePreservesExpiredServerDeadline(t *testing.T) {
-	ctx, cancel := contextForRunDeadline(t.Context(), time.Now().Add(-time.Second))
+func TestContextForRunDeadlineExpires(t *testing.T) {
+	ctx, cancel := contextForRunDeadline(t.Context(), time.Now().Add(10*time.Millisecond))
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for expired deadline context")
+		t.Fatal("timed out waiting for deadline context")
 	}
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("ctx err = %v", ctx.Err())
 	}
 }
 
-func TestContextForRunDeadlinePreservesLongServerDeadline(t *testing.T) {
-	wantDeadline := time.Now().UTC().Add(30 * time.Minute)
-	ctx, cancel := contextForRunDeadline(t.Context(), wantDeadline)
-	defer cancel()
+func TestObserveReplayedActiveRunExpiresWithStoredDeadlineAndCancelsAsync(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session, err := bridge.NewSession(config.Binding{
+		ConnectionID: "conn-1",
+		PersonaID:    "persona-1",
+		RuntimeKind:  runtime.AdapterKindHermes,
+	}, bridge.Credential{
+		ID:         "cred-1",
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+	})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	binding := config.Binding{ConnectionID: "conn-1", PersonaID: "persona-1", ActiveRunID: "run-1"}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	cancelStarted := make(chan struct{})
+	releaseCancel := make(chan struct{})
+	adapter := deadlineReplayAdapter{cancelStarted: cancelStarted, releaseCancel: releaseCancel}
+	defer close(releaseCancel)
+	frames := make(chan externalagentprotocol.Frame, 1)
 
-	gotDeadline, ok := ctx.Deadline()
-	if !ok {
-		t.Fatal("deadline missing")
+	Runner{Store: &store}.observeReplayedActiveRun(
+		context.Background(),
+		binding,
+		session,
+		adapter,
+		externalagentprotocol.Frame{RunID: "run-1", AssignmentID: "assignment-1"},
+		"native-1",
+		time.Now().Add(10*time.Millisecond),
+		func(frame externalagentprotocol.Frame) error {
+			frames <- frame
+			return nil
+		},
+	)
+
+	select {
+	case frame := <-frames:
+		if frame.RunTerminal == nil || frame.RunTerminal.Reason != externalagentprotocol.TerminalReasonExpired {
+			t.Fatalf("unexpected terminal frame: %+v", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for expired terminal frame")
 	}
-	if gotDeadline.Sub(wantDeadline).Abs() > time.Second {
-		t.Fatalf("deadline = %v, want near %v", gotDeadline, wantDeadline)
+	select {
+	case <-cancelStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async cancel")
 	}
+}
+
+func TestObserveReplayedActiveRunKeepsStateWhenTerminalWriteFails(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session, err := bridge.NewSession(config.Binding{
+		ConnectionID: "conn-1",
+		PersonaID:    "persona-1",
+		RuntimeKind:  runtime.AdapterKindHermes,
+	}, bridge.Credential{
+		ID:         "cred-1",
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+	})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	binding := config.Binding{
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		ActiveRunID:        "run-1",
+		ActiveAssignmentID: "assignment-1",
+		ActiveNativeRunID:  "native-1",
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+
+	Runner{Store: &store}.observeReplayedActiveRun(
+		context.Background(),
+		binding,
+		session,
+		completingReplayAdapter{},
+		externalagentprotocol.Frame{RunID: "run-1", AssignmentID: "assignment-1"},
+		"native-1",
+		time.Time{},
+		func(externalagentprotocol.Frame) error {
+			return fmt.Errorf("websocket closed")
+		},
+	)
+
+	active, ok := store.Binding("conn-1")
+	if !ok || active.ActiveRunID != "run-1" || active.ActiveNativeRunID != "native-1" {
+		t.Fatalf("active run was cleared after failed terminal write: %+v", active)
+	}
+}
+
+func TestObserveReplayedActiveRunKeepsStateUntilTerminalAck(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session, err := bridge.NewSession(config.Binding{
+		ConnectionID: "conn-1",
+		PersonaID:    "persona-1",
+		RuntimeKind:  runtime.AdapterKindHermes,
+	}, bridge.Credential{
+		ID:         "cred-1",
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+	})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	binding := config.Binding{
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		ActiveRunID:        "run-1",
+		ActiveAssignmentID: "assignment-1",
+		ActiveNativeRunID:  "native-1",
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+
+	Runner{Store: &store}.observeReplayedActiveRun(
+		context.Background(),
+		binding,
+		session,
+		completingReplayAdapter{},
+		externalagentprotocol.Frame{RunID: "run-1", AssignmentID: "assignment-1"},
+		"native-1",
+		time.Time{},
+		func(externalagentprotocol.Frame) error {
+			return nil
+		},
+	)
+
+	active, ok := store.Binding("conn-1")
+	if !ok || active.ActiveRunID != "run-1" || active.ActiveNativeRunID != "native-1" {
+		t.Fatalf("active run was cleared before terminal ack: %+v", active)
+	}
+}
+
+func TestObserveReplayedActiveRunDoesNotDuplicateStarted(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session, err := bridge.NewSession(config.Binding{
+		ConnectionID: "conn-1",
+		PersonaID:    "persona-1",
+		RuntimeKind:  runtime.AdapterKindHermes,
+	}, bridge.Credential{
+		ID:         "cred-1",
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+	})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	frames := make([]externalagentprotocol.Frame, 0, 2)
+
+	Runner{}.observeReplayedActiveRun(
+		context.Background(),
+		config.Binding{ConnectionID: "conn-1", PersonaID: "persona-1"},
+		session,
+		startingReplayAdapter{},
+		externalagentprotocol.Frame{RunID: "run-1", AssignmentID: "assignment-1"},
+		"native-1",
+		time.Time{},
+		func(frame externalagentprotocol.Frame) error {
+			frames = append(frames, frame)
+			return nil
+		},
+	)
+
+	for _, frame := range frames {
+		if frame.MessageType == externalagentprotocol.FrameTypeRunStarted {
+			t.Fatalf("replay observer emitted duplicate started frame: %+v", frames)
+		}
+	}
+}
+
+func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	terminalSent := make(chan struct{})
+	ackSent := make(chan struct{})
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ConnectionGeneration: 1,
+				HeartbeatSeconds:     15,
+			},
+		})
+		for {
+			var frame externalagentprotocol.Frame
+			if err := conn.ReadJSON(&frame); err != nil {
+				t.Fatalf("read heartbeat: %v", err)
+			}
+			if frame.MessageType == externalagentprotocol.FrameTypeHeartbeat {
+				break
+			}
+		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "run-start-1",
+			MessageType:  externalagentprotocol.FrameTypeRunStart,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			RunID:        "run-1",
+			AssignmentID: "assignment-1",
+			SentAt:       time.Now().UTC(),
+			RunStart: &externalagentprotocol.RunStartPayload{
+				FullyComposedPrompt: "prompt",
+				RunScopedMCPToken:   "run-token",
+			},
+		})
+		for {
+			var frame externalagentprotocol.Frame
+			if err := conn.ReadJSON(&frame); err != nil {
+				t.Fatalf("read terminal: %v", err)
+			}
+			if frame.MessageType != externalagentprotocol.FrameTypeRunFailed {
+				continue
+			}
+			if frame.RunTerminal == nil || !strings.Contains(frame.RunTerminal.Output, "native id missing") {
+				t.Fatalf("unexpected terminal: %+v", frame)
+			}
+			close(terminalSent)
+			<-ackSent
+			_ = conn.WriteJSON(externalagentprotocol.Frame{
+				MessageID:    "terminal-ack-1",
+				MessageType:  externalagentprotocol.FrameTypeRunTerminalAck,
+				PersonaID:    "persona-1",
+				ConnectionID: "conn-1",
+				RunID:        frame.RunID,
+				AssignmentID: frame.AssignmentID,
+				SentAt:       time.Now().UTC(),
+				RunTerminalAck: &externalagentprotocol.RunTerminalAckPayload{
+					AcknowledgedAt: time.Now().UTC(),
+				},
+			})
+			return
+		}
+	}))
+	defer gateway.Close()
+
+	binding := config.Binding{
+		ConnectionID:        "conn-1",
+		PersonaID:           "persona-1",
+		GatewayWebsocketURL: "ws" + gateway.URL[len("http"):],
+		BridgeCredentialID:  "cred-1",
+		BridgePrivateKey:    base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:         runtime.AdapterKindHermes,
+		ActiveRunID:         "run-1",
+		ActiveAssignmentID:  "assignment-1",
+		ActiveRunMCPToken:   "run-token",
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	session, err := bridge.NewSession(binding, bridge.Credential{
+		ID:         "cred-1",
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+	})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: &store}).runBindingSession(ctx, binding, session)
+	}()
+
+	select {
+	case <-terminalSent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for terminal")
+	}
+	active, ok := store.Binding("conn-1")
+	if !ok || active.ActiveRunID != "run-1" || active.ActiveAssignmentID != "assignment-1" {
+		t.Fatalf("active run cleared before terminal ack: %+v", active)
+	}
+	close(ackSent)
+	time.Sleep(50 * time.Millisecond)
+	cleared, ok := store.Binding("conn-1")
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveRunMCPToken != "" {
+		t.Fatalf("active run not cleared after terminal ack: %+v", cleared)
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run binding session: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+}
+
+type deadlineReplayAdapter struct {
+	cancelStarted chan struct{}
+	releaseCancel chan struct{}
+}
+
+func (deadlineReplayAdapter) Kind() runtime.AdapterKind {
+	return runtime.AdapterKindHermes
+}
+
+func (deadlineReplayAdapter) Detect() runtime.Detection {
+	return runtime.Detection{Kind: runtime.AdapterKindHermes, State: runtime.AdapterStateReady}
+}
+
+func (deadlineReplayAdapter) StartRun(runtime.RunRequest) (string, error) {
+	return "", fmt.Errorf("not used")
+}
+
+func (deadlineReplayAdapter) StreamOrPollRun(ctx context.Context, _ string, _ runtime.RunEventHandler) (runtime.RunResult, error) {
+	<-ctx.Done()
+	return runtime.RunResult{}, ctx.Err()
+}
+
+func (adapter deadlineReplayAdapter) CancelRun(string) error {
+	close(adapter.cancelStarted)
+	<-adapter.releaseCancel
+	return nil
+}
+
+func (deadlineReplayAdapter) Diagnose() runtime.Detection {
+	return runtime.Detection{Kind: runtime.AdapterKindHermes, State: runtime.AdapterStateReady}
+}
+
+type completingReplayAdapter struct{}
+
+func (completingReplayAdapter) Kind() runtime.AdapterKind {
+	return runtime.AdapterKindHermes
+}
+
+func (completingReplayAdapter) Detect() runtime.Detection {
+	return runtime.Detection{Kind: runtime.AdapterKindHermes, State: runtime.AdapterStateReady}
+}
+
+func (completingReplayAdapter) StartRun(runtime.RunRequest) (string, error) {
+	return "", fmt.Errorf("not used")
+}
+
+func (completingReplayAdapter) StreamOrPollRun(context.Context, string, runtime.RunEventHandler) (runtime.RunResult, error) {
+	return runtime.RunResult{Status: runtime.RunStatusSucceeded, Output: "done"}, nil
+}
+
+func (completingReplayAdapter) CancelRun(string) error {
+	return nil
+}
+
+func (completingReplayAdapter) Diagnose() runtime.Detection {
+	return runtime.Detection{Kind: runtime.AdapterKindHermes, State: runtime.AdapterStateReady}
+}
+
+type startingReplayAdapter struct{}
+
+func (startingReplayAdapter) Kind() runtime.AdapterKind {
+	return runtime.AdapterKindHermes
+}
+
+func (startingReplayAdapter) Detect() runtime.Detection {
+	return runtime.Detection{Kind: runtime.AdapterKindHermes, State: runtime.AdapterStateReady}
+}
+
+func (startingReplayAdapter) StartRun(runtime.RunRequest) (string, error) {
+	return "", fmt.Errorf("not used")
+}
+
+func (startingReplayAdapter) StreamOrPollRun(_ context.Context, _ string, handler runtime.RunEventHandler) (runtime.RunResult, error) {
+	if err := handler(runtime.RunEvent{Kind: runtime.RunEventStarted, StartedAt: time.Now().UTC()}); err != nil {
+		return runtime.RunResult{}, err
+	}
+	return runtime.RunResult{Status: runtime.RunStatusSucceeded, Output: "done"}, nil
+}
+
+func (startingReplayAdapter) CancelRun(string) error {
+	return nil
+}
+
+func (startingReplayAdapter) Diagnose() runtime.Detection {
+	return runtime.Detection{Kind: runtime.AdapterKindHermes, State: runtime.AdapterStateReady}
 }
 
 func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
@@ -961,13 +1349,14 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 		AssignmentID: "assignment-1",
 		RunStart: &externalagentprotocol.RunStartPayload{
 			RunScopedMCPToken: "run-token",
+			DeadlineAt:        time.Now().UTC().Add(time.Minute),
 		},
 	}
 	if err := runner.activateRunMCPToken(binding, frame); err != nil {
 		t.Fatalf("activate run token: %v", err)
 	}
 	active, ok := store.Binding("conn-1")
-	if !ok || active.ActiveRunID != "run-1" || active.ActiveAssignmentID != "assignment-1" || active.ActiveRunMCPToken != "run-token" || !active.HasActiveRunMCPToken {
+	if !ok || active.ActiveRunID != "run-1" || active.ActiveAssignmentID != "assignment-1" || active.ActiveRunMCPToken != "run-token" || active.ActiveRunDeadlineAt.IsZero() || !active.HasActiveRunMCPToken {
 		t.Fatalf("active token not stored: %+v", active)
 	}
 	if err := runner.recordNativeRunID(binding, "run-1", "native-1"); err != nil {
@@ -988,7 +1377,7 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 		t.Fatalf("clear run token: %v", err)
 	}
 	cleared, ok := store.Binding("conn-1")
-	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveNativeRunID != "" || cleared.ActiveRunMCPToken != "" || cleared.HasActiveRunMCPToken {
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveNativeRunID != "" || !cleared.ActiveRunDeadlineAt.IsZero() || cleared.ActiveRunMCPToken != "" || cleared.HasActiveRunMCPToken {
 		t.Fatalf("active token not cleared: %+v", cleared)
 	}
 }
@@ -1063,11 +1452,14 @@ func TestRunnerReplaysActiveRunOnReconnect(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("replay active run: %v", err)
 	}
-	if len(frames) != 1 {
+	if len(frames) != 2 {
 		t.Fatalf("unexpected replay frames: %+v", frames)
 	}
 	if frames[0].MessageType != externalagentprotocol.FrameTypeRunAccepted || frames[0].RunAccepted == nil || frames[0].RunAccepted.NativeRunID != "native-1" {
 		t.Fatalf("unexpected accepted replay: %+v", frames[0])
+	}
+	if frames[1].MessageType != externalagentprotocol.FrameTypeRunStarted || frames[1].RunStarted == nil || frames[1].RunStarted.NativeRunID != "native-1" {
+		t.Fatalf("unexpected started replay: %+v", frames[1])
 	}
 }
 
@@ -1129,7 +1521,7 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 	defer hermesServer.Close()
 	t.Setenv("PERSONASTACK_CONNECTOR_HERMES_URL", hermesServer.URL)
 
-	runFailed := make(chan externalagentprotocol.Frame, 1)
+	runReplay := make(chan []externalagentprotocol.Frame, 1)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1168,6 +1560,9 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 		if replay := readNonHeartbeat(); replay.MessageType != externalagentprotocol.FrameTypeRunAccepted {
 			t.Fatalf("expected replay accepted, got %+v", replay)
 		}
+		if replay := readNonHeartbeat(); replay.MessageType != externalagentprotocol.FrameTypeRunStarted {
+			t.Fatalf("expected replay started, got %+v", replay)
+		}
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageID:    "redelivery-1",
 			MessageType:  externalagentprotocol.FrameTypeRunStart,
@@ -1181,8 +1576,7 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 				RunScopedMCPToken:   "run-token-1",
 			},
 		})
-		frame := readNonHeartbeat()
-		runFailed <- frame
+		runReplay <- []externalagentprotocol.Frame{readNonHeartbeat()}
 		cancel()
 	}))
 	defer gateway.Close()
@@ -1209,12 +1603,12 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 	}()
 
 	select {
-	case frame := <-runFailed:
-		if frame.MessageType != externalagentprotocol.FrameTypeRunFailed {
-			t.Fatalf("expected redelivered run.start failure before wake probe, got %+v", frame)
+	case frames := <-runReplay:
+		if len(frames) != 1 || frames[0].MessageType != externalagentprotocol.FrameTypeRunAccepted {
+			t.Fatalf("expected redelivered run.start accepted without duplicate started, got %+v", frames)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for redelivered run.start failure")
+		t.Fatal("timed out waiting for redelivered run.start replay")
 	}
 	select {
 	case err := <-errCh:

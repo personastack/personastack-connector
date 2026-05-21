@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHermesAdapterDetectsRunSubmission(t *testing.T) {
@@ -306,6 +307,96 @@ func TestHermesAdapterStreamOrPollRunForwardsDeltaAndStarted(t *testing.T) {
 	}
 	if events[0].StartedAt.IsZero() {
 		t.Fatalf("started event missing timestamp")
+	}
+}
+
+func TestHermesAdapterStreamOrPollRunAllowsSlowSSETerminalEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			time.Sleep(40 * time.Millisecond)
+			_, _ = w.Write([]byte("event: message\n"))
+			_, _ = w.Write([]byte(`data: {"type":"run.completed","output":"done"}` + "\n\n"))
+		case "/v1/runs/hermes-run-1":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "failed",
+				"output": "should-not-poll",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	adapter := NewHermesAdapter(server.URL, "key-1")
+	adapter.Client = &http.Client{Timeout: 10 * time.Millisecond}
+	result, err := adapter.StreamOrPollRun(context.Background(), "hermes-run-1", nil)
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestHermesAdapterStreamOrPollRunFallsBackWhenSSEReadFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("response writer does not support hijacking")
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"))
+			_ = conn.Close()
+		case "/v1/runs/hermes-run-1":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "completed",
+				"output": "polled",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewHermesAdapter(server.URL, "key-1").StreamOrPollRun(context.Background(), "hermes-run-1", nil)
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "polled" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestHermesAdapterStreamOrPollRunFallsBackWhenSSETransientStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			http.Error(w, "try later", http.StatusTooManyRequests)
+		case "/v1/runs/hermes-run-1":
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "completed",
+				"output": "polled",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewHermesAdapter(server.URL, "key-1").StreamOrPollRun(context.Background(), "hermes-run-1", nil)
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "polled" {
+		t.Fatalf("unexpected result: %+v", result)
 	}
 }
 

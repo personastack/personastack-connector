@@ -54,6 +54,7 @@ type Binding struct {
 	ActiveRunID             string
 	ActiveAssignmentID      string
 	ActiveNativeRunID       string
+	ActiveRunDeadlineAt     time.Time
 	ActiveRunMCPToken       string
 	LastHeartbeatAt         time.Time
 	LastWakeProbeAt         time.Time

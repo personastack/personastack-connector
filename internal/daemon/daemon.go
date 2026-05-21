@@ -29,8 +29,6 @@ type Runner struct {
 
 var errConnectorDraining = errors.New("connector draining")
 
-const minimumRunDeadline = 15 * time.Minute
-
 func (r Runner) RunForeground(ctx context.Context) error {
 	bindings := r.Store.ListBindings()
 	if len(bindings) == 0 {
@@ -166,6 +164,8 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	_ = r.recordHeartbeat(binding.ConnectionID, r.now())
 	var wakeProbeMu sync.Mutex
 	var sessionWakeProbeAt *time.Time
+	var runStartedMu sync.Mutex
+	runStarted := map[string]bool{}
 	lastSessionWakeProbeAt := func() *time.Time {
 		wakeProbeMu.Lock()
 		defer wakeProbeMu.Unlock()
@@ -181,12 +181,30 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		sessionWakeProbeAt = &value
 		wakeProbeMu.Unlock()
 	}
+	markRunStarted := func(runID string) bool {
+		runID = strings.TrimSpace(runID)
+		if runID == "" {
+			return false
+		}
+		runStartedMu.Lock()
+		defer runStartedMu.Unlock()
+		if runStarted[runID] {
+			return false
+		}
+		runStarted[runID] = true
+		return true
+	}
 	heartbeat := session.HeartbeatFrame(detection.State, lastSessionWakeProbeAt())
 	if err := writeFrame(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
 	if err := r.replayActiveRun(ctx, binding, session, adapter, writeFrame); err != nil {
 		return err
+	}
+	if r.Store != nil {
+		if latest, ok := r.Store.Binding(binding.ConnectionID); ok && strings.TrimSpace(latest.ActiveRunID) != "" && strings.TrimSpace(latest.ActiveNativeRunID) != "" {
+			_ = markRunStarted(latest.ActiveRunID)
+		}
 	}
 	heartbeatStop := make(chan struct{})
 	defer close(heartbeatStop)
@@ -273,6 +291,13 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := r.refreshMCPConfig(binding); err != nil {
 				return fmt.Errorf("refresh mcp config: %w", err)
 			}
+		case externalagentprotocol.FrameTypeRunTerminalAck:
+			if frame.RunTerminalAck == nil {
+				continue
+			}
+			if err := r.clearRunMCPToken(binding, frame.RunID); err != nil {
+				return fmt.Errorf("clear acknowledged run state: %w", err)
+			}
 		case externalagentprotocol.FrameTypeRunStart:
 			if frame.RunStart == nil {
 				continue
@@ -284,11 +309,23 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				continue
 			}
 			if r.activeRunMatchesWithoutNativeRunID(binding, frame) {
-				_ = r.clearRunMCPToken(binding, frame.RunID)
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "active run native id missing")
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write active run missing native id: %w", writeErr)
+				}
+				continue
+			}
+			if nativeRunID, ok := r.activeNativeRunIDForRunStart(binding, frame); ok {
+				accepted := session.RunAcceptedFrame(frame, nativeRunID)
+				commandCache.storeReply(frame, accepted)
+				if err := writeFrame(accepted); err != nil {
+					return fmt.Errorf("write redelivered run accepted: %w", err)
+				}
+				if markRunStarted(frame.RunID) {
+					if err := writeFrame(session.RunStartedFrame(frame, nativeRunID, time.Time{})); err != nil {
+						return fmt.Errorf("write redelivered run started: %w", err)
+					}
 				}
 				continue
 			}
@@ -298,14 +335,6 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run readiness failure: %w", writeErr)
-				}
-				continue
-			}
-			if nativeRunID, ok := r.activeNativeRunIDForRunStart(binding, frame); ok {
-				accepted := session.RunAcceptedFrame(frame, nativeRunID)
-				commandCache.storeReply(frame, accepted)
-				if err := writeFrame(accepted); err != nil {
-					return fmt.Errorf("write redelivered run accepted: %w", err)
 				}
 				continue
 			}
@@ -334,7 +363,6 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				Metadata:               frame.RunStart.Metadata,
 			})
 			if err != nil {
-				_ = r.clearRunMCPToken(binding, frame.RunID)
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
@@ -343,7 +371,6 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				continue
 			}
 			if err := r.recordNativeRunID(binding, frame.RunID, nativeRunID); err != nil {
-				_ = r.clearRunMCPToken(binding, frame.RunID)
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
@@ -356,18 +383,13 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := writeFrame(accepted); err != nil {
 				return fmt.Errorf("write run accepted: %w", err)
 			}
-			started := false
 			writeStarted := func(startedAt time.Time) error {
-				if started {
+				if !markRunStarted(frame.RunID) {
 					return nil
 				}
-				started = true
 				return writeFrame(session.RunStartedFrame(frame, nativeRunID, startedAt))
 			}
 			go func(frame externalagentprotocol.Frame, nativeRunID string) {
-				defer func() {
-					_ = r.clearRunMCPToken(binding, frame.RunID)
-				}()
 				observeCtx, cancelObserve := contextForRunDeadline(ctx, frame.RunStart.DeadlineAt)
 				defer cancelObserve()
 				result, err := adapter.StreamOrPollRun(observeCtx, nativeRunID, func(event runtime.RunEvent) error {
@@ -385,12 +407,19 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				if err != nil {
 					reason := externalagentprotocol.TerminalReasonFailed
 					output := err.Error()
-					if errors.Is(err, context.DeadlineExceeded) {
+					if errors.Is(observeCtx.Err(), context.DeadlineExceeded) {
 						reason = externalagentprotocol.TerminalReasonExpired
 						output = "external agent run deadline exceeded"
 					}
 					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, reason, output)
-					_ = writeFrame(failed)
+					if writeErr := writeFrame(failed); writeErr != nil {
+						return
+					}
+					if reason == externalagentprotocol.TerminalReasonExpired {
+						go func() {
+							_ = adapter.CancelRun(nativeRunID)
+						}()
+					}
 					return
 				}
 				status := externalagentprotocol.RunStatusCompleted
@@ -403,7 +432,9 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 					status = externalagentprotocol.RunStatusCancelled
 					reason = externalagentprotocol.TerminalReasonCancelled
 				}
-				_ = writeFrame(session.RunTerminalFrame(frame, status, reason, result.Output))
+				if writeErr := writeFrame(session.RunTerminalFrame(frame, status, reason, result.Output)); writeErr != nil {
+					return
+				}
 			}(frame, nativeRunID)
 		case externalagentprotocol.FrameTypeRunCancel:
 			if frame.RunCancel == nil {
@@ -578,23 +609,30 @@ func (r Runner) replayActiveRun(ctx context.Context, binding config.Binding, ses
 	if err := writeFrame(accepted); err != nil {
 		return err
 	}
+	started := session.RunStartedFrame(externalagentprotocol.Frame{
+		MessageID:    uuid.NewString(),
+		RunID:        latest.ActiveRunID,
+		AssignmentID: latest.ActiveAssignmentID,
+	}, latest.ActiveNativeRunID, time.Time{})
+	if err := writeFrame(started); err != nil {
+		return err
+	}
 	replayRequest := externalagentprotocol.Frame{
 		MessageID:    uuid.NewString(),
 		RunID:        latest.ActiveRunID,
 		AssignmentID: latest.ActiveAssignmentID,
 	}
-	go r.observeReplayedActiveRun(ctx, binding, session, adapter, replayRequest, latest.ActiveNativeRunID, writeFrame)
+	go r.observeReplayedActiveRun(ctx, binding, session, adapter, replayRequest, latest.ActiveNativeRunID, latest.ActiveRunDeadlineAt, writeFrame)
 	return nil
 }
 
-func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, frame externalagentprotocol.Frame, nativeRunID string, writeFrame func(externalagentprotocol.Frame) error) {
+func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, frame externalagentprotocol.Frame, nativeRunID string, deadline time.Time, writeFrame func(externalagentprotocol.Frame) error) {
 	if adapter == nil {
 		return
 	}
-	defer func() {
-		_ = r.clearRunMCPToken(binding, frame.RunID)
-	}()
-	result, err := adapter.StreamOrPollRun(ctx, nativeRunID, func(event runtime.RunEvent) error {
+	observeCtx, cancelObserve := contextForRunDeadline(ctx, deadline)
+	defer cancelObserve()
+	result, err := adapter.StreamOrPollRun(observeCtx, nativeRunID, func(event runtime.RunEvent) error {
 		switch event.Kind {
 		case runtime.RunEventOutputDelta:
 			return writeFrame(session.RunOutputDeltaFrame(frame, event.Delta))
@@ -605,7 +643,20 @@ func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Bin
 		}
 	})
 	if err != nil {
-		_ = writeFrame(session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error()))
+		reason := externalagentprotocol.TerminalReasonFailed
+		output := err.Error()
+		if errors.Is(observeCtx.Err(), context.DeadlineExceeded) {
+			reason = externalagentprotocol.TerminalReasonExpired
+			output = "external agent run deadline exceeded"
+		}
+		if writeErr := writeFrame(session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, reason, output)); writeErr != nil {
+			return
+		}
+		if reason == externalagentprotocol.TerminalReasonExpired {
+			go func() {
+				_ = adapter.CancelRun(nativeRunID)
+			}()
+		}
 		return
 	}
 	status := externalagentprotocol.RunStatusCompleted
@@ -618,16 +669,14 @@ func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Bin
 		status = externalagentprotocol.RunStatusCancelled
 		reason = externalagentprotocol.TerminalReasonCancelled
 	}
-	_ = writeFrame(session.RunTerminalFrame(frame, status, reason, result.Output))
+	if writeErr := writeFrame(session.RunTerminalFrame(frame, status, reason, result.Output)); writeErr != nil {
+		return
+	}
 }
 
 func contextForRunDeadline(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
 	if deadline.IsZero() {
 		return context.WithCancel(parent)
-	}
-	now := time.Now().UTC()
-	if deadline.After(now) && deadline.Before(now.Add(minimumRunDeadline)) {
-		deadline = now.Add(minimumRunDeadline)
 	}
 	return context.WithDeadline(parent, deadline.UTC())
 }
@@ -662,6 +711,9 @@ func (r Runner) activateRunMCPToken(binding config.Binding, frame externalagentp
 	}
 	active.ActiveRunID = strings.TrimSpace(frame.RunID)
 	active.ActiveAssignmentID = strings.TrimSpace(frame.AssignmentID)
+	if frame.RunStart != nil {
+		active.ActiveRunDeadlineAt = frame.RunStart.DeadlineAt.UTC()
+	}
 	active.ActiveRunMCPToken = token
 	active.HasActiveRunMCPToken = true
 	return writable.SaveBinding(active)
@@ -698,6 +750,7 @@ func (r Runner) clearRunMCPToken(binding config.Binding, runID string) error {
 	latest.ActiveRunID = ""
 	latest.ActiveAssignmentID = ""
 	latest.ActiveNativeRunID = ""
+	latest.ActiveRunDeadlineAt = time.Time{}
 	latest.ActiveRunMCPToken = ""
 	latest.HasActiveRunMCPToken = false
 	return writable.SaveBinding(latest)

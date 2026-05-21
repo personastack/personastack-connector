@@ -26,6 +26,8 @@ const hermesRequiredRunStatusFeature = "run_status"
 const hermesDegradedRunEventsSSEFeature = "run_events_sse"
 const hermesDegradedRunStopFeature = "run_stop"
 
+var errHermesRunEventsUnavailable = errors.New("Hermes run events unavailable")
+
 type HermesAdapter struct {
 	BaseURL string
 	APIKey  string
@@ -170,7 +172,9 @@ func (adapter HermesAdapter) StreamOrPollRun(ctx context.Context, nativeRunID st
 		return handle(event)
 	}
 	if result, terminal, err := adapter.streamRunEvents(ctx, trimmedRunID, observer); err != nil {
-		return RunResult{}, err
+		if !errors.Is(err, errHermesRunEventsUnavailable) {
+			return RunResult{}, err
+		}
 	} else if terminal {
 		return result, nil
 	}
@@ -281,13 +285,16 @@ func (adapter HermesAdapter) streamRunEvents(ctx context.Context, nativeRunID st
 	if adapter.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
 	}
-	resp, err := adapter.client().Do(req)
+	resp, err := adapter.streamClient().Do(req)
 	if err != nil {
 		return RunResult{}, false, nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNotImplemented || resp.StatusCode == http.StatusMethodNotAllowed {
 		return RunResult{}, false, nil
+	}
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return RunResult{}, false, errHermesRunEventsUnavailable
 	}
 	if resp.StatusCode >= 300 {
 		return RunResult{}, false, fmt.Errorf("Hermes run events status %d", resp.StatusCode)
@@ -434,7 +441,7 @@ func readHermesRunEvents(body io.Reader, handle RunEventHandler) (RunResult, boo
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return RunResult{}, false, fmt.Errorf("read Hermes run events: %w", err)
+		return RunResult{}, false, fmt.Errorf("%w: %v", errHermesRunEventsUnavailable, err)
 	}
 	if result, terminal, event, hasEvent := hermesRunEventResult(strings.Join(data, "\n")); hasEvent {
 		if !started {
@@ -731,6 +738,13 @@ func (adapter HermesAdapter) client() *http.Client {
 	client := defaultHTTPClient()
 	client.CheckRedirect = checkRedirect
 	return client
+}
+
+func (adapter HermesAdapter) streamClient() *http.Client {
+	client := adapter.client()
+	copied := *client
+	copied.Timeout = 0
+	return &copied
 }
 
 func (adapter HermesAdapter) validateLoopbackBaseURL() error {

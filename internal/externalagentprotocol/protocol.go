@@ -103,6 +103,7 @@ const (
 	FrameTypeRunCompleted       FrameType = "run.completed"
 	FrameTypeRunFailed          FrameType = "run.failed"
 	FrameTypeRunCancelled       FrameType = "run.cancelled"
+	FrameTypeRunTerminalAck     FrameType = "run.terminal_ack"
 	FrameTypeRunCancel          FrameType = "run.cancel"
 	FrameTypeConfigRefresh      FrameType = "config.refresh"
 	FrameTypeTokenRevoked       FrameType = "token.revoked"
@@ -234,6 +235,7 @@ type Frame struct {
 	RunOutputDelta    *RunOutputDeltaPayload    `json:"run_output_delta,omitempty"`
 	RunToolEvent      *RunToolEventPayload      `json:"run_tool_event,omitempty"`
 	RunTerminal       *RunTerminalPayload       `json:"run_terminal,omitempty"`
+	RunTerminalAck    *RunTerminalAckPayload    `json:"run_terminal_ack,omitempty"`
 	RunCancel         *RunCancelPayload         `json:"run_cancel,omitempty"`
 	ConfigRefresh     *ConfigRefreshPayload     `json:"config_refresh,omitempty"`
 	TokenRevoked      *TokenRevokedPayload      `json:"token_revoked,omitempty"`
@@ -370,6 +372,10 @@ type RunTerminalPayload struct {
 	ErrorMessage string         `json:"error_message,omitempty"`
 	NativeRunID  string         `json:"native_run_id,omitempty"`
 	CompletedAt  time.Time      `json:"completed_at"`
+}
+
+type RunTerminalAckPayload struct {
+	AcknowledgedAt time.Time `json:"acknowledged_at"`
 }
 
 type RunCancelPayload struct {
