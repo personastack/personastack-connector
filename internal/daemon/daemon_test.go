@@ -158,6 +158,7 @@ func (failingCapabilityAdapter) DescribeNativeCapabilities(context.Context, stri
 }
 
 func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
+	keyring.MockInit()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
@@ -501,7 +502,6 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 				MCPURL:                 mcpServer.URL,
 				NativeMCPServerName:    "personastack-conn-1",
 				NativeMCPToolNamespace: "personastack",
-				RunScopedMCPToken:      "run-token-1",
 				DeadlineAt:             time.Now().UTC().Add(time.Minute),
 			},
 		}
@@ -612,7 +612,7 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 		t.Fatal("timed out waiting for runner shutdown")
 	}
 	stored, ok := store.Binding("conn-1")
-	if !ok || stored.ActiveRunID != "" || stored.ActiveNativeRunID != "" || stored.ActiveRunMCPToken != "" {
+	if !ok || stored.ActiveRunID != "" || stored.ActiveNativeRunID != "" {
 		t.Fatalf("active run was not cleared after terminal ack: %+v", stored)
 	}
 }
@@ -863,7 +863,6 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 			SentAt:       time.Now().UTC(),
 			RunStart: &externalagentprotocol.RunStartPayload{
 				FullyComposedPrompt: "prompt",
-				RunScopedMCPToken:   "run-token",
 			},
 		})
 		for {
@@ -906,7 +905,6 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 		RuntimeKind:         runtime.AdapterKindHermes,
 		ActiveRunID:         "run-1",
 		ActiveAssignmentID:  "assignment-1",
-		ActiveRunMCPToken:   "run-token",
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
 	session, err := bridge.NewSession(binding, bridge.Credential{
@@ -943,7 +941,7 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 		t.Fatal("timed out waiting for runner shutdown")
 	}
 	cleared, ok := store.Binding("conn-1")
-	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveRunMCPToken != "" {
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" {
 		t.Fatalf("active run not cleared after terminal ack: %+v", cleared)
 	}
 }
@@ -1153,7 +1151,6 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 			AssignmentID: "assignment-1",
 			RunStart: &externalagentprotocol.RunStartPayload{
 				FullyComposedPrompt:    "prompt",
-				RunScopedMCPToken:      "run-token",
 				NativeMCPServerName:    "personastack-conn-1",
 				NativeMCPToolNamespace: "personastack",
 				Metadata:               map[string]string{"source": "test"},
@@ -1297,6 +1294,10 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 		BridgeCredentialID:   "cred-1",
 		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
 		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
+		NativeMCPServer:      "personastack-conn-1",
+		PersonaMCPURL:        "https://mcp.personastack.ai/mcp",
+		PersonaMCPToken:      "stable-token",
+		HasPersonaMCPToken:   true,
 		RuntimeKind:          runtime.AdapterKindHermes,
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
@@ -1338,7 +1339,7 @@ func TestCanStartRunWithReadiness(t *testing.T) {
 	}
 }
 
-func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
+func TestRunLifecycleUpdatesBinding(t *testing.T) {
 	binding := config.Binding{ConnectionID: "conn-1", PersonaID: "persona-1", PersonaMCPToken: "stable-token"}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
 	runner := Runner{Store: &store}
@@ -1346,16 +1347,15 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 		RunID:        "run-1",
 		AssignmentID: "assignment-1",
 		RunStart: &externalagentprotocol.RunStartPayload{
-			RunScopedMCPToken: "run-token",
-			DeadlineAt:        time.Now().UTC().Add(time.Minute),
+			DeadlineAt: time.Now().UTC().Add(time.Minute),
 		},
 	}
-	if err := runner.activateRunMCPToken(binding, frame); err != nil {
-		t.Fatalf("activate run token: %v", err)
+	if err := runner.activateRun(binding, frame); err != nil {
+		t.Fatalf("activate run: %v", err)
 	}
 	active, ok := store.Binding("conn-1")
-	if !ok || active.ActiveRunID != "run-1" || active.ActiveAssignmentID != "assignment-1" || active.ActiveRunMCPToken != "run-token" || active.ActiveRunDeadlineAt.IsZero() || !active.HasActiveRunMCPToken {
-		t.Fatalf("active token not stored: %+v", active)
+	if !ok || active.ActiveRunID != "run-1" || active.ActiveAssignmentID != "assignment-1" || active.ActiveRunDeadlineAt.IsZero() {
+		t.Fatalf("active run not stored: %+v", active)
 	}
 	if err := runner.recordNativeRunID(binding, "run-1", "native-1"); err != nil {
 		t.Fatalf("record native run id: %v", err)
@@ -1371,12 +1371,12 @@ func TestRunMCPTokenLifecycleUpdatesBinding(t *testing.T) {
 	if nativeRunID != "native-1" {
 		t.Fatalf("native run id for cancel = %q", nativeRunID)
 	}
-	if err := runner.clearRunMCPToken(binding, "run-1"); err != nil {
-		t.Fatalf("clear run token: %v", err)
+	if err := runner.clearRunState(binding, "run-1"); err != nil {
+		t.Fatalf("clear run state: %v", err)
 	}
 	cleared, ok := store.Binding("conn-1")
-	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveNativeRunID != "" || !cleared.ActiveRunDeadlineAt.IsZero() || cleared.ActiveRunMCPToken != "" || cleared.HasActiveRunMCPToken {
-		t.Fatalf("active token not cleared: %+v", cleared)
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveNativeRunID != "" || !cleared.ActiveRunDeadlineAt.IsZero() {
+		t.Fatalf("active run not cleared: %+v", cleared)
 	}
 }
 
@@ -1393,7 +1393,7 @@ func TestActiveNativeRunIDForRunStartDeduplicatesRedelivery(t *testing.T) {
 	frame := externalagentprotocol.Frame{
 		RunID:        "run-1",
 		AssignmentID: "assignment-1",
-		RunStart:     &externalagentprotocol.RunStartPayload{RunScopedMCPToken: "run-token"},
+		RunStart:     &externalagentprotocol.RunStartPayload{},
 	}
 
 	nativeRunID, ok := runner.activeNativeRunIDForRunStart(binding, frame)
@@ -1571,7 +1571,6 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 			SentAt:       time.Now().UTC(),
 			RunStart: &externalagentprotocol.RunStartPayload{
 				FullyComposedPrompt: "prompt",
-				RunScopedMCPToken:   "run-token-1",
 			},
 		})
 		runReplay <- []externalagentprotocol.Frame{readNonHeartbeat()}

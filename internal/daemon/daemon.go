@@ -194,7 +194,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		runStarted[runID] = true
 		return true
 	}
-	heartbeat := session.HeartbeatFrame(detection.State, lastSessionWakeProbeAt())
+	heartbeat := session.HeartbeatFrameWithDetection(detection, lastSessionWakeProbeAt())
 	if err := writeFrame(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
@@ -218,7 +218,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			case <-ticker.C:
 				_ = r.recordHeartbeat(binding.ConnectionID, r.now())
 				readiness := r.bindingReadiness(adapter, binding)
-				_ = writeFrame(session.HeartbeatFrame(readiness.State, lastSessionWakeProbeAt()))
+				_ = writeFrame(session.HeartbeatFrameWithDetection(readiness, lastSessionWakeProbeAt()))
 				_ = r.writeCapabilitiesFrame(ctx, session, adapter, binding, readiness, writeFrame)
 			}
 		}
@@ -280,8 +280,8 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := writeFrame(accepted); err != nil {
 				return fmt.Errorf("write wake probe ack: %w", err)
 			}
-			state := r.bindingReadiness(adapter, binding).State
-			if err := writeFrame(session.HeartbeatFrame(state, lastSessionWakeProbeAt())); err != nil {
+			wakeReadiness := r.bindingReadiness(adapter, binding)
+			if err := writeFrame(session.HeartbeatFrameWithDetection(wakeReadiness, lastSessionWakeProbeAt())); err != nil {
 				return fmt.Errorf("write wake probe heartbeat: %w", err)
 			}
 		case externalagentprotocol.FrameTypeConfigRefresh:
@@ -295,7 +295,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.RunTerminalAck == nil {
 				continue
 			}
-			if err := r.clearRunMCPToken(binding, frame.RunID); err != nil {
+			if err := r.clearRunState(binding, frame.RunID); err != nil {
 				return fmt.Errorf("clear acknowledged run state: %w", err)
 			}
 		case externalagentprotocol.FrameTypeRunStart:
@@ -346,11 +346,11 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
-			if err := r.activateRunMCPToken(binding, frame); err != nil {
+			if err := r.activateRun(binding, frame); err != nil {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
-					return fmt.Errorf("write run mcp token failure: %w", writeErr)
+					return fmt.Errorf("write run activation failure: %w", writeErr)
 				}
 				continue
 			}
@@ -472,7 +472,11 @@ func (r Runner) refreshMCPConfig(binding config.Binding) error {
 	if !ok {
 		return nil
 	}
-	_, err := (mcp.Installer{Store: r.Store}).InstallBinding(latest)
+	transport := mcp.MCPProxyTransportAuto
+	if strings.TrimSpace(latest.LocalMCPProxyURL) != "" || strings.TrimSpace(latest.LocalMCPProxyToken) != "" {
+		transport = mcp.MCPProxyTransportLoopbackHTTP
+	}
+	_, err := (mcp.Installer{Store: r.Store, Transport: transport}).InstallBinding(latest)
 	return err
 }
 
@@ -693,14 +697,7 @@ func (r Runner) revokeBinding(binding config.Binding, adapter runtime.Adapter, r
 	return deleting.DeleteBinding(binding.ConnectionID)
 }
 
-func (r Runner) activateRunMCPToken(binding config.Binding, frame externalagentprotocol.Frame) error {
-	token := ""
-	if frame.RunStart != nil {
-		token = strings.TrimSpace(frame.RunStart.RunScopedMCPToken)
-	}
-	if token == "" {
-		return fmt.Errorf("run scoped mcp token required")
-	}
+func (r Runner) activateRun(binding config.Binding, frame externalagentprotocol.Frame) error {
 	writable, ok := r.Store.(config.WritableStore)
 	if !ok {
 		return fmt.Errorf("writable connector store required")
@@ -714,8 +711,6 @@ func (r Runner) activateRunMCPToken(binding config.Binding, frame externalagentp
 	if frame.RunStart != nil {
 		active.ActiveRunDeadlineAt = frame.RunStart.DeadlineAt.UTC()
 	}
-	active.ActiveRunMCPToken = token
-	active.HasActiveRunMCPToken = true
 	return writable.SaveBinding(active)
 }
 
@@ -735,7 +730,7 @@ func (r Runner) recordNativeRunID(binding config.Binding, runID string, nativeRu
 	return writable.SaveBinding(latest)
 }
 
-func (r Runner) clearRunMCPToken(binding config.Binding, runID string) error {
+func (r Runner) clearRunState(binding config.Binding, runID string) error {
 	writable, ok := r.Store.(config.WritableStore)
 	if !ok {
 		return nil
@@ -751,8 +746,6 @@ func (r Runner) clearRunMCPToken(binding config.Binding, runID string) error {
 	latest.ActiveAssignmentID = ""
 	latest.ActiveNativeRunID = ""
 	latest.ActiveRunDeadlineAt = time.Time{}
-	latest.ActiveRunMCPToken = ""
-	latest.HasActiveRunMCPToken = false
 	return writable.SaveBinding(latest)
 }
 
@@ -823,6 +816,7 @@ func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding
 	verify := mcp.VerifyBindingWithLive(verifyCtx, homeDir, binding, nil)
 	detection.State = verify.State
 	detection.Note = verify.Note
+	detection.DiagnosticCode = verify.DiagnosticCode
 	if verify.State != runtime.AdapterStateMCPVerified {
 		return detection
 	}

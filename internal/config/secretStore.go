@@ -62,16 +62,7 @@ func storeBindingSecrets(binding Binding) (Binding, error) {
 		binding.OpenClawDeviceToken = ""
 		binding.HasOpenClawDevice = true
 	}
-	if strings.TrimSpace(binding.ActiveRunMCPToken) != "" {
-		if err := storeSecret(bindingSecretKey(connectionID, "active-run-mcp-token"), binding.ActiveRunMCPToken); err != nil {
-			return Binding{}, fmt.Errorf("store active run mcp token: %w", err)
-		}
-		binding.ActiveRunMCPToken = ""
-		binding.HasActiveRunMCPToken = true
-	}
-	if !binding.HasActiveRunMCPToken {
-		_ = deleteSecret(bindingSecretKey(connectionID, "active-run-mcp-token"))
-	}
+	_ = deleteSecret(bindingSecretKey(connectionID, "active-run-mcp-token"))
 	return binding, nil
 }
 
@@ -97,9 +88,6 @@ func loadBindingSecrets(binding Binding) Binding {
 	}
 	if binding.HasOpenClawDevice && strings.TrimSpace(binding.OpenClawDeviceToken) == "" {
 		binding.OpenClawDeviceToken = loadSecret(bindingSecretKey(connectionID, "openclaw-device-token"))
-	}
-	if binding.HasActiveRunMCPToken && strings.TrimSpace(binding.ActiveRunMCPToken) == "" {
-		binding.ActiveRunMCPToken = loadSecret(bindingSecretKey(connectionID, "active-run-mcp-token"))
 	}
 	return binding
 }

@@ -120,13 +120,12 @@ func TestRunStatusIncludesActiveAssignmentState(t *testing.T) {
 		store: config.NewMemoryStore(config.State{
 			Bindings: []config.Binding{
 				{
-					ConnectionID:         "connection-1",
-					PersonaID:            "persona-1",
-					RuntimeKind:          runtime.AdapterKindAuto,
-					ActiveRunID:          "run-1",
-					ActiveAssignmentID:   "assignment-1",
-					ActiveNativeRunID:    "native-run-1",
-					HasActiveRunMCPToken: true,
+					ConnectionID:       "connection-1",
+					PersonaID:          "persona-1",
+					RuntimeKind:        runtime.AdapterKindAuto,
+					ActiveRunID:        "run-1",
+					ActiveAssignmentID: "assignment-1",
+					ActiveNativeRunID:  "native-run-1",
 				},
 			},
 		}),
@@ -136,7 +135,7 @@ func TestRunStatusIncludesActiveAssignmentState(t *testing.T) {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 	output := stdout.String()
-	for _, want := range []string{"active_run=run-1", "active_assignment=assignment-1", "active_native_run=native-run-1", "active_run_mcp=true"} {
+	for _, want := range []string{"active_run=run-1", "active_assignment=assignment-1", "active_native_run=native-run-1"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("status output missing %q: %s", want, output)
 		}
@@ -689,6 +688,7 @@ func TestRuntimeDetectionReportSummariesChoices(t *testing.T) {
 func TestRunRuntimeHermesConfigure(t *testing.T) {
 	keyring.MockInit()
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -698,9 +698,11 @@ func TestRunRuntimeHermesConfigure(t *testing.T) {
 		store: config.NewMemoryStore(config.State{
 			Bindings: []config.Binding{
 				{
-					ConnectionID: "connection-1",
-					PersonaID:    "persona-1",
-					RuntimeKind:  runtime.AdapterKindHermes,
+					ConnectionID:    "connection-1",
+					PersonaID:       "persona-1",
+					RuntimeKind:     runtime.AdapterKindHermes,
+					PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
+					PersonaMCPToken: "mcp-token-1",
 				},
 			},
 		}),
@@ -734,9 +736,11 @@ func TestRunRuntimeOpenClawConfigure(t *testing.T) {
 		store: config.NewMemoryStore(config.State{
 			Bindings: []config.Binding{
 				{
-					ConnectionID: "connection-1",
-					PersonaID:    "persona-1",
-					RuntimeKind:  runtime.AdapterKindOpenClaw,
+					ConnectionID:    "connection-1",
+					PersonaID:       "persona-1",
+					RuntimeKind:     runtime.AdapterKindOpenClaw,
+					PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
+					PersonaMCPToken: "mcp-token-1",
 				},
 			},
 		}),

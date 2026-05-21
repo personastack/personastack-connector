@@ -80,7 +80,6 @@ func VerifyLoopbackHTTPProxy(ctx context.Context, binding config.Binding, client
 	localBinding := binding
 	localBinding.PersonaMCPURL = localURL
 	localBinding.PersonaMCPToken = token
-	localBinding.ActiveRunMCPToken = ""
 	return VerifyBindingLive(ctx, localBinding, client)
 }
 

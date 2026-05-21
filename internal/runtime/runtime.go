@@ -86,9 +86,10 @@ func (state AdapterState) String() string {
 }
 
 type Detection struct {
-	Kind  AdapterKind
-	State AdapterState
-	Note  string
+	Kind           AdapterKind
+	State          AdapterState
+	Note           string
+	DiagnosticCode string
 }
 
 type Adapter interface {

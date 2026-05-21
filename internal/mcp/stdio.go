@@ -101,9 +101,6 @@ func (proxy StdioProxy) Serve(ctx context.Context, bindingID config.ConnectionID
 }
 
 func mcpTokenForBinding(binding config.Binding) string {
-	if token := strings.TrimSpace(binding.ActiveRunMCPToken); token != "" {
-		return token
-	}
 	return strings.TrimSpace(binding.PersonaMCPToken)
 }
 

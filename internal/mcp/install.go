@@ -32,12 +32,13 @@ type InstallResult struct {
 }
 
 type VerifyResult struct {
-	ConnectionID config.ConnectionID
-	Runtime      runtime.AdapterKind
-	Path         string
-	ServerName   string
-	State        runtime.AdapterState
-	Note         string
+	ConnectionID   config.ConnectionID
+	Runtime        runtime.AdapterKind
+	Path           string
+	ServerName     string
+	State          runtime.AdapterState
+	Note           string
+	DiagnosticCode string
 }
 
 type Installer struct {
@@ -96,6 +97,9 @@ func (installer Installer) InstallBinding(binding config.Binding) (InstallResult
 func (installer Installer) installBinding(homeDir string, executablePath string, binding config.Binding) (InstallResult, error) {
 	server := stdioServer(binding, executablePath)
 	transport := installer.Transport
+	if transport == MCPProxyTransportAuto {
+		return installer.installBindingNativeHTTP(homeDir, binding, server.Name)
+	}
 	if transport == MCPProxyTransportLoopbackHTTP {
 		return installer.installBindingLoopbackHTTP(homeDir, binding, server)
 	}
@@ -135,6 +139,53 @@ func (installer Installer) installBinding(homeDir string, executablePath string,
 			return InstallResult{}, err
 		}
 		return installer.installBindingLoopbackHTTP(homeDir, binding, server)
+	default:
+		return InstallResult{}, fmt.Errorf("unsupported runtime for mcp install: %s", binding.RuntimeKind)
+	}
+}
+
+func (installer Installer) installBindingNativeHTTP(homeDir string, binding config.Binding, serverName string) (InstallResult, error) {
+	if strings.TrimSpace(binding.PersonaMCPURL) == "" || strings.TrimSpace(binding.PersonaMCPToken) == "" {
+		return InstallResult{}, fmt.Errorf("PersonaStack MCP credential missing")
+	}
+	server := nativeHTTPMCPServer{
+		Name:  serverName,
+		URL:   strings.TrimSpace(binding.PersonaMCPURL),
+		Token: strings.TrimSpace(binding.PersonaMCPToken),
+	}
+	switch binding.RuntimeKind {
+	case runtime.AdapterKindHermes:
+		setupReport, err := hermessetup.EnsureAPISetup(homeDir)
+		if err != nil {
+			return InstallResult{}, err
+		}
+		path := filepath.Join(homeDir, ".hermes", "config.yaml")
+		if err := upsertHermesNativeHTTPServer(path, server, binding); err != nil {
+			return InstallResult{}, err
+		}
+		result := InstallResult{
+			ConnectionID: binding.ConnectionID,
+			Runtime:      binding.RuntimeKind,
+			Path:         path,
+			ServerName:   server.Name,
+			Note:         setupReport.Note,
+		}
+		if started, err := hermessetup.TryStartGateway(homeDir); err != nil {
+			return InstallResult{}, err
+		} else if started {
+			result.Note = appendNote(result.Note, "Hermes gateway start attempted")
+		}
+		diagnostic := hermessetup.Diagnose(homeDir)
+		if strings.TrimSpace(diagnostic.Note) != "" {
+			result.Note = appendNote(result.Note, diagnostic.Note)
+		}
+		return result, nil
+	case runtime.AdapterKindOpenClaw:
+		path := openClawConfigPath(homeDir)
+		if err := upsertOpenClawNativeHTTPServer(path, server, binding); err != nil {
+			return InstallResult{}, err
+		}
+		return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name}, nil
 	default:
 		return InstallResult{}, fmt.Errorf("unsupported runtime for mcp install: %s", binding.RuntimeKind)
 	}
@@ -230,18 +281,20 @@ func VerifyBinding(homeDir string, binding config.Binding) VerifyResult {
 	}
 	if strings.TrimSpace(binding.PersonaMCPURL) == "" || strings.TrimSpace(binding.PersonaMCPToken) == "" {
 		result.Note = "PersonaStack MCP credential missing"
+		result.DiagnosticCode = "mcp_token_missing"
 		return result
 	}
 	switch binding.RuntimeKind {
 	case runtime.AdapterKindHermes:
 		result.Path = filepath.Join(homeDir, ".hermes", "config.yaml")
-		result.State, result.Note = verifyHermesServer(result.Path, serverName, binding.ConnectionID)
+		result.State, result.Note = verifyHermesServer(result.Path, serverName, binding)
 	case runtime.AdapterKindOpenClaw:
 		result.Path = openClawConfigPath(homeDir)
-		result.State, result.Note = verifyOpenClawServer(result.Path, serverName, binding.ConnectionID)
+		result.State, result.Note = verifyOpenClawServer(result.Path, serverName, binding)
 	default:
 		result.Note = "unsupported runtime for mcp verification"
 	}
+	result.DiagnosticCode = diagnosticCodeForMCPVerify(result.State, result.Note)
 	return result
 }
 
@@ -277,15 +330,17 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 	}
 	if !live.OK {
 		result.Note = live.Note
+		result.DiagnosticCode = live.DiagnosticCode
 		return result
 	}
 	result.State = runtime.AdapterStateMCPVerified
 	result.Note = result.Note + "; " + live.Note + "; native runtime restart may be required"
+	result.DiagnosticCode = ""
 	return result
 }
 
 func isLoopbackHTTPConfig(note string) bool {
-	return strings.Contains(strings.ToLower(note), "streamable-http config present")
+	return strings.Contains(strings.ToLower(note), "credential warning")
 }
 
 func VerifyBindingInUserHome(binding config.Binding) VerifyResult {
@@ -311,6 +366,12 @@ type loopbackHTTPMCPServer struct {
 	URL                 string
 	Token               string
 	EnvironmentVariable string
+}
+
+type nativeHTTPMCPServer struct {
+	Name  string
+	URL   string
+	Token string
 }
 
 func stdioServer(binding config.Binding, executablePath string) stdioServerConfig {
@@ -486,6 +547,67 @@ func upsertOpenClawLoopbackHTTPServer(path string, server stdioServerConfig, loo
 	return writeOwnerOnlyAtomic(path, output)
 }
 
+func upsertHermesNativeHTTPServer(path string, server nativeHTTPMCPServer, binding config.Binding) error {
+	root := map[string]any{}
+	raw, err := os.ReadFile(path)
+	if err == nil && len(raw) > 0 {
+		if err := yaml.Unmarshal(raw, &root); err != nil {
+			return fmt.Errorf("parse Hermes config: %w", err)
+		}
+	}
+	servers := ensureMap(root, "mcp_servers")
+	if existing, ok := servers[server.Name].(map[string]any); ok {
+		if err := requireRecognizedServer(existing, binding); err != nil {
+			return err
+		}
+	}
+	servers[server.Name] = nativeHTTPServerMap(server)
+	removeLegacyNestedServer(root, server.Name)
+	output, err := yaml.Marshal(root)
+	if err != nil {
+		return fmt.Errorf("encode Hermes config: %w", err)
+	}
+	return writeOwnerOnlyAtomic(path, output)
+}
+
+func upsertOpenClawNativeHTTPServer(path string, server nativeHTTPMCPServer, binding config.Binding) error {
+	root := map[string]any{}
+	raw, err := os.ReadFile(path)
+	if err == nil && len(raw) > 0 {
+		if err := json.Unmarshal(raw, &root); err != nil {
+			return fmt.Errorf("parse OpenClaw config: %w", err)
+		}
+	}
+	mcpNode := ensureMap(root, "mcp")
+	servers := ensureMap(mcpNode, "servers")
+	if existing, ok := servers[server.Name].(map[string]any); ok {
+		if err := requireRecognizedServer(existing, binding); err != nil {
+			return err
+		}
+	}
+	servers[server.Name] = nativeHTTPServerMap(server)
+	output, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode OpenClaw config: %w", err)
+	}
+	output = append(output, '\n')
+	return writeOwnerOnlyAtomic(path, output)
+}
+
+func nativeHTTPServerMap(server nativeHTTPMCPServer) map[string]any {
+	return map[string]any{
+		"transport":           "streamable-http",
+		"url":                 server.URL,
+		"connectionTimeoutMs": 10000,
+		"headers": map[string]any{
+			"Authorization": "Bearer " + server.Token,
+		},
+		"timeout":         120,
+		"connect_timeout": 10,
+		"enabled":         true,
+	}
+}
+
 func upsertHermesServer(path string, server stdioServerConfig) error {
 	root := map[string]any{}
 	raw, err := os.ReadFile(path)
@@ -510,7 +632,7 @@ func upsertHermesServer(path string, server stdioServerConfig) error {
 	return writeOwnerOnlyAtomic(path, output)
 }
 
-func verifyHermesServer(path string, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
+func verifyHermesServer(path string, serverName string, binding config.Binding) (runtime.AdapterState, string) {
 	root := map[string]any{}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -523,7 +645,7 @@ func verifyHermesServer(path string, serverName string, bindingID config.Connect
 	if !ok {
 		return runtime.AdapterStateMCPConfigMissing, "mcp_servers section missing"
 	}
-	return verifyNamedServerMap(servers, serverName, bindingID)
+	return verifyNamedServerMap(servers, serverName, binding)
 }
 
 func upsertOpenClawServer(path string, server stdioServerConfig) error {
@@ -548,7 +670,7 @@ func upsertOpenClawServer(path string, server stdioServerConfig) error {
 	return writeOwnerOnlyAtomic(path, output)
 }
 
-func verifyOpenClawServer(path string, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
+func verifyOpenClawServer(path string, serverName string, binding config.Binding) (runtime.AdapterState, string) {
 	root := map[string]any{}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -557,10 +679,10 @@ func verifyOpenClawServer(path string, serverName string, bindingID config.Conne
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return runtime.AdapterStateMCPConfigMissing, "parse OpenClaw config: " + err.Error()
 	}
-	return verifyServerMap(root, serverName, bindingID)
+	return verifyServerMap(root, serverName, binding)
 }
 
-func verifyServerMap(root map[string]any, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
+func verifyServerMap(root map[string]any, serverName string, binding config.Binding) (runtime.AdapterState, string) {
 	mcpNode, ok := root["mcp"].(map[string]any)
 	if !ok {
 		return runtime.AdapterStateMCPConfigMissing, "mcp section missing"
@@ -569,28 +691,28 @@ func verifyServerMap(root map[string]any, serverName string, bindingID config.Co
 	if !ok {
 		return runtime.AdapterStateMCPConfigMissing, "mcp servers section missing"
 	}
-	return verifyNamedServerMap(servers, serverName, bindingID)
+	return verifyNamedServerMap(servers, serverName, binding)
 }
 
-func verifyNamedServerMap(servers map[string]any, serverName string, bindingID config.ConnectionID) (runtime.AdapterState, string) {
+func verifyNamedServerMap(servers map[string]any, serverName string, binding config.Binding) (runtime.AdapterState, string) {
 	server, ok := servers[serverName].(map[string]any)
 	if !ok {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP server missing"
 	}
 	if transport := normalizedMCPTransport(server); transport == "streamable-http" || transport == "sse" {
-		return verifyStreamableHTTPServer(server, bindingID)
+		return verifyStreamableHTTPServer(server, binding)
 	}
 	command, ok := server["command"].(string)
 	if !ok || strings.TrimSpace(command) == "" {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP command missing"
 	}
-	if !serverArgsMatchBinding(server["args"], bindingID) {
-		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP binding argument missing"
+	if !serverArgsMatchBinding(server["args"], binding.ConnectionID) {
+		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP server config conflict"
 	}
 	return runtime.AdapterStateMCPRestartRequired, "PersonaStack MCP config present; live verification required"
 }
 
-func verifyStreamableHTTPServer(server map[string]any, bindingID config.ConnectionID) (runtime.AdapterState, string) {
+func verifyStreamableHTTPServer(server map[string]any, binding config.Binding) (runtime.AdapterState, string) {
 	rawURL, ok := server["url"].(string)
 	if !ok || strings.TrimSpace(rawURL) == "" {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP url missing"
@@ -599,10 +721,17 @@ func verifyStreamableHTTPServer(server map[string]any, bindingID config.Connecti
 	if err != nil {
 		return runtime.AdapterStateMCPConfigMissing, "parse PersonaStack MCP url: " + err.Error()
 	}
-	if !loopbackMCPURL(parsed, bindingID) {
-		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP url must be loopback"
+	loopback := loopbackMCPURL(parsed, binding.ConnectionID)
+	if !directMCPURL(parsed, binding) && !loopback {
+		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP url does not match binding"
 	}
-	return runtime.AdapterStateMCPRestartRequired, appendNote("PersonaStack MCP streamable-http config present; live verification required", credentialStorageWarning)
+	if !hasBearerAuthorizationHeader(server) {
+		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP Authorization header missing"
+	}
+	if loopback {
+		return runtime.AdapterStateMCPRestartRequired, appendNote("PersonaStack MCP streamable-http config present; live verification required", credentialStorageWarning)
+	}
+	return runtime.AdapterStateMCPRestartRequired, "PersonaStack MCP streamable-http config present; live verification required"
 }
 
 func normalizedMCPTransport(server map[string]any) string {
@@ -622,6 +751,62 @@ func normalizedMCPTransport(server map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func requireRecognizedServer(server map[string]any, binding config.Binding) error {
+	transport := normalizedMCPTransport(server)
+	if transport == "streamable-http" || transport == "sse" {
+		rawURL, _ := server["url"].(string)
+		parsed, err := url.Parse(strings.TrimSpace(rawURL))
+		if err == nil && (directMCPURL(parsed, binding) || loopbackMCPURL(parsed, binding.ConnectionID)) {
+			return nil
+		}
+	}
+	if serverArgsMatchBinding(server["args"], binding.ConnectionID) {
+		return nil
+	}
+	return fmt.Errorf("native MCP server %q already exists with an unrecognized config", strings.TrimSpace(binding.NativeMCPServer))
+}
+
+func directMCPURL(parsed *url.URL, binding config.Binding) bool {
+	if parsed == nil {
+		return false
+	}
+	expected, err := url.Parse(strings.TrimSpace(binding.PersonaMCPURL))
+	if err != nil || expected == nil {
+		return false
+	}
+	return parsed.Scheme == expected.Scheme && parsed.Host == expected.Host && parsed.EscapedPath() == expected.EscapedPath()
+}
+
+func hasBearerAuthorizationHeader(server map[string]any) bool {
+	headers, ok := server["headers"].(map[string]any)
+	if !ok {
+		return false
+	}
+	raw, ok := headers["Authorization"].(string)
+	if !ok {
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "bearer ")
+}
+
+func diagnosticCodeForMCPVerify(state runtime.AdapterState, note string) string {
+	lowerNote := strings.ToLower(note)
+	switch {
+	case strings.Contains(lowerNote, "parse "):
+		return "mcp_config_parse_error"
+	case strings.Contains(lowerNote, "unrecognized config"), strings.Contains(lowerNote, "config conflict"):
+		return "mcp_config_conflict"
+	case strings.Contains(lowerNote, "credential missing"), strings.Contains(lowerNote, "authorization header missing"):
+		return "mcp_token_missing"
+	case state == runtime.AdapterStateMCPRestartRequired:
+		return "mcp_restart_required"
+	case state == runtime.AdapterStateMCPConfigMissing:
+		return "mcp_config_missing"
+	default:
+		return state.String()
+	}
 }
 
 func loopbackMCPURL(parsed *url.URL, bindingID config.ConnectionID) bool {

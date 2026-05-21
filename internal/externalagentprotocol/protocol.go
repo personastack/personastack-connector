@@ -334,7 +334,6 @@ type RunStartPayload struct {
 	MCPURL                 string            `json:"mcp_url"`
 	NativeMCPServerName    string            `json:"native_mcp_server_name"`
 	NativeMCPToolNamespace string            `json:"native_mcp_tool_namespace"`
-	RunScopedMCPToken      string            `json:"run_scoped_mcp_token,omitempty"`
 	DeadlineAt             time.Time         `json:"deadline_at"`
 	Metadata               map[string]string `json:"metadata,omitempty"`
 }

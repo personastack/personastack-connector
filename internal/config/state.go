@@ -55,7 +55,6 @@ type Binding struct {
 	ActiveAssignmentID      string
 	ActiveNativeRunID       string
 	ActiveRunDeadlineAt     time.Time
-	ActiveRunMCPToken       string
 	LastHeartbeatAt         time.Time
 	LastWakeProbeAt         time.Time
 	LastWakeProbeGeneration int64
@@ -67,7 +66,6 @@ type Binding struct {
 	HasOpenClawDevice       bool
 	HasPersonaMCPToken      bool
 	HasLocalMCPProxyToken   bool
-	HasActiveRunMCPToken    bool
 }
 
 type State struct {

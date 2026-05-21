@@ -19,7 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestInstallerWritesHermesStdioServer(t *testing.T) {
+func TestInstallerWritesHermesNativeHTTPServer(t *testing.T) {
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	homeDir := t.TempDir()
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
@@ -27,6 +27,7 @@ func TestInstallerWritesHermesStdioServer(t *testing.T) {
 		PersonaID:       "persona-1",
 		RuntimeKind:     runtime.AdapterKindHermes,
 		NativeMCPServer: "personastack-conn-1",
+		PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
 		PersonaMCPToken: "secret-mcp-token",
 	}}})
 	results, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll()
@@ -46,18 +47,15 @@ func TestInstallerWritesHermesStdioServer(t *testing.T) {
 	}
 	server := root["mcp_servers"].(map[string]any)["personastack-conn-1"].(map[string]any)
 	shimPath := filepath.Join(homeDir, ".local", "bin", "personastack-connector")
-	if server["command"] != shimPath {
+	if server["url"] != "https://mcp.personastack.ai/mcp" || server["transport"] != "streamable-http" {
 		t.Fatalf("unexpected server: %+v", server)
 	}
-	args, ok := server["args"].([]any)
-	if !ok || len(args) != 4 || args[0] != "mcp" || args[1] != "stdio" || args[2] != "--binding" || args[3] != "conn-1" {
-		t.Fatalf("unexpected args: %+v", server["args"])
+	headers := server["headers"].(map[string]any)
+	if headers["Authorization"] != "Bearer secret-mcp-token" {
+		t.Fatalf("unexpected headers: %+v", headers)
 	}
-	if server["timeout"] != 120 || server["connect_timeout"] != 60 || server["enabled"] != true {
+	if server["timeout"] != 120 || server["connect_timeout"] != 10 || server["enabled"] != true {
 		t.Fatalf("unexpected Hermes server policy: %+v", server)
-	}
-	if strings.Contains(string(raw), "secret-mcp-token") {
-		t.Fatalf("Hermes config contains MCP bearer token: %s", string(raw))
 	}
 	envRaw, err := os.ReadFile(filepath.Join(homeDir, ".hermes", ".env"))
 	if err != nil {
@@ -84,12 +82,14 @@ func TestInstallerWritesDistinctHermesServersPerBinding(t *testing.T) {
 			ConnectionID:    "conn-1",
 			PersonaID:       "persona-1",
 			RuntimeKind:     runtime.AdapterKindHermes,
+			PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
 			PersonaMCPToken: "token-1",
 		},
 		{
 			ConnectionID:    "conn-2",
 			PersonaID:       "persona-2",
 			RuntimeKind:     runtime.AdapterKindHermes,
+			PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
 			PersonaMCPToken: "token-2",
 		},
 	}})
@@ -126,12 +126,16 @@ func TestInstallerWritesDistinctNativeMCPServersForMultipleBindings(t *testing.T
 			PersonaID:       "persona-1",
 			RuntimeKind:     runtime.AdapterKindHermes,
 			NativeMCPServer: "personastack-conn-1",
+			PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
+			PersonaMCPToken: "secret-mcp-token",
 		},
 		{
 			ConnectionID:    "conn-2",
 			PersonaID:       "persona-2",
 			RuntimeKind:     runtime.AdapterKindOpenClaw,
 			NativeMCPServer: "personastack-conn-2",
+			PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
+			PersonaMCPToken: "secret-mcp-token",
 		},
 	}})
 	results, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll()
@@ -153,8 +157,8 @@ func TestInstallerWritesDistinctNativeMCPServersForMultipleBindings(t *testing.T
 		t.Fatalf("parse Hermes config: %v", err)
 	}
 	hermesServer := hermesRoot["mcp_servers"].(map[string]any)["personastack-conn-1"].(map[string]any)
-	if args, ok := hermesServer["args"].([]any); !ok || len(args) != 4 || args[3] != "conn-1" {
-		t.Fatalf("unexpected Hermes args: %+v", hermesServer["args"])
+	if hermesServer["url"] != "https://mcp.personastack.ai/mcp" {
+		t.Fatalf("unexpected Hermes url: %+v", hermesServer)
 	}
 	openClawRaw, err := os.ReadFile(filepath.Join(homeDir, ".openclaw", "openclaw.json"))
 	if err != nil {
@@ -165,8 +169,8 @@ func TestInstallerWritesDistinctNativeMCPServersForMultipleBindings(t *testing.T
 		t.Fatalf("parse OpenClaw config: %v", err)
 	}
 	openClawServer := openClawRoot["mcp"].(map[string]any)["servers"].(map[string]any)["personastack-conn-2"].(map[string]any)
-	if args, ok := openClawServer["args"].([]any); !ok || len(args) != 4 || args[3] != "conn-2" {
-		t.Fatalf("unexpected OpenClaw args: %+v", openClawServer["args"])
+	if openClawServer["url"] != "https://mcp.personastack.ai/mcp" {
+		t.Fatalf("unexpected OpenClaw url: %+v", openClawServer)
 	}
 }
 
@@ -225,6 +229,7 @@ func TestHermesInstallCreatesBackupAndRemovesLegacyPersonaStackEntry(t *testing.
 		PersonaID:       "persona-1",
 		RuntimeKind:     runtime.AdapterKindHermes,
 		NativeMCPServer: "personastack-conn-1",
+		PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
 		PersonaMCPToken: "secret-mcp-token",
 	}}})
 	if _, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll(); err != nil {
@@ -269,6 +274,7 @@ func TestHermesInstallPreservesOriginalBackupAcrossMultipleBindings(t *testing.T
 			PersonaID:       "persona-1",
 			RuntimeKind:     runtime.AdapterKindHermes,
 			NativeMCPServer: "personastack-conn-1",
+			PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
 			PersonaMCPToken: "secret-mcp-token",
 		},
 		{
@@ -276,6 +282,7 @@ func TestHermesInstallPreservesOriginalBackupAcrossMultipleBindings(t *testing.T
 			PersonaID:       "persona-2",
 			RuntimeKind:     runtime.AdapterKindHermes,
 			NativeMCPServer: "personastack-conn-2",
+			PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
 			PersonaMCPToken: "secret-mcp-token",
 		},
 	}})
@@ -306,6 +313,49 @@ func TestHermesInstallPreservesOriginalBackupAcrossMultipleBindings(t *testing.T
 	}
 }
 
+func TestInstallerRejectsUnrecognizedSameNameServer(t *testing.T) {
+	homeDir := t.TempDir()
+	path := filepath.Join(homeDir, ".hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	raw := []byte("mcp_servers:\n  personastack-conn-1:\n    command: /opt/other\n    args: [serve]\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaID:       "persona-1",
+		RuntimeKind:     runtime.AdapterKindHermes,
+		NativeMCPServer: "personastack-conn-1",
+		PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
+		PersonaMCPToken: "secret-mcp-token",
+	}}})
+	_, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll()
+	if err == nil || !strings.Contains(err.Error(), "unrecognized config") {
+		t.Fatalf("InstallAll() error = %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(after) != string(raw) {
+		t.Fatalf("config changed after conflict:\n%s", string(after))
+	}
+	verified := VerifyBinding(homeDir, config.Binding{
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		RuntimeKind:        runtime.AdapterKindHermes,
+		NativeMCPServer:    "personastack-conn-1",
+		PersonaMCPURL:      "https://mcp.personastack.ai/mcp",
+		PersonaMCPToken:    "secret-mcp-token",
+		HasPersonaMCPToken: true,
+	})
+	if verified.DiagnosticCode != "mcp_config_conflict" {
+		t.Fatalf("DiagnosticCode = %q note=%q", verified.DiagnosticCode, verified.Note)
+	}
+}
+
 func TestInstallerWritesOpenClawStdioServer(t *testing.T) {
 	homeDir := t.TempDir()
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
@@ -315,7 +365,7 @@ func TestInstallerWritesOpenClawStdioServer(t *testing.T) {
 		NativeMCPServer: "personastack-conn-2",
 		PersonaMCPToken: "secret-mcp-token",
 	}}})
-	_, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/opt/personastack-connector", GOOS: "linux"}).InstallAll()
+	_, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/opt/personastack-connector", GOOS: "linux", Transport: MCPProxyTransportStdio}).InstallAll()
 	if err != nil {
 		t.Fatalf("InstallAll() error = %v", err)
 	}
@@ -355,7 +405,7 @@ func TestInstallerFallsBackToHermesLoopbackHTTPWhenStdioConfigIsInvalid(t *testi
 		RuntimeKind:     runtime.AdapterKindHermes,
 		PersonaMCPToken: "secret-mcp-token",
 	}}})
-	results, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll()
+	results, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux", Transport: MCPProxyTransportLoopbackHTTP}).InstallAll()
 	if err != nil {
 		t.Fatalf("InstallAll() error = %v", err)
 	}
@@ -419,7 +469,7 @@ func TestInstallerReusesExistingLoopbackHTTPProxy(t *testing.T) {
 		HasLocalMCPProxyToken: true,
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
-	if _, err := (Installer{Store: &store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll(); err != nil {
+	if _, err := (Installer{Store: &store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux", Transport: MCPProxyTransportLoopbackHTTP}).InstallAll(); err != nil {
 		t.Fatalf("InstallAll() error = %v", err)
 	}
 	stored, ok := store.Binding("conn-2")
@@ -452,7 +502,7 @@ func TestInstallerFallsBackToOpenClawLoopbackHTTPWhenStdioConfigIsInvalid(t *tes
 		RuntimeKind:     runtime.AdapterKindOpenClaw,
 		PersonaMCPToken: "secret-mcp-token",
 	}}})
-	results, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll()
+	results, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux", Transport: MCPProxyTransportLoopbackHTTP}).InstallAll()
 	if err != nil {
 		t.Fatalf("InstallAll() error = %v", err)
 	}
@@ -505,7 +555,7 @@ func TestInstallerUsesOpenClawCLIWhenAvailable(t *testing.T) {
 		NativeMCPServer: "personastack-conn-2",
 		PersonaMCPToken: "secret-mcp-token",
 	}}})
-	results, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/opt/personastack-connector", GOOS: "linux"}).InstallAll()
+	results, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/opt/personastack-connector", GOOS: "linux", Transport: MCPProxyTransportStdio}).InstallAll()
 	if err != nil {
 		t.Fatalf("InstallAll() error = %v", err)
 	}
@@ -546,6 +596,9 @@ func TestVerifyBindingRequiresCredentialAndInstalledServer(t *testing.T) {
 	missing := VerifyBinding(homeDir, binding)
 	if missing.State != runtime.AdapterStateMCPConfigMissing {
 		t.Fatalf("missing.State = %s", missing.State)
+	}
+	if missing.DiagnosticCode != "mcp_config_missing" {
+		t.Fatalf("missing.DiagnosticCode = %q", missing.DiagnosticCode)
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
 	if _, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll(); err != nil {
@@ -759,7 +812,6 @@ func TestLoopbackHTTPProxyUsesLatestBindingFromStore(t *testing.T) {
 	localBinding := latest
 	localBinding.PersonaMCPURL = latest.LocalMCPProxyURL
 	localBinding.PersonaMCPToken = latest.LocalMCPProxyToken
-	localBinding.ActiveRunMCPToken = ""
 	if live := VerifyBindingLive(context.Background(), localBinding, personaMCP.Client()); !live.OK {
 		t.Fatalf("VerifyBindingLive() = %+v", live)
 	}
@@ -1068,7 +1120,7 @@ func TestVerifyBindingRejectsBrokenStdioServerConfig(t *testing.T) {
 						"personastack-conn-1": tt.server,
 					},
 				},
-			}, "personastack-conn-1", "conn-1")
+			}, "personastack-conn-1", config.Binding{ConnectionID: "conn-1"})
 			if state != runtime.AdapterStateMCPConfigMissing {
 				t.Fatalf("state = %s note=%s", state, note)
 			}

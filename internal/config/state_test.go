@@ -74,7 +74,6 @@ func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 		PersonaMCPToken:      "mcp-token",
 		ActiveRunID:          "run-1",
 		ActiveAssignmentID:   "assignment-1",
-		ActiveRunMCPToken:    "run-mcp-token",
 		HasBridgeSecret:      true,
 		HasOpenClawToken:     true,
 		HasOpenClawPassword:  true,
@@ -88,22 +87,20 @@ func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	if strings.Contains(string(raw), "bridge-secret") || strings.Contains(string(raw), "mcp-token") || strings.Contains(string(raw), "run-mcp-token") || strings.Contains(string(raw), "openclaw-token") || strings.Contains(string(raw), "openclaw-password") || strings.Contains(string(raw), "openclaw-device") {
+	if strings.Contains(string(raw), "bridge-secret") || strings.Contains(string(raw), "mcp-token") || strings.Contains(string(raw), "openclaw-token") || strings.Contains(string(raw), "openclaw-password") || strings.Contains(string(raw), "openclaw-device") {
 		t.Fatalf("state file leaked secret: %s", string(raw))
 	}
 	loaded, ok := store.Binding("conn-1")
 	if !ok {
 		t.Fatalf("expected binding")
 	}
-	if loaded.BridgePrivateKey != "bridge-secret" || loaded.PersonaMCPToken != "mcp-token" || loaded.ActiveAssignmentID != "assignment-1" || loaded.ActiveRunMCPToken != "run-mcp-token" || loaded.OpenClawGatewayToken != "openclaw-token" || loaded.OpenClawPassword != "openclaw-password" || loaded.OpenClawDeviceToken != "openclaw-device" {
+	if loaded.BridgePrivateKey != "bridge-secret" || loaded.PersonaMCPToken != "mcp-token" || loaded.ActiveAssignmentID != "assignment-1" || loaded.OpenClawGatewayToken != "openclaw-token" || loaded.OpenClawPassword != "openclaw-password" || loaded.OpenClawDeviceToken != "openclaw-device" {
 		t.Fatalf("expected keyring-backed secrets, got %+v", loaded)
 	}
 	loaded.ActiveRunID = ""
 	loaded.ActiveAssignmentID = ""
-	loaded.ActiveRunMCPToken = ""
-	loaded.HasActiveRunMCPToken = false
 	if err := store.SaveBinding(loaded); err != nil {
-		t.Fatalf("clear active token: %v", err)
+		t.Fatalf("clear active run: %v", err)
 	}
 	if _, ok := secrets[keyringService+":conn-1:active-run-mcp-token"]; ok {
 		t.Fatalf("expected active run token to be deleted")
@@ -471,18 +468,16 @@ func TestFileStoreDeleteBindingDeletesSecrets(t *testing.T) {
 		OpenClawPassword:     "openclaw-password",
 		OpenClawDeviceToken:  "openclaw-device",
 		PersonaMCPToken:      "mcp-token",
-		ActiveRunMCPToken:    "run-mcp-token",
 		HasBridgeSecret:      true,
 		HasOpenClawToken:     true,
 		HasOpenClawPassword:  true,
 		HasOpenClawDevice:    true,
 		HasPersonaMCPToken:   true,
-		HasActiveRunMCPToken: true,
 	}
 	if err := store.SaveBinding(binding); err != nil {
 		t.Fatalf("save binding: %v", err)
 	}
-	if len(secrets) != 6 {
+	if len(secrets) != 5 {
 		t.Fatalf("expected secrets before delete: %+v", secrets)
 	}
 	if err := store.DeleteBinding("conn-1"); err != nil {
@@ -525,20 +520,16 @@ func TestFileStoreReplacesExistingBindingAndDeletesOldSecrets(t *testing.T) {
 	path := t.TempDir() + "/state.json"
 	store := NewFileStore(path)
 	first := Binding{
-		ConnectionID:         "conn-1",
-		PersonaID:            "persona-1",
-		PersonaMCPToken:      "mcp-token-1",
-		ActiveRunMCPToken:    "run-token-1",
-		HasPersonaMCPToken:   true,
-		HasActiveRunMCPToken: true,
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		PersonaMCPToken:    "mcp-token-1",
+		HasPersonaMCPToken: true,
 	}
 	second := Binding{
-		ConnectionID:         "conn-2",
-		PersonaID:            "persona-2",
-		PersonaMCPToken:      "mcp-token-2",
-		ActiveRunMCPToken:    "run-token-2",
-		HasPersonaMCPToken:   true,
-		HasActiveRunMCPToken: true,
+		ConnectionID:       "conn-2",
+		PersonaID:          "persona-2",
+		PersonaMCPToken:    "mcp-token-2",
+		HasPersonaMCPToken: true,
 	}
 	if err := store.SaveBinding(first); err != nil {
 		t.Fatalf("save first: %v", err)
@@ -553,7 +544,7 @@ func TestFileStoreReplacesExistingBindingAndDeletesOldSecrets(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected second binding")
 	}
-	if loadedSecond.PersonaMCPToken != "mcp-token-2" || loadedSecond.ActiveRunMCPToken != "run-token-2" {
+	if loadedSecond.PersonaMCPToken != "mcp-token-2" {
 		t.Fatalf("second binding secrets wrong: %+v", loadedSecond)
 	}
 	if _, ok := secrets[keyringService+":conn-1:persona-mcp-token"]; ok {

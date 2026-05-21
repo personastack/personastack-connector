@@ -64,7 +64,6 @@ func (cmd command) bindingStatusLine(ctx context.Context, homeDir string, bindin
 		fmt.Sprintf("active_run=%s", emptyOrDash(binding.ActiveRunID)),
 		fmt.Sprintf("active_assignment=%s", emptyOrDash(binding.ActiveAssignmentID)),
 		fmt.Sprintf("active_native_run=%s", emptyOrDash(binding.ActiveNativeRunID)),
-		fmt.Sprintf("active_run_mcp=%t", binding.HasActiveRunMCPToken),
 	)
 	if includeRepairActions {
 		parts = append(parts, fmt.Sprintf("repair_actions=%s", strings.Join(connectorRepairActions(detection.State, verify.State), ",")))

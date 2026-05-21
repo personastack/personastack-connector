@@ -143,6 +143,21 @@ func TestHeartbeatFrameRequiresWakeProbeForMCPVerifiedWakeable(t *testing.T) {
 	}
 }
 
+func TestHeartbeatFrameReportsDiagnosticCode(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session := testSession(t, publicKey, privateKey)
+	frame := session.HeartbeatFrameWithDetection(runtime.Detection{
+		State:          runtime.AdapterStateMCPConfigMissing,
+		DiagnosticCode: "mcp_config_parse_error",
+	}, nil)
+	if frame.Heartbeat.DiagnosticCode != "mcp_config_parse_error" {
+		t.Fatalf("diagnostic code = %q", frame.Heartbeat.DiagnosticCode)
+	}
+}
+
 func testSession(t *testing.T, publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey) Session {
 	t.Helper()
 	session, err := NewSession(config.Binding{

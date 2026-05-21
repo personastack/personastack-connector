@@ -91,10 +91,19 @@ func (s Session) ConnectFrame(nonce string) (externalagentprotocol.Frame, error)
 }
 
 func (s Session) HeartbeatFrame(state runtime.AdapterState, lastWakeProbeAt *time.Time) externalagentprotocol.Frame {
+	return s.HeartbeatFrameWithDiagnostic(state, "", lastWakeProbeAt)
+}
+
+func (s Session) HeartbeatFrameWithDetection(detection runtime.Detection, lastWakeProbeAt *time.Time) externalagentprotocol.Frame {
+	return s.HeartbeatFrameWithDiagnostic(detection.State, detection.DiagnosticCode, lastWakeProbeAt)
+}
+
+func (s Session) HeartbeatFrameWithDiagnostic(state runtime.AdapterState, diagnosticCode string, lastWakeProbeAt *time.Time) externalagentprotocol.Frame {
 	frame := s.baseFrame(externalagentprotocol.FrameTypeHeartbeat, s.now())
 	frame.Heartbeat = &externalagentprotocol.HeartbeatPayload{
 		ConnectionStatus:       externalagentprotocol.ConnectionStatusBridgeConnected,
 		ReadinessStatus:        readinessForAdapterState(state, lastWakeProbeAt),
+		DiagnosticCode:         diagnosticCodeForAdapterState(state, diagnosticCode),
 		RuntimeKind:            runtimeKindForAdapter(s.Binding.RuntimeKind),
 		ConnectionGeneration:   s.Binding.ConnectionGeneration,
 		Hostname:               localHostname(),
@@ -282,5 +291,32 @@ func readinessForAdapterState(state runtime.AdapterState, lastWakeProbeAt *time.
 		return externalagentprotocol.ReadinessStatusRuntimeError
 	default:
 		return externalagentprotocol.ReadinessStatusRuntimeHealthy
+	}
+}
+
+func diagnosticCodeForAdapterState(state runtime.AdapterState, diagnosticCode string) string {
+	trimmed := strings.TrimSpace(diagnosticCode)
+	if trimmed != "" {
+		return trimmed
+	}
+	switch state {
+	case runtime.AdapterStateRuntimeMissing:
+		return "runtime_missing"
+	case runtime.AdapterStateRuntimeStopped:
+		return "runtime_stopped"
+	case runtime.AdapterStateAuthMissing:
+		return "auth_missing"
+	case runtime.AdapterStateCapabilityMissing:
+		return "capability_missing"
+	case runtime.AdapterStateMCPConfigMissing:
+		return "mcp_config_missing"
+	case runtime.AdapterStateMCPRestartRequired:
+		return "mcp_restart_required"
+	case runtime.AdapterStateWakeProbeFailed:
+		return "wake_probe_failed"
+	case runtime.AdapterStateReady, runtime.AdapterStateMCPVerified:
+		return ""
+	default:
+		return "runtime_error"
 	}
 }

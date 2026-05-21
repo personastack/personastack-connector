@@ -41,7 +41,7 @@ func TestStdioProxyForwardsJSONLines(t *testing.T) {
 	}
 }
 
-func TestStdioProxyPrefersActiveRunToken(t *testing.T) {
+func TestStdioProxyUsesDurablePersonaToken(t *testing.T) {
 	var authHeader string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
@@ -50,17 +50,16 @@ func TestStdioProxyPrefersActiveRunToken(t *testing.T) {
 	}))
 	defer server.Close()
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
-		ConnectionID:      "conn-1",
-		PersonaMCPURL:     server.URL,
-		PersonaMCPToken:   "stable-token",
-		ActiveRunID:       "run-1",
-		ActiveRunMCPToken: "run-token",
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "stable-token",
+		ActiveRunID:     "run-1",
 	}}})
 	err := NewStdioProxy(store).Serve(context.Background(), "conn-1", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &bytes.Buffer{}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("Serve() error = %v", err)
 	}
-	if authHeader != "Bearer run-token" {
+	if authHeader != "Bearer stable-token" {
 		t.Fatalf("auth header = %q", authHeader)
 	}
 }

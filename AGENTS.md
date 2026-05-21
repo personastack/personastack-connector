@@ -25,8 +25,8 @@
   adapter domains.
 - Store bridge tokens, PersonaStack MCP tokens, local runtime API keys, and local
   MCP proxy secrets only in OS credential storage.
-- Keep native runtime config free of PersonaStack bearer tokens in the default
-  path by using the Connector-owned stdio MCP proxy.
+- Configure native runtime MCP directly with the durable PersonaStack MCP bearer
+  token header by default; redact tokens from diagnostics and logs.
 - Bind any local HTTP helper only to loopback.
 - Redact tokens, prompts, local paths, and runtime secrets from diagnostics by
   default.

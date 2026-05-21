@@ -150,27 +150,28 @@ Adapter result states must be concrete typed enums, including:
 
 ## MCP Strategy
 
-- Default to a Connector-owned per-binding stdio MCP proxy.
-- Native runtime config invokes
-  `personastack-connector mcp stdio --binding <connection_id>`.
+- Default to direct native Hermes/OpenClaw PersonaStack MCP configuration using
+  the binding's durable persona-scoped MCP bearer token.
 - Hermes tools should register as `mcp_<native_mcp_server_name>_<tool_name>`.
-- Native runtime config must point at the Connector's stable user shim path, not
-  a transient package or test executable path.
-- The stdio proxy loads PersonaStack MCP credentials from OS credential storage.
 - Heartbeat readiness treats MCP as verified only after the native config is
   present and a live PersonaStack MCP initialize/tools-list check succeeds.
-- During an active run, Connector stores the API-issued run-scoped MCP token as
-  the binding's active credential and the stdio proxy prefers it over the stable
-  pairing credential; terminal cleanup clears the active token.
 - Connector journals the active PersonaStack run id, assignment id, and native
   runtime run id in binding state while the run is active and clears them on
   terminal cleanup.
-- Native runtime config must not contain PersonaStack bearer tokens by default.
-- Native runtime config must not become a plaintext header export surface; any
-  required auth material stays Connector-local and is handled by the stdio
-  proxy, not by exposing native runtime config or tools as PersonaStack surface.
-- Direct remote PersonaStack MCP headers are advanced-only fallback and must
-  show a credential-storage warning in UX.
+- Native runtime config intentionally contains a direct PersonaStack bearer
+  header for the external persona's durable MCP credential so users can call
+  PersonaStack MCP from Hermes/OpenClaw outside PersonaStack-dispatched runs.
+- `mcp install` and `mcp repair` must preserve unrelated native runtime config,
+  write an owner-only first backup, use atomic replacement, and refuse to
+  overwrite an unrecognized same-name MCP server by reporting a conflict state.
+- Direct config diagnostics must redact bearer tokens from logs, status, and
+  repair output.
+- Heartbeat `diagnostic_code` values must be stable snake_case values derived
+  from the concrete MCP verification or adapter failure.
+- The Connector-owned stdio proxy remains available only for explicit local
+  fallback/debug use, not the default installed MCP path.
+- External run-start handling must not require or store run-scoped PersonaStack
+  MCP bearer tokens.
 - Streamable HTTP SSE responses may be long-lived; the stdio proxy must emit the
   first complete JSON-RPC SSE event back to stdio without waiting for stream EOF.
 - After MCP initialization completes, the stdio proxy must open the Streamable
@@ -180,6 +181,9 @@ Adapter result states must be concrete typed enums, including:
 - Loopback HTTP MCP proxying is a fallback only and must use loopback binding,
   random port selection, a high-entropy local token, and owner-only local config
   permissions.
+- MCP repair diagnostics are typed and must distinguish missing config, parse
+  errors, same-name config conflicts, missing local token, rejected MCP token,
+  unreachable MCP endpoint, and restart-required states.
 
 ## Hermes Runtime
 
