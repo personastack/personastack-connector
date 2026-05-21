@@ -599,17 +599,53 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 	}
 }
 
-func TestContextForRunDeadlineExpires(t *testing.T) {
-	ctx, cancel := contextForRunDeadline(t.Context(), time.Now().Add(10*time.Millisecond))
+func TestContextForRunDeadlineExtendsShortServerDeadline(t *testing.T) {
+	parent, cancelParent := context.WithCancel(t.Context())
+	ctx, cancel := contextForRunDeadline(parent, time.Now().Add(10*time.Millisecond))
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		t.Fatalf("short server deadline expired: %v", ctx.Err())
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancelParent()
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for parent cancellation")
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("ctx err = %v", ctx.Err())
+	}
+}
+
+func TestContextForRunDeadlinePreservesExpiredServerDeadline(t *testing.T) {
+	ctx, cancel := contextForRunDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer cancel()
 
 	select {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for deadline context")
+		t.Fatal("timed out waiting for expired deadline context")
 	}
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("ctx err = %v", ctx.Err())
+	}
+}
+
+func TestContextForRunDeadlinePreservesLongServerDeadline(t *testing.T) {
+	wantDeadline := time.Now().UTC().Add(30 * time.Minute)
+	ctx, cancel := contextForRunDeadline(t.Context(), wantDeadline)
+	defer cancel()
+
+	gotDeadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("deadline missing")
+	}
+	if gotDeadline.Sub(wantDeadline).Abs() > time.Second {
+		t.Fatalf("deadline = %v, want near %v", gotDeadline, wantDeadline)
 	}
 }
 

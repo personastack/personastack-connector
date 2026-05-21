@@ -29,6 +29,8 @@ type Runner struct {
 
 var errConnectorDraining = errors.New("connector draining")
 
+const minimumRunDeadline = 15 * time.Minute
+
 func (r Runner) RunForeground(ctx context.Context) error {
 	bindings := r.Store.ListBindings()
 	if len(bindings) == 0 {
@@ -622,6 +624,10 @@ func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Bin
 func contextForRunDeadline(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
 	if deadline.IsZero() {
 		return context.WithCancel(parent)
+	}
+	now := time.Now().UTC()
+	if deadline.After(now) && deadline.Before(now.Add(minimumRunDeadline)) {
+		deadline = now.Add(minimumRunDeadline)
 	}
 	return context.WithDeadline(parent, deadline.UTC())
 }
