@@ -226,6 +226,62 @@ func TestFileStoreUsesEncryptedFallbackOnDarwinKeyringFailure(t *testing.T) {
 	}
 }
 
+func TestFileStoreKeepsEncryptedFallbackWhenKeyringWriteSucceeds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	secrets := map[string]string{}
+	allowKeyringRead := true
+	originalGet := keyringGet
+	originalSet := keyringSet
+	originalDelete := keyringDelete
+	keyringGet = func(service string, user string) (string, error) {
+		if !allowKeyringRead {
+			return "", os.ErrPermission
+		}
+		value, ok := secrets[service+":"+user]
+		if !ok {
+			return "", os.ErrNotExist
+		}
+		return value, nil
+	}
+	keyringSet = func(service string, user string, password string) error {
+		secrets[service+":"+user] = password
+		return nil
+	}
+	keyringDelete = func(service string, user string) error {
+		delete(secrets, service+":"+user)
+		return nil
+	}
+	t.Cleanup(func() {
+		keyringGet = originalGet
+		keyringSet = originalSet
+		keyringDelete = originalDelete
+	})
+
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewFileStore(path)
+	binding := Binding{
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		BridgePrivateKey:   "fallback-bridge-secret",
+		PersonaMCPToken:    "fallback-mcp-token",
+		HasBridgeSecret:    true,
+		HasPersonaMCPToken: true,
+	}
+	if err := store.SaveBinding(binding); err != nil {
+		t.Fatalf("save binding: %v", err)
+	}
+
+	allowKeyringRead = false
+	loaded, ok := store.Binding("conn-1")
+	if !ok {
+		t.Fatalf("expected binding")
+	}
+	if loaded.BridgePrivateKey != "fallback-bridge-secret" || loaded.PersonaMCPToken != "fallback-mcp-token" {
+		t.Fatalf("expected fallback secrets when keyring read fails, got %+v", loaded)
+	}
+}
+
 func TestFileStoreForcedFallbackDoesNotDependOnReadableKeyring(t *testing.T) {
 	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
 	t.Setenv("HOME", t.TempDir())

@@ -127,16 +127,12 @@ func storeSecret(secretKey string, value string) error {
 		_ = keyringDelete(keyringService, secretKey)
 		return fallbackSecretSet(secretKey, value)
 	}
-	if err := keyringSet(keyringService, secretKey, value); err == nil {
-		_ = fallbackSecretDelete(secretKey)
+	keyringErr := keyringSet(keyringService, secretKey, value)
+	fallbackErr := fallbackSecretSet(secretKey, value)
+	if keyringErr == nil || fallbackErr == nil {
 		return nil
-	} else {
-		if fallbackErr := fallbackSecretSet(secretKey, value); fallbackErr == nil {
-			return nil
-		} else {
-			return fallbackErr
-		}
 	}
+	return fallbackErr
 }
 
 func loadSecret(secretKey string) string {
