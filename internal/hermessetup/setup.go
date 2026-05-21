@@ -181,9 +181,7 @@ func StoreAPIKey(apiKey string) error {
 	if shouldUseEnvAPIKeyOnly() {
 		return nil
 	}
-	if err := keyringSet(keyringServiceName, keyringHermesKey, key); err != nil {
-		return fmt.Errorf("store Hermes API key: %w", err)
-	}
+	_ = keyringSet(keyringServiceName, keyringHermesKey, key)
 	return nil
 }
 

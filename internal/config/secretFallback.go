@@ -282,10 +282,6 @@ func replaceFile(tempPath string, path string) error {
 	return os.Rename(tempPath, path)
 }
 
-func shouldUseFallbackSecretStore() bool {
-	return shouldForceFallbackSecretStore() || osruntime.GOOS == "linux"
-}
-
 func shouldForceFallbackSecretStore() bool {
 	return os.Getenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK") == "1"
 }

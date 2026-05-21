@@ -104,6 +104,33 @@ func TestEnsureAPISetupSkipsKeyringWhenFallbackForced(t *testing.T) {
 	}
 }
 
+func TestEnsureAPISetupContinuesWhenKeyringUnavailable(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+	originalSet := keyringSet
+	t.Cleanup(func() {
+		keyringSet = originalSet
+	})
+	keyringSet = func(service string, user string, password string) error {
+		return os.ErrPermission
+	}
+
+	homeDir := t.TempDir()
+	report, err := EnsureAPISetup(homeDir)
+	if err != nil {
+		t.Fatalf("EnsureAPISetup() error = %v", err)
+	}
+	if report.APIKey == "" {
+		t.Fatalf("expected API key in report")
+	}
+	raw, err := os.ReadFile(filepath.Join(homeDir, ".hermes", ".env"))
+	if err != nil {
+		t.Fatalf("read env: %v", err)
+	}
+	if !strings.Contains(string(raw), "API_SERVER_KEY=") {
+		t.Fatalf("env key missing:\n%s", string(raw))
+	}
+}
+
 func TestEnsureAPISetupFallbackDoesNotReadWrongHomeEnv(t *testing.T) {
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")

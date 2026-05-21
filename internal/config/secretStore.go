@@ -130,14 +130,12 @@ func storeSecret(secretKey string, value string) error {
 	if err := keyringSet(keyringService, secretKey, value); err == nil {
 		_ = fallbackSecretDelete(secretKey)
 		return nil
-	} else if shouldUseFallbackSecretStore() {
+	} else {
 		if fallbackErr := fallbackSecretSet(secretKey, value); fallbackErr == nil {
 			return nil
 		} else {
 			return fallbackErr
 		}
-	} else {
-		return err
 	}
 }
 
