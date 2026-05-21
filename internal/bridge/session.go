@@ -103,7 +103,7 @@ func (s Session) HeartbeatFrameWithDiagnostic(state runtime.AdapterState, diagno
 	frame.Heartbeat = &externalagentprotocol.HeartbeatPayload{
 		ConnectionStatus:       externalagentprotocol.ConnectionStatusBridgeConnected,
 		ReadinessStatus:        readinessForAdapterState(state, lastWakeProbeAt),
-		DiagnosticCode:         diagnosticCodeForAdapterState(state, diagnosticCode),
+		DiagnosticCode:         externalagentprotocol.DiagnosticCode(diagnosticCodeForAdapterState(state, diagnosticCode)),
 		RuntimeKind:            runtimeKindForAdapter(s.Binding.RuntimeKind),
 		ConnectionGeneration:   s.Binding.ConnectionGeneration,
 		Hostname:               localHostname(),

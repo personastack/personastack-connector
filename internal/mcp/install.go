@@ -303,6 +303,9 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 	if result.State != runtime.AdapterStateMCPRestartRequired {
 		return result
 	}
+	if result.DiagnosticCode == "mcp_token_rejected" {
+		return result
+	}
 	if binding.RuntimeKind == runtime.AdapterKindOpenClaw {
 		resolved := openclawauth.Result{}
 		if openclawauth.GatewayIsLoopback(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL")) {
@@ -728,6 +731,9 @@ func verifyStreamableHTTPServer(server map[string]any, binding config.Binding) (
 	if !hasBearerAuthorizationHeader(server) {
 		return runtime.AdapterStateMCPConfigMissing, "PersonaStack MCP Authorization header missing"
 	}
+	if !loopback && !bearerAuthorizationHeaderMatches(server, binding.PersonaMCPToken) {
+		return runtime.AdapterStateMCPRestartRequired, "PersonaStack MCP Authorization token differs from binding; repair required"
+	}
 	if loopback {
 		return runtime.AdapterStateMCPRestartRequired, appendNote("PersonaStack MCP streamable-http config present; live verification required", credentialStorageWarning)
 	}
@@ -791,6 +797,22 @@ func hasBearerAuthorizationHeader(server map[string]any) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "bearer ")
 }
 
+func bearerAuthorizationHeaderMatches(server map[string]any, token string) bool {
+	headers, ok := server["headers"].(map[string]any)
+	if !ok {
+		return false
+	}
+	raw, ok := headers["Authorization"].(string)
+	if !ok {
+		return false
+	}
+	value := strings.TrimSpace(raw)
+	if !strings.HasPrefix(strings.ToLower(value), "bearer ") {
+		return false
+	}
+	return strings.TrimSpace(value[len("bearer "):]) == strings.TrimSpace(token)
+}
+
 func diagnosticCodeForMCPVerify(state runtime.AdapterState, note string) string {
 	lowerNote := strings.ToLower(note)
 	switch {
@@ -800,6 +822,8 @@ func diagnosticCodeForMCPVerify(state runtime.AdapterState, note string) string 
 		return "mcp_config_conflict"
 	case strings.Contains(lowerNote, "credential missing"), strings.Contains(lowerNote, "authorization header missing"):
 		return "mcp_token_missing"
+	case strings.Contains(lowerNote, "token differs"):
+		return "mcp_token_rejected"
 	case state == runtime.AdapterStateMCPRestartRequired:
 		return "mcp_restart_required"
 	case state == runtime.AdapterStateMCPConfigMissing:

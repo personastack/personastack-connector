@@ -675,6 +675,47 @@ func TestVerifyBindingAcceptsStreamableHTTPServer(t *testing.T) {
 	}
 }
 
+func TestVerifyBindingRejectsStaleDirectBearerToken(t *testing.T) {
+	homeDir := t.TempDir()
+	path := filepath.Join(homeDir, ".openclaw", "openclaw.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	raw := []byte(`{
+  "mcp": {
+    "servers": {
+      "personastack-conn-2": {
+        "transport": "streamable-http",
+        "url": "https://mcp.personastack.ai/mcp",
+        "headers": {
+          "Authorization": "Bearer old-token"
+        }
+      }
+    }
+  }
+}
+`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	binding := config.Binding{
+		ConnectionID:       "conn-2",
+		PersonaID:          "persona-2",
+		RuntimeKind:        runtime.AdapterKindOpenClaw,
+		NativeMCPServer:    "personastack-conn-2",
+		PersonaMCPURL:      "https://mcp.personastack.ai/mcp",
+		PersonaMCPToken:    "new-token",
+		HasPersonaMCPToken: true,
+	}
+	verified := VerifyBindingWithLive(context.Background(), homeDir, binding, http.DefaultClient)
+	if verified.DiagnosticCode != "mcp_token_rejected" {
+		t.Fatalf("DiagnosticCode = %q note=%q", verified.DiagnosticCode, verified.Note)
+	}
+	if strings.Contains(verified.Note, "old-token") || strings.Contains(verified.Note, "new-token") {
+		t.Fatalf("verification leaked token: %q", verified.Note)
+	}
+}
+
 func TestVerifyBindingWithLiveChecksLoopbackHTTPProxy(t *testing.T) {
 	personaMCP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer stable-token" {

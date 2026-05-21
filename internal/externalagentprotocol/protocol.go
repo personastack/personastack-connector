@@ -112,6 +112,25 @@ const (
 	FrameTypeDiagnostic         FrameType = "diagnostic"
 )
 
+type DiagnosticCode string
+
+const (
+	DiagnosticCodeRuntimeMissing         DiagnosticCode = "runtime_missing"
+	DiagnosticCodeRuntimeStopped         DiagnosticCode = "runtime_stopped"
+	DiagnosticCodeAuthMissing            DiagnosticCode = "auth_missing"
+	DiagnosticCodeCapabilityMissing      DiagnosticCode = "capability_missing"
+	DiagnosticCodeMCPConfigMissing       DiagnosticCode = "mcp_config_missing"
+	DiagnosticCodeMCPConfigParseError    DiagnosticCode = "mcp_config_parse_error"
+	DiagnosticCodeMCPConfigConflict      DiagnosticCode = "mcp_config_conflict"
+	DiagnosticCodeMCPTokenMissing        DiagnosticCode = "mcp_token_missing"
+	DiagnosticCodeMCPTokenRejected       DiagnosticCode = "mcp_token_rejected"
+	DiagnosticCodeMCPEndpointUnreachable DiagnosticCode = "mcp_endpoint_unreachable"
+	DiagnosticCodeNativeMCPUnreachable   DiagnosticCode = "native_mcp_unreachable"
+	DiagnosticCodeMCPRestartRequired     DiagnosticCode = "mcp_restart_required"
+	DiagnosticCodeWakeProbeFailed        DiagnosticCode = "wake_probe_failed"
+	DiagnosticCodeRuntimeError           DiagnosticCode = "runtime_error"
+)
+
 // RuntimeKind identifies a supported external local runtime.
 type RuntimeKind string
 
@@ -286,7 +305,7 @@ type HeartbeatPayload struct {
 	Arch                   string               `json:"arch,omitempty"`
 	ReleaseChannel         string               `json:"release_channel,omitempty"`
 	LastWakeProbeAt        *time.Time           `json:"last_wake_probe_at,omitempty"`
-	DiagnosticCode         string               `json:"diagnostic_code,omitempty"`
+	DiagnosticCode         DiagnosticCode       `json:"diagnostic_code,omitempty"`
 }
 
 type CapabilitiesPayload struct {
