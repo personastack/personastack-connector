@@ -67,6 +67,66 @@ func TestEnsureAPISetupMergesEnvAndStoresKey(t *testing.T) {
 	}
 }
 
+func TestEnsureAPISetupSkipsKeyringWhenFallbackForced(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	originalSet := keyringSet
+	t.Cleanup(func() {
+		keyringSet = originalSet
+	})
+	keyringSet = func(service string, user string, password string) error {
+		return os.ErrPermission
+	}
+
+	homeDir := t.TempDir()
+	envPath := filepath.Join(homeDir, ".hermes", ".env")
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(envPath, []byte("API_SERVER_KEY=env-key\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+
+	report, err := EnsureAPISetup(homeDir)
+	if err != nil {
+		t.Fatalf("EnsureAPISetup() error = %v", err)
+	}
+	if report.APIKey != "env-key" {
+		t.Fatalf("report.APIKey = %q", report.APIKey)
+	}
+	raw, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read env: %v", err)
+	}
+	if !strings.Contains(string(raw), "API_SERVER_KEY=env-key") {
+		t.Fatalf("env key not preserved:\n%s", string(raw))
+	}
+}
+
+func TestEnsureAPISetupFallbackDoesNotReadWrongHomeEnv(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	wrongHome := t.TempDir()
+	t.Setenv("HOME", wrongHome)
+	if err := os.MkdirAll(filepath.Join(wrongHome, ".hermes"), 0o700); err != nil {
+		t.Fatalf("mkdir wrong home env: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wrongHome, ".hermes", ".env"), []byte("API_SERVER_KEY=wrong-home-key\n"), 0o600); err != nil {
+		t.Fatalf("write wrong home env: %v", err)
+	}
+
+	homeDir := t.TempDir()
+	report, err := EnsureAPISetup(homeDir)
+	if err != nil {
+		t.Fatalf("EnsureAPISetup() error = %v", err)
+	}
+	if report.APIKey == "" || report.APIKey == "wrong-home-key" {
+		t.Fatalf("report.APIKey = %q", report.APIKey)
+	}
+}
+
 func TestDiagnoseReportsMissingHermesSetup(t *testing.T) {
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	homeDir := t.TempDir()

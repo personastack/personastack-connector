@@ -55,6 +55,9 @@ func EnsureShim(homeDir string, executablePath string, goos string) (ShimResult,
 	switch goos {
 	case "darwin", "linux":
 		path := filepath.Join(homeDir, ".local", "bin", serviceName)
+		if samePath(path, executablePath) {
+			return ShimResult{Path: path}, nil
+		}
 		script := fmt.Sprintf("#!/bin/sh\nexec %s \"$@\"\n", shellQuote(executablePath))
 		if err := writeOwnerExecutable(path, []byte(script)); err != nil {
 			return ShimResult{}, err
@@ -70,6 +73,22 @@ func EnsureShim(homeDir string, executablePath string, goos string) (ShimResult,
 	default:
 		return ShimResult{}, fmt.Errorf("unsupported shim platform: %s", goos)
 	}
+}
+
+func samePath(left string, right string) bool {
+	left = filepath.Clean(strings.TrimSpace(left))
+	right = filepath.Clean(strings.TrimSpace(right))
+	if left == right {
+		return true
+	}
+	leftEval, leftErr := filepath.EvalSymlinks(left)
+	rightEval, rightErr := filepath.EvalSymlinks(right)
+	if leftErr == nil && rightErr == nil {
+		leftInfo, leftStatErr := os.Stat(leftEval)
+		rightInfo, rightStatErr := os.Stat(rightEval)
+		return leftStatErr == nil && rightStatErr == nil && os.SameFile(leftInfo, rightInfo)
+	}
+	return false
 }
 
 func (installer Installer) Plan() (InstallResult, error) {
@@ -262,12 +281,36 @@ func writeOwnerOnly(path string, raw []byte) error {
 }
 
 func writeOwnerExecutable(path string, raw []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create service dir: %w", err)
 	}
-	if err := os.WriteFile(path, raw, 0o700); err != nil {
-		return fmt.Errorf("write service file: %w", err)
+	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp service file: %w", err)
 	}
+	tempPath := file.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write temp service file: %w", err)
+	}
+	if err := file.Chmod(0o700); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("secure temp service file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close temp service file: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace service file: %w", err)
+	}
+	cleanup = false
 	return nil
 }
 

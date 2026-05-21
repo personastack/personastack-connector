@@ -198,3 +198,61 @@ func TestEnsureShimWritesStableUserExecutable(t *testing.T) {
 		t.Fatalf("mode = %o, want 700", info.Mode().Perm())
 	}
 }
+
+func TestEnsureShimDoesNotOverwriteTargetExecutable(t *testing.T) {
+	homeDir := t.TempDir()
+	path := filepath.Join(homeDir, ".local", "bin", "personastack-connector")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir shim dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("binary"), 0o700); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+	result, err := EnsureShim(homeDir, path, "linux")
+	if err != nil {
+		t.Fatalf("EnsureShim() error = %v", err)
+	}
+	if result.Path != path {
+		t.Fatalf("path = %q, want %q", result.Path, path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read executable: %v", err)
+	}
+	if string(raw) != "binary" {
+		t.Fatalf("executable overwritten:\n%s", raw)
+	}
+}
+
+func TestEnsureShimDoesNotOverwriteSymlinkedTargetExecutable(t *testing.T) {
+	homeDir := t.TempDir()
+	target := filepath.Join(homeDir, "tools", "personastack-connector")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("binary"), 0o700); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	path := filepath.Join(homeDir, ".local", "bin", "personastack-connector")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir shim dir: %v", err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("symlink target: %v", err)
+	}
+
+	result, err := EnsureShim(homeDir, target, "linux")
+	if err != nil {
+		t.Fatalf("EnsureShim() error = %v", err)
+	}
+	if result.Path != path {
+		t.Fatalf("path = %q, want %q", result.Path, path)
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(raw) != "binary" {
+		t.Fatalf("target overwritten:\n%s", raw)
+	}
+}

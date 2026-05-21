@@ -154,10 +154,23 @@ func Diagnose(homeDir string) SetupReport {
 }
 
 func LoadAPIKey() string {
+	if key := loadStoredAPIKey(); key != "" {
+		return key
+	}
+	return loadAPIKeyFromDefaultEnvFile()
+}
+
+func loadStoredAPIKey() string {
+	if shouldUseEnvAPIKeyOnly() {
+		return strings.TrimSpace(os.Getenv("HERMES_API_SERVER_KEY"))
+	}
 	if secret, err := keyringGet(keyringServiceName, keyringHermesKey); err == nil && strings.TrimSpace(secret) != "" {
 		return strings.TrimSpace(secret)
 	}
-	return strings.TrimSpace(os.Getenv("HERMES_API_SERVER_KEY"))
+	if key := strings.TrimSpace(os.Getenv("HERMES_API_SERVER_KEY")); key != "" {
+		return key
+	}
+	return ""
 }
 
 func StoreAPIKey(apiKey string) error {
@@ -165,10 +178,29 @@ func StoreAPIKey(apiKey string) error {
 	if key == "" {
 		return fmt.Errorf("Hermes API key required")
 	}
+	if shouldUseEnvAPIKeyOnly() {
+		return nil
+	}
 	if err := keyringSet(keyringServiceName, keyringHermesKey, key); err != nil {
 		return fmt.Errorf("store Hermes API key: %w", err)
 	}
 	return nil
+}
+
+func shouldUseEnvAPIKeyOnly() bool {
+	return os.Getenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK") == "1"
+}
+
+func loadAPIKeyFromDefaultEnvFile() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	state, err := loadEnvState(filepath.Join(homeDir, ".hermes", ".env"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(findEnvValue(state, "API_SERVER_KEY"))
 }
 
 func TryStartGateway(homeDir string) (bool, error) {
@@ -218,7 +250,7 @@ func resolveAPIKey(envPath string) (string, error) {
 	if key := strings.TrimSpace(findEnvValue(state, "API_SERVER_KEY")); key != "" {
 		return key, nil
 	}
-	if key := LoadAPIKey(); key != "" {
+	if key := loadStoredAPIKey(); key != "" {
 		return key, nil
 	}
 	return generateAPIKey()
@@ -245,8 +277,10 @@ func missingHermesEnv(state envState) []string {
 			missing = append(missing, key)
 		}
 	}
-	if secret, err := keyringGet(keyringServiceName, keyringHermesKey); err != nil || strings.TrimSpace(secret) == "" {
-		missing = append(missing, "keyring")
+	if !shouldUseEnvAPIKeyOnly() {
+		if secret, err := keyringGet(keyringServiceName, keyringHermesKey); err != nil || strings.TrimSpace(secret) == "" {
+			missing = append(missing, "keyring")
+		}
 	}
 	return missing
 }
