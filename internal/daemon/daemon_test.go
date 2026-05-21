@@ -934,12 +934,6 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 		t.Fatalf("active run cleared before terminal ack: %+v", active)
 	}
 	close(ackSent)
-	time.Sleep(50 * time.Millisecond)
-	cleared, ok := store.Binding("conn-1")
-	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveRunMCPToken != "" {
-		t.Fatalf("active run not cleared after terminal ack: %+v", cleared)
-	}
-	cancel()
 	select {
 	case err := <-errCh:
 		if err != nil {
@@ -947,6 +941,10 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for runner shutdown")
+	}
+	cleared, ok := store.Binding("conn-1")
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveRunMCPToken != "" {
+		t.Fatalf("active run not cleared after terminal ack: %+v", cleared)
 	}
 }
 
