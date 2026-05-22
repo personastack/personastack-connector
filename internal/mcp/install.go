@@ -5,6 +5,7 @@ import (
 	cryptoRand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -58,6 +59,8 @@ const (
 )
 
 const credentialStorageWarning = "credential warning: local MCP auth stays in owner-only connector config"
+
+var errOpenClawCLIMissing = errors.New("openclaw cli missing")
 
 func openClawConfigPath(homeDir string) string {
 	return filepath.Join(homeDir, ".openclaw", "openclaw.json")
@@ -127,16 +130,24 @@ func (installer Installer) installBinding(homeDir string, executablePath string,
 		}
 		return installer.installBindingLoopbackHTTP(homeDir, binding, server)
 	case runtime.AdapterKindOpenClaw:
+		if transport == MCPProxyTransportStdio {
+			if result, err := installOpenClawServerWithCLI(homeDir, binding, server); err == nil {
+				return result, nil
+			} else if !errors.Is(err, errOpenClawCLIMissing) {
+				return InstallResult{}, err
+			}
+			path := openClawConfigPath(homeDir)
+			if err := upsertOpenClawServer(path, server); err != nil {
+				return InstallResult{}, err
+			}
+			return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name}, nil
+		}
 		if result, err := installOpenClawServerWithCLI(homeDir, binding, server); err == nil {
 			return result, nil
-		} else if transport == MCPProxyTransportStdio {
-			return InstallResult{}, err
 		}
 		path := openClawConfigPath(homeDir)
 		if err := upsertOpenClawServer(path, server); err == nil {
 			return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name}, nil
-		} else if transport == MCPProxyTransportStdio {
-			return InstallResult{}, err
 		}
 		return installer.installBindingLoopbackHTTP(homeDir, binding, server)
 	default:
@@ -194,7 +205,7 @@ func (installer Installer) installBindingNativeHTTP(homeDir string, binding conf
 func installOpenClawServerWithCLI(homeDir string, binding config.Binding, server stdioServerConfig) (InstallResult, error) {
 	cliPath, err := exec.LookPath("openclaw")
 	if err != nil {
-		return InstallResult{}, err
+		return InstallResult{}, fmt.Errorf("%w: %v", errOpenClawCLIMissing, err)
 	}
 	configPath := openClawConfigPath(homeDir)
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
