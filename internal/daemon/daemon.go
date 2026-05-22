@@ -22,6 +22,7 @@ import (
 
 type Runner struct {
 	Store        config.Store
+	ServiceScope externalagentprotocol.ServiceScope
 	Now          func() time.Time
 	ReconnectMin time.Duration
 	ReconnectMax time.Duration
@@ -29,55 +30,159 @@ type Runner struct {
 
 var errConnectorDraining = errors.New("connector draining")
 
+type bindingRun struct {
+	cancel       func()
+	connectionID config.ConnectionID
+	token        int
+}
+
+type bindingRunResult struct {
+	connectionID config.ConnectionID
+	token        int
+	err          error
+}
+
 func (r Runner) RunForeground(ctx context.Context) error {
-	bindings := r.Store.ListBindings()
-	if len(bindings) == 0 {
-		return fmt.Errorf("no paired bindings")
-	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errs := make(chan error, len(bindings)*2)
+	errs := make(chan bindingRunResult, 16)
+	reconnects := make(chan config.Binding, 16)
 	var wg sync.WaitGroup
-	for _, binding := range bindings {
-		if strings.TrimSpace(binding.LocalMCPProxyURL) == "" {
-			continue
+	active := map[int]bindingRun{}
+	nextToken := 0
+	sendResult := func(result bindingRunResult) {
+		select {
+		case errs <- result:
+		case <-runCtx.Done():
 		}
-		proxyErrs, err := mcp.StartLoopbackHTTPProxyWithStore(runCtx, r.Store, binding, nil)
-		if err != nil {
-			return err
+	}
+	requestReconnect := func(binding config.Binding) {
+		select {
+		case reconnects <- binding:
+		case <-runCtx.Done():
+		}
+	}
+	hasActiveBinding := func(connectionID config.ConnectionID) bool {
+		for _, run := range active {
+			if run.connectionID == connectionID {
+				return true
+			}
+		}
+		return false
+	}
+	startBinding := func(binding config.Binding, allowOverlap bool) error {
+		if !allowOverlap && hasActiveBinding(binding.ConnectionID) {
+			return nil
+		}
+		nextToken++
+		token := nextToken
+		bindingCtx, bindingCancel := context.WithCancel(runCtx)
+		logCancel := func() {
+			bindingCancel()
+		}
+		if strings.TrimSpace(binding.LocalMCPProxyURL) != "" {
+			proxyErrs, err := mcp.StartLoopbackHTTPProxyWithStore(bindingCtx, r.Store, binding, nil)
+			if err != nil {
+				logCancel()
+				return err
+			}
+			wg.Add(1)
+			go func(connectionID config.ConnectionID) {
+				defer wg.Done()
+				err := <-proxyErrs
+				sendResult(bindingRunResult{connectionID: connectionID, token: token, err: err})
+			}(binding.ConnectionID)
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- <-proxyErrs
+			sendResult(bindingRunResult{
+				connectionID: binding.ConnectionID,
+				token:        token,
+				err:          r.runBinding(bindingCtx, binding, requestReconnect),
+			})
 		}()
+		active[token] = bindingRun{cancel: logCancel, connectionID: binding.ConnectionID, token: token}
+		return nil
 	}
-	for _, binding := range bindings {
-		wg.Add(1)
-		go func(binding config.Binding) {
-			defer wg.Done()
-			errs <- r.runBinding(runCtx, binding)
-		}(binding)
-	}
-	go func() {
-		wg.Wait()
-		close(errs)
-	}()
-	var firstErr error
-	for err := range errs {
-		if err != nil && firstErr == nil {
-			firstErr = err
-			cancel()
+	cancelMissingBindings := func(bindings []config.Binding) {
+		present := map[config.ConnectionID]struct{}{}
+		for _, binding := range bindings {
+			present[binding.ConnectionID] = struct{}{}
+		}
+		for token, run := range active {
+			if _, ok := present[run.connectionID]; ok {
+				continue
+			}
+			run.cancel()
+			delete(active, token)
 		}
 	}
-	return firstErr
+
+	bindings := r.Store.ListBindings()
+	for _, binding := range bindings {
+		if err := startBinding(binding, false); err != nil {
+			cancel()
+			wg.Wait()
+			return err
+		}
+	}
+
+	ticker := time.NewTicker(r.reconnectMin())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			cancel()
+			wg.Wait()
+			return nil
+		case binding := <-reconnects:
+			if err := startBinding(binding, true); err != nil {
+				cancel()
+				wg.Wait()
+				return err
+			}
+		case result := <-errs:
+			current, ok := active[result.token]
+			if ok && current.connectionID != result.connectionID {
+				continue
+			}
+			if ok {
+				current.cancel()
+				delete(active, result.token)
+			}
+			if ok && result.err != nil {
+				cancel()
+				wg.Wait()
+				return result.err
+			}
+		case <-ticker.C:
+			if len(active) > 0 && !supportsExternalBindingReload(r.Store) {
+				continue
+			}
+			bindings := r.Store.ListBindings()
+			cancelMissingBindings(bindings)
+			for _, binding := range bindings {
+				if err := startBinding(binding, false); err != nil {
+					cancel()
+					wg.Wait()
+					return err
+				}
+			}
+		}
+	}
 }
 
-func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
-	return r.runBindingLoop(ctx, binding)
+func supportsExternalBindingReload(store config.Store) bool {
+	_, ok := store.(config.FileStore)
+	return ok
 }
 
-func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) error {
+func (r Runner) runBinding(ctx context.Context, binding config.Binding, requestReconnect func(config.Binding)) error {
+	return r.runBindingLoop(ctx, binding, requestReconnect)
+}
+
+func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding, requestReconnect func(config.Binding)) error {
 	connectionID := binding.ConnectionID
 	backoff := r.reconnectMin()
 	for {
@@ -105,7 +210,8 @@ func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) erro
 		if err != nil {
 			return err
 		}
-		err = r.runBindingSession(ctx, current, session)
+		session.ServiceScope = r.serviceScope()
+		err = r.runBindingSession(ctx, current, session, requestReconnect)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -126,12 +232,28 @@ func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) erro
 	}
 }
 
-func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, session bridge.Session) error {
+func (r Runner) serviceScope() externalagentprotocol.ServiceScope {
+	if r.ServiceScope != "" {
+		return r.ServiceScope
+	}
+	return externalagentprotocol.ServiceScopeUserLaunchAgent
+}
+
+func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, session bridge.Session, requestReconnect func(config.Binding)) error {
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, binding.GatewayWebsocketURL, nil)
 	if err != nil {
 		return fmt.Errorf("connect gateway websocket: %w", err)
 	}
 	defer conn.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
 	var writeMu sync.Mutex
 	writeFrame := func(frame externalagentprotocol.Frame) error {
 		writeMu.Lock()
@@ -241,9 +363,9 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			}
 			draining = true
 			drainOnce.Do(func() {
-				go func() {
-					_ = r.runBindingLoop(ctx, binding)
-				}()
+				if requestReconnect != nil {
+					requestReconnect(binding)
+				}
 			})
 			if deadline := frame.ServerDraining.DeadlineAt; !deadline.IsZero() {
 				go func(deadline time.Time) {

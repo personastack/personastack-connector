@@ -139,6 +139,13 @@ const (
 	RuntimeKindOpenClaw RuntimeKind = "openclaw"
 )
 
+type ServiceScope string
+
+const (
+	ServiceScopeUserLaunchAgent    ServiceScope = "user_launch_agent"
+	ServiceScopeSystemLaunchDaemon ServiceScope = "system_launch_daemon"
+)
+
 // ConnectionStatus identifies Connector bridge status reported to Gateway.
 type ConnectionStatus string
 
@@ -292,6 +299,7 @@ type HeartbeatPayload struct {
 	ConnectionStatus       ConnectionStatus     `json:"connection_status"`
 	ReadinessStatus        ReadinessStatus      `json:"readiness_status"`
 	RuntimeKind            RuntimeKind          `json:"runtime_kind"`
+	ServiceScope           ServiceScope         `json:"service_scope,omitempty"`
 	ConnectionGeneration   int64                `json:"connection_generation"`
 	RuntimeLabel           string               `json:"runtime_label,omitempty"`
 	Hostname               string               `json:"hostname,omitempty"`

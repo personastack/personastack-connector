@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,6 +45,241 @@ func TestRunnerFailsFastWhenLoopbackProxyCannotBind(t *testing.T) {
 	err = (Runner{Store: config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})}).RunForeground(t.Context())
 	if err == nil {
 		t.Fatal("RunForeground() expected loopback bind error")
+	}
+}
+
+func TestRunnerStaysAliveWithNoBindings(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{
+			Store:        config.NewFileStore(t.TempDir() + "/state.json"),
+			ReconnectMin: 5 * time.Millisecond,
+			ReconnectMax: 5 * time.Millisecond,
+		}).RunForeground(ctx)
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("RunForeground() returned before cancellation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunForeground() after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+}
+
+func TestRunnerStartsBindingSavedAfterIdle(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	seenHeartbeat := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		if connectFrame.MessageType != externalagentprotocol.FrameTypeConnect || connectFrame.ConnectionID != "conn-1" {
+			t.Fatalf("unexpected connect frame: %+v", connectFrame)
+		}
+		err = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		})
+		if err != nil {
+			t.Fatalf("write connect accepted: %v", err)
+		}
+		var heartbeat externalagentprotocol.Frame
+		if err := conn.ReadJSON(&heartbeat); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat {
+			t.Fatalf("unexpected heartbeat: %+v", heartbeat)
+		}
+		seenHeartbeat <- struct{}{}
+		cancel()
+	}))
+	defer server.Close()
+
+	store := config.NewFileStore(t.TempDir() + "/state.json")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: store, ReconnectMin: 5 * time.Millisecond, ReconnectMax: 5 * time.Millisecond}).RunForeground(ctx)
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("RunForeground() returned before SaveBinding: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	err = store.SaveBinding(config.Binding{
+		ConnectionID:        "conn-1",
+		PersonaID:           "persona-1",
+		GatewayWebsocketURL: "ws" + server.URL[len("http"):],
+		BridgeCredentialID:  "cred-1",
+		BridgePrivateKey:    base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:         runtime.AdapterKindHermes,
+	})
+	if err != nil {
+		t.Fatalf("save binding: %v", err)
+	}
+
+	select {
+	case <-seenHeartbeat:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for saved binding to start")
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunForeground() after saved binding: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+}
+
+func TestRunnerCancelsRemovedBindingAndStartsReplacement(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	connected := make(chan string, 4)
+	releasedConn1 := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		connectionID := connectFrame.ConnectionID
+		err = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    connectFrame.PersonaID,
+			ConnectionID: connectionID,
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		})
+		if err != nil {
+			t.Fatalf("write connect accepted: %v", err)
+		}
+		var heartbeat externalagentprotocol.Frame
+		if err := conn.ReadJSON(&heartbeat); err != nil {
+			if connectionID == "conn-1" {
+				releasedConn1 <- struct{}{}
+			}
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		connected <- connectionID
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				if connectionID == "conn-1" {
+					releasedConn1 <- struct{}{}
+				}
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	store := config.NewFileStore(t.TempDir() + "/state.json")
+	err = store.SaveBinding(config.Binding{
+		ConnectionID:        "conn-1",
+		PersonaID:           "persona-1",
+		GatewayWebsocketURL: "ws" + server.URL[len("http"):],
+		BridgeCredentialID:  "cred-1",
+		BridgePrivateKey:    base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:         runtime.AdapterKindHermes,
+	})
+	if err != nil {
+		t.Fatalf("save first binding: %v", err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: store, ReconnectMin: 5 * time.Millisecond, ReconnectMax: 5 * time.Millisecond}).RunForeground(ctx)
+	}()
+
+	select {
+	case got := <-connected:
+		if got != "conn-1" {
+			t.Fatalf("first connection = %s, want conn-1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first binding")
+	}
+	err = store.SaveBinding(config.Binding{
+		ConnectionID:        "conn-2",
+		PersonaID:           "persona-2",
+		GatewayWebsocketURL: "ws" + server.URL[len("http"):],
+		BridgeCredentialID:  "cred-1",
+		BridgePrivateKey:    base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:         runtime.AdapterKindHermes,
+	})
+	if err != nil {
+		t.Fatalf("save replacement binding: %v", err)
+	}
+	select {
+	case <-releasedConn1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for old binding cancellation")
+	}
+	select {
+	case got := <-connected:
+		if got != "conn-2" {
+			t.Fatalf("replacement connection = %s, want conn-2", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for replacement binding")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunForeground() after cancellation: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
 	}
 }
 
@@ -327,6 +563,101 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 	}
 }
 
+func TestRunnerTracksServerDrainingReplacement(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	secondConnected := make(chan struct{}, 1)
+	closeFirst := make(chan struct{})
+	var connectionCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		connectionNumber := connectionCount.Add(1)
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		})
+		var heartbeat externalagentprotocol.Frame
+		if err := conn.ReadJSON(&heartbeat); err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		if connectionNumber == 1 {
+			_ = conn.WriteJSON(externalagentprotocol.Frame{
+				MessageType:  externalagentprotocol.FrameTypeServerDraining,
+				PersonaID:    "persona-1",
+				ConnectionID: "conn-1",
+				SentAt:       time.Now().UTC(),
+				ServerDraining: &externalagentprotocol.ServerDrainingPayload{
+					DeadlineAt: time.Now().UTC().Add(time.Second),
+					Reason:     "test",
+				},
+			})
+			<-closeFirst
+			return
+		}
+		secondConnected <- struct{}{}
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	store := config.NewFileStore(t.TempDir() + "/state.json")
+	err = store.SaveBinding(config.Binding{
+		ConnectionID:        "conn-1",
+		PersonaID:           "persona-1",
+		GatewayWebsocketURL: "ws" + server.URL[len("http"):],
+		BridgeCredentialID:  "cred-1",
+		BridgePrivateKey:    base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:         runtime.AdapterKindHermes,
+	})
+	if err != nil {
+		t.Fatalf("save binding: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx)
+	}()
+	select {
+	case <-secondConnected:
+	case <-time.After(2 * time.Second):
+		cancel()
+		close(closeFirst)
+		t.Fatal("timed out waiting for tracked replacement connection")
+	}
+	close(closeFirst)
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunForeground() after draining replacement: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+}
+
 func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -415,6 +746,8 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 	t.Setenv("PERSONASTACK_CONNECTOR_HERMES_URL", hermesServer.URL)
 
 	terminalSeen := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	readNextFrame := func(conn *websocket.Conn) (externalagentprotocol.Frame, error) {
 		for {
 			var frame externalagentprotocol.Frame
@@ -514,6 +847,9 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 		for {
 			frame, err := readNextFrame(conn)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				t.Fatalf("read run frame: %v", err)
 			}
 			gotFrames = append(gotFrames, frame)
@@ -565,6 +901,7 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("write terminal ack: %v", err)
 		}
+		time.Sleep(50 * time.Millisecond)
 		terminalSeen <- struct{}{}
 	}))
 	defer gatewayServer.Close()
@@ -589,8 +926,6 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 		t.Fatalf("install mcp: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx)
@@ -598,10 +933,17 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 
 	select {
 	case <-terminalSeen:
-		cancel()
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for run terminal frame")
 	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		stored, ok := store.Binding("conn-1")
+		if ok && stored.ActiveRunID == "" && stored.ActiveNativeRunID == "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
 
 	select {
 	case err := <-errCh:
@@ -919,7 +1261,7 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- (Runner{Store: &store}).runBindingSession(ctx, binding, session)
+		errCh <- (Runner{Store: &store}).runBindingSession(ctx, binding, session, nil)
 	}()
 
 	select {
@@ -1121,6 +1463,9 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 		})
 		var heartbeat externalagentprotocol.Frame
 		if err := conn.ReadJSON(&heartbeat); err != nil {
+			if connectFrame.Connect.ConnectionGeneration != 2 && ctx.Err() != nil {
+				return
+			}
 			t.Fatalf("read heartbeat: %v", err)
 		}
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
@@ -1272,6 +1617,17 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 			SentAt:        time.Now(),
 			ConfigRefresh: &externalagentprotocol.ConfigRefreshPayload{},
 		})
+		deadline := time.After(2 * time.Second)
+		for {
+			if _, err := os.ReadFile(filepath.Join(homeDir, ".hermes", "config.yaml")); err == nil {
+				break
+			}
+			select {
+			case <-deadline:
+				t.Fatal("timed out waiting for config refresh")
+			case <-time.After(time.Millisecond):
+			}
+		}
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageID:    "revoke-1",
 			MessageType:  externalagentprotocol.FrameTypeTokenRevoked,
@@ -1301,9 +1657,32 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 		RuntimeKind:          runtime.AdapterKindHermes,
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
-	err = (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(t.Context())
-	if err != nil {
-		t.Fatalf("run foreground: %v", err)
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx)
+	}()
+	deadline := time.After(2 * time.Second)
+	for {
+		if _, ok := store.Binding("conn-1"); !ok {
+			break
+		}
+		select {
+		case err := <-errCh:
+			t.Fatalf("run foreground returned before token revocation was stored: %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for token revocation to delete binding")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run foreground: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
 	}
 	if _, ok := store.Binding("conn-1"); ok {
 		t.Fatalf("expected token revocation to delete binding")
@@ -1702,7 +2081,6 @@ func TestRunnerReconnectsWithFreshGenerationAfterDrainHint(t *testing.T) {
 		if connectFrame.MessageType != externalagentprotocol.FrameTypeConnect {
 			t.Fatalf("unexpected connect frame: %+v", connectFrame)
 		}
-		connectGenerations <- connectFrame.Connect.ConnectionGeneration
 		if err := conn.WriteJSON(externalagentprotocol.Frame{
 			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
 			PersonaID:    "persona-1",
@@ -1724,6 +2102,7 @@ func TestRunnerReconnectsWithFreshGenerationAfterDrainHint(t *testing.T) {
 		if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat || heartbeat.Heartbeat == nil {
 			t.Fatalf("unexpected heartbeat: %+v", heartbeat)
 		}
+		connectGenerations <- connectFrame.Connect.ConnectionGeneration
 		if connectFrame.Connect.ConnectionGeneration == 2 {
 			firstHandshakeDone <- struct{}{}
 			if err := conn.WriteJSON(externalagentprotocol.Frame{

@@ -20,6 +20,8 @@ external persona.
 - Stream or report local run events back through the Connector protocol.
 - Configure PersonaStack MCP access in supported local runtimes.
 - Keep local daemon startup persistent across user login or system restart.
+- Keep the daemon process alive while no binding is paired so OS service
+  supervisors do not throttle it into a dead setup state before pairing.
 - Keep the default connector setup CLI-first and headless.
 - Store local secrets in OS credential storage.
 - Keep the repository public source for user audit, not open source.
@@ -50,6 +52,12 @@ external persona.
 - A Connector installation manages one external persona binding at a time.
   Pairing a new external persona replaces the previous local binding and local
   binding secrets for that machine.
+- Connector service scope is explicit and finite: `user_launch_agent` runs as
+  the logged-in user, while `system_launch_daemon` is macOS-only and runs as a
+  root LaunchDaemon for pre-login OpenClaw hosts.
+- System-scope state is stored under
+  `/Library/Application Support/PersonaStack/Connector`. User-scope state
+  remains in the user's config directory.
 - Pairing, connect, and heartbeat payloads include the local machine hostname as
   bounded non-secret operator-facing metadata.
 - Each binding has one PersonaStack connection id, persona id, external agent
@@ -92,6 +100,8 @@ external persona.
 - `personastack-connector pair <code> --runtime auto`
 - `personastack-connector pair <code> --runtime hermes`
 - `personastack-connector pair <code> --runtime openclaw`
+- `personastack-connector pair <code> --service-scope user`
+- `personastack-connector pair <code> --service-scope system`
 - `personastack-connector status`
 - `personastack-connector status --repair`
 - `personastack-connector runtime detect`
@@ -100,6 +110,8 @@ external persona.
 - `personastack-connector mcp repair`
 - `personastack-connector mcp stdio --binding <connection_id>`
 - `personastack-connector run --foreground`
+- `personastack-connector run --foreground --service-scope user`
+- `personastack-connector run --foreground --service-scope system`
 - `personastack-connector unpair`
 
 Default setup must require only package installation plus the pairing command.
@@ -113,6 +125,8 @@ variables, and OpenClaw-owned user config, env, device auth, or service env
 files. If no local credential is found, the CLI prompt must tell the user the
 easiest OpenClaw command to retrieve or rotate one. Browser setup surfaces must
 not collect OpenClaw tokens, passwords, or device credentials.
+System service scope is supported only for macOS OpenClaw in V1. Hermes system
+scope must fail closed until Hermes exposes a system-service runtime endpoint.
 
 The V1 Connector does not expose a local HTTP UI/control listener. CLI control
 is local process execution and native MCP uses stdio; any future local control
@@ -266,9 +280,14 @@ Adapter result states must be concrete typed enums, including:
 - macOS archives are signed and notarized only when the release environment
   provides the Apple Developer ID and App Store Connect inputs; default install
   UX must remain gated until those inputs are present.
-- macOS release artifacts stay split by `darwin/amd64` and `darwin/arm64`, and
-  setup continues to register a LaunchAgent after installation instead of
-  shipping an app bundle or DMG path.
+- macOS release artifacts stay split by `darwin/amd64` and `darwin/arm64`.
+  User-scope setup registers `~/Library/LaunchAgents/ai.personastack.connector.plist`.
+  System-scope setup registers `/Library/LaunchDaemons/ai.personastack.connector.plist`
+  with `KeepAlive`, `RunAtLoad`, `ThrottleInterval=30`, `ProcessType=Background`,
+  and logs under `/Library/Logs/PersonaStack/`.
+- macOS system-scope setup requires `sudo` and does not prevent machine sleep.
+  The persona may report offline while the Mac is asleep; Connector must
+  reconnect and re-probe after wake.
 - Tagged releases also publish cosign-bundled signatures for the checksum file
   and the release manifest, so advanced guidance can verify release artifacts
   without making verification part of the primary install command.

@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,33 +49,46 @@ func TestInstallerWritesSystemdUserUnit(t *testing.T) {
 func TestInstallerPlansServiceWithoutWritingFiles(t *testing.T) {
 	tests := []struct {
 		goos     string
+		scope    ServiceScope
 		wantKind string
 		wantPath string
 	}{
 		{
 			goos:     "darwin",
+			scope:    ServiceScopeUserLaunchAgent,
 			wantKind: "launchagent",
 			wantPath: filepath.Join("Library", "LaunchAgents", "ai.personastack.connector.plist"),
 		},
 		{
+			goos:     "darwin",
+			scope:    ServiceScopeSystemLaunchDaemon,
+			wantKind: "launchdaemon",
+			wantPath: filepath.Join("Library", "LaunchDaemons", "ai.personastack.connector.plist"),
+		},
+		{
 			goos:     "linux",
+			scope:    ServiceScopeUserLaunchAgent,
 			wantKind: "systemd-user",
 			wantPath: filepath.Join(".config", "systemd", "user", "personastack-connector.service"),
 		},
 		{
 			goos:     "windows",
+			scope:    ServiceScopeUserLaunchAgent,
 			wantKind: "windows-scheduled-task",
 			wantPath: filepath.Join("AppData", "Local", "PersonaStack", "Connector", "install-task.ps1"),
 		},
 	}
 
 	for _, test := range tests {
-		t.Run(test.goos, func(t *testing.T) {
+		t.Run(test.goos+"-"+string(test.scope), func(t *testing.T) {
 			homeDir := t.TempDir()
+			systemRoot := homeDir
 			result, err := (Installer{
 				HomeDir:        homeDir,
 				ExecutablePath: "/opt/personastack-connector",
 				GOOS:           test.goos,
+				ServiceScope:   test.scope,
+				SystemRoot:     systemRoot,
 			}).Plan()
 			if err != nil {
 				t.Fatalf("Plan() error = %v", err)
@@ -89,6 +103,29 @@ func TestInstallerPlansServiceWithoutWritingFiles(t *testing.T) {
 				t.Fatalf("Plan() wrote service directory or stat failed: %v", err)
 			}
 		})
+	}
+}
+
+func TestInstallerPlansSystemLaunchDaemon(t *testing.T) {
+	homeDir := t.TempDir()
+	result, err := (Installer{
+		HomeDir:        homeDir,
+		ExecutablePath: "/opt/personastack-connector",
+		GOOS:           "darwin",
+		Scope:          ServiceScopeSystemLaunchDaemon,
+	}).Plan()
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if result.Kind != "launchdaemon" {
+		t.Fatalf("kind = %q", result.Kind)
+	}
+	wantPath := filepath.Join(string(os.PathSeparator), "Library", "LaunchDaemons", "ai.personastack.connector.plist")
+	if result.Path != wantPath {
+		t.Fatalf("path = %q, want %q", result.Path, wantPath)
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, "Library")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Plan() wrote home directory or stat failed: %v", err)
 	}
 }
 
@@ -118,12 +155,21 @@ func TestInstallerFallsBackToLinuxAutostart(t *testing.T) {
 
 func TestInstallerWritesLaunchAgent(t *testing.T) {
 	homeDir := t.TempDir()
+	systemRoot := t.TempDir()
+	oppositePath := filepath.Join(systemRoot, "Library", "LaunchDaemons", "ai.personastack.connector.plist")
+	if err := os.MkdirAll(filepath.Dir(oppositePath), 0o755); err != nil {
+		t.Fatalf("mkdir opposite service: %v", err)
+	}
+	if err := os.WriteFile(oppositePath, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write opposite service: %v", err)
+	}
 	runner := &recordingRunner{}
 	result, err := (Installer{
 		HomeDir:        homeDir,
 		ExecutablePath: "/Applications/PersonaStack & Connector.app/Contents/MacOS/personastack-connector",
 		GOOS:           "darwin",
 		Runner:         runner,
+		SystemRoot:     systemRoot,
 	}).Install()
 	if err != nil {
 		t.Fatalf("Install() error = %v", err)
@@ -138,8 +184,90 @@ func TestInstallerWritesLaunchAgent(t *testing.T) {
 	if !strings.Contains(string(raw), "PersonaStack &amp; Connector.app") {
 		t.Fatalf("unexpected plist:\n%s", raw)
 	}
-	if len(runner.commands) != 4 || !strings.Contains(runner.commands[3], "kickstart") {
+	if _, err := os.Stat(oppositePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("opposite launchdaemon still exists or stat failed: %v", err)
+	}
+	if len(runner.commands) != 6 || runner.commands[0] != "launchctl bootout system "+oppositePath || runner.commands[1] != "launchctl disable system/ai.personastack.connector" || !strings.Contains(runner.commands[5], "kickstart") {
 		t.Fatalf("unexpected commands: %+v", runner.commands)
+	}
+}
+
+func TestInstallerWritesLaunchDaemon(t *testing.T) {
+	systemRoot := t.TempDir()
+	homeDir := t.TempDir()
+	oppositePath := filepath.Join(homeDir, "Library", "LaunchAgents", "ai.personastack.connector.plist")
+	if err := os.MkdirAll(filepath.Dir(oppositePath), 0o700); err != nil {
+		t.Fatalf("mkdir opposite service: %v", err)
+	}
+	if err := os.WriteFile(oppositePath, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write opposite service: %v", err)
+	}
+	runner := &recordingRunner{}
+	result, err := (Installer{
+		HomeDir:        homeDir,
+		ExecutablePath: "/usr/local/bin/personastack-connector",
+		GOOS:           "darwin",
+		Runner:         runner,
+		ServiceScope:   ServiceScopeSystemLaunchDaemon,
+		SystemRoot:     systemRoot,
+	}).Install()
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	if result.Kind != "launchdaemon" || result.Scope != ServiceScopeSystemLaunchDaemon {
+		t.Fatalf("result = %+v", result)
+	}
+	raw, err := os.ReadFile(filepath.Join(systemRoot, "Library", "LaunchDaemons", "ai.personastack.connector.plist"))
+	if err != nil {
+		t.Fatalf("read plist: %v", err)
+	}
+	content := string(raw)
+	for _, want := range []string{
+		"<string>--service-scope</string>",
+		"<string>system</string>",
+		"<key>KeepAlive</key><true/>",
+		"<key>RunAtLoad</key><true/>",
+		"<key>ThrottleInterval</key><integer>30</integer>",
+		"<key>ProcessType</key><string>Background</string>",
+		"Library/Logs/PersonaStack/personastack-connector.log",
+		"Library/Logs/PersonaStack/personastack-connector.err.log",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("launchdaemon plist missing %q:\n%s", want, content)
+		}
+	}
+	info, err := os.Stat(filepath.Join(systemRoot, "Library", "LaunchDaemons", "ai.personastack.connector.plist"))
+	if err != nil {
+		t.Fatalf("stat plist: %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("plist mode = %o, want 644", info.Mode().Perm())
+	}
+	logInfo, err := os.Stat(filepath.Join(systemRoot, "Library", "Logs", "PersonaStack"))
+	if err != nil {
+		t.Fatalf("stat log dir: %v", err)
+	}
+	if logInfo.Mode().Perm() != 0o755 {
+		t.Fatalf("log dir mode = %o, want 755", logInfo.Mode().Perm())
+	}
+	if _, err := os.Stat(oppositePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("opposite launchagent still exists or stat failed: %v", err)
+	}
+	guiDomain := fmt.Sprintf("gui/%d", os.Getuid())
+	if len(runner.commands) != 6 || runner.commands[0] != "launchctl bootout "+guiDomain+" "+oppositePath || runner.commands[1] != "launchctl disable "+guiDomain+"/ai.personastack.connector" || runner.commands[2] != "launchctl bootout system "+result.Path || runner.commands[3] != "launchctl bootstrap system "+result.Path || runner.commands[4] != "launchctl enable system/ai.personastack.connector" || !strings.Contains(runner.commands[5], "kickstart -k system/ai.personastack.connector") {
+		t.Fatalf("unexpected commands: %+v", runner.commands)
+	}
+}
+
+func TestInstallerRejectsSystemScopeOutsideDarwin(t *testing.T) {
+	_, err := (Installer{
+		HomeDir:        t.TempDir(),
+		ExecutablePath: "/opt/personastack-connector",
+		GOOS:           "linux",
+		ServiceScope:   ServiceScopeSystemLaunchDaemon,
+	}).Plan()
+	if err == nil || !strings.Contains(err.Error(), "requires darwin") {
+		t.Fatalf("Plan() error = %v, want darwin scope rejection", err)
 	}
 }
 

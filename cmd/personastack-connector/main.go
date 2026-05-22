@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	stdruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,20 +27,20 @@ import (
 )
 
 const usage = `Usage:
-  personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--openclaw-token <token>|--openclaw-password <password>|--openclaw-device-token <token>] [--openclaw-agent-id <id>]
-  personastack-connector status [--repair]
+  personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--service-scope user|system] [--openclaw-token <token>|--openclaw-password <password>|--openclaw-device-token <token>] [--openclaw-agent-id <id>]
+  personastack-connector status [--repair] [--service-scope user|system]
   personastack-connector diagnostics
   personastack-connector runtime detect
-  personastack-connector runtime repair
+  personastack-connector runtime repair [--service-scope user|system]
   personastack-connector runtime hermes configure [--enable-api] [--configure-mcp]
   personastack-connector runtime openclaw configure [--gateway ws://127.0.0.1:18789] [--configure-mcp]
-  personastack-connector mcp install
-  personastack-connector mcp repair
-  personastack-connector mcp stdio --binding <connection_id>
-  personastack-connector service install
-  personastack-connector service plan
-  personastack-connector run --foreground
-  personastack-connector unpair
+  personastack-connector mcp install [--service-scope user|system]
+  personastack-connector mcp repair [--service-scope user|system]
+  personastack-connector mcp stdio --binding <connection_id> [--service-scope user|system]
+  personastack-connector service install [--service-scope user|system]
+  personastack-connector service plan [--service-scope user|system]
+  personastack-connector run --foreground [--service-scope user|system]
+  personastack-connector unpair [--service-scope user|system]
   personastack-connector version
 `
 
@@ -50,9 +51,11 @@ type command struct {
 	store  config.Store
 }
 
-var installService = func() (service.InstallResult, error) {
-	return (service.Installer{}).Install()
+var installService = func(scope service.ServiceScope) (service.InstallResult, error) {
+	return (service.Installer{ServiceScope: scope}).Install()
 }
+
+var currentGOOS = stdruntime.GOOS
 
 var flaggyParseMu sync.Mutex
 
@@ -168,6 +171,7 @@ func (cmd command) runPair(args []string) error {
 	openClawPassword := ""
 	openClawDeviceToken := ""
 	openClawAgentID := ""
+	serviceScopeValue := "user"
 	pairingCode := ""
 
 	parser := newFlaggyParser("pair")
@@ -178,6 +182,7 @@ func (cmd command) runPair(args []string) error {
 	parser.String(&openClawPassword, "", "openclaw-password", "OpenClaw operator password")
 	parser.String(&openClawDeviceToken, "", "openclaw-device-token", "OpenClaw operator device token")
 	parser.String(&openClawAgentID, "", "openclaw-agent-id", "OpenClaw agent id")
+	parser.String(&serviceScopeValue, "", "service-scope", "service scope user or system")
 	parser.AddPositionalValue(&pairingCode, "code", 1, true, "pairing code")
 
 	err := parseFlaggyArgs(parser, args)
@@ -199,7 +204,23 @@ func (cmd command) runPair(args []string) error {
 		}
 		kind = detectedKind
 	}
+	serviceScope, err := service.ParseServiceScope(serviceScopeValue)
+	if err != nil {
+		return err
+	}
+	if serviceScope == service.ServiceScopeSystemLaunchDaemon && kind != runtime.AdapterKindOpenClaw {
+		return errors.New("system service scope currently requires OpenClaw runtime")
+	}
+	if serviceScope == service.ServiceScopeSystemLaunchDaemon {
+		if err := validateSystemServiceScopePlatform(); err != nil {
+			return err
+		}
+		if err := validateSystemServiceScopeAccess(); err != nil {
+			return err
+		}
+	}
 
+	cmd.store = cmd.storeForServiceScope(serviceScope)
 	writable, ok := cmd.store.(config.WritableStore)
 	if !ok {
 		return errors.New("connector store is not writable")
@@ -229,7 +250,7 @@ func (cmd command) runPair(args []string) error {
 	if err := writable.SaveBinding(binding); err != nil {
 		return err
 	}
-	repairResults, err := cmd.repairSetup(configureMCP)
+	repairResults, err := cmd.repairSetup(configureMCP, serviceScope)
 	if err != nil {
 		return err
 	}
@@ -253,7 +274,7 @@ func (cmd command) runPair(args []string) error {
 	for _, repairResult := range repairResults {
 		fmt.Fprintln(cmd.stdout, repairResult)
 	}
-	fmt.Fprintf(cmd.stdout, "paired persona=%s connection=%s runtime=%s configure_mcp=%t setup_state=pending_bridge_wake_probe\n", binding.PersonaID, binding.ConnectionID, binding.RuntimeKind, configureMCP)
+	fmt.Fprintf(cmd.stdout, "paired persona=%s connection=%s runtime=%s configure_mcp=%t service_scope=%s setup_state=pending_bridge_wake_probe\n", binding.PersonaID, binding.ConnectionID, binding.RuntimeKind, configureMCP, serviceScope)
 	return nil
 }
 
@@ -428,13 +449,20 @@ func readLine(reader io.Reader) (string, error) {
 
 func (cmd command) runStatus(ctx context.Context, args []string) error {
 	repair := false
+	scopeValue := "user"
 	parser := newFlaggyParser("status")
 	parser.Bool(&repair, "", "repair", "repair local connector setup")
+	parser.String(&scopeValue, "", "service-scope", "service scope user or system")
 
 	err := parseFlaggyArgs(parser, args)
 	if err != nil {
 		return err
 	}
+	scope, err := service.ParseServiceScope(scopeValue)
+	if err != nil {
+		return err
+	}
+	cmd.store = cmd.storeForServiceScope(scope)
 
 	bindings := cmd.store.ListBindings()
 	if len(bindings) == 0 {
@@ -442,7 +470,10 @@ func (cmd command) runStatus(ctx context.Context, args []string) error {
 		return nil
 	}
 	if repair {
-		results, err := cmd.repairSetup(true)
+		if err := validateServiceScopeForBindings(scope, bindings, true); err != nil {
+			return err
+		}
+		results, err := cmd.repairSetup(true, scope)
 		if err != nil {
 			return err
 		}
@@ -478,10 +509,23 @@ func (cmd command) runRuntime(args []string) error {
 		return errors.New("runtime requires a subcommand")
 	}
 	if args[0] == "repair" {
-		if len(args) != 1 {
-			return errors.New("runtime repair accepts no arguments")
+		scopeValue := "user"
+		parser := newFlaggyParser("runtime repair")
+		parser.String(&scopeValue, "", "service-scope", "service scope user or system")
+		err := parseFlaggyArgs(parser, args[1:])
+		if err != nil {
+			return err
 		}
-		for _, binding := range cmd.store.ListBindings() {
+		scope, err := service.ParseServiceScope(scopeValue)
+		if err != nil {
+			return err
+		}
+		cmd.store = cmd.storeForServiceScope(scope)
+		bindings := cmd.store.ListBindings()
+		if err := validateServiceScopeForBindings(scope, bindings, true); err != nil {
+			return err
+		}
+		for _, binding := range bindings {
 			detection := adapterForBinding(binding).Diagnose()
 			if detection.State != runtime.AdapterStateReady {
 				fmt.Fprintf(cmd.stdout, "runtime repair binding=%s runtime=%s state=%s note=%q action=%s\n", binding.ConnectionID, binding.RuntimeKind, detection.State, detection.Note, runtimeRepairAction(detection.State))
@@ -489,7 +533,7 @@ func (cmd command) runRuntime(args []string) error {
 			}
 			fmt.Fprintf(cmd.stdout, "runtime repair binding=%s runtime=%s state=%s note=%q\n", binding.ConnectionID, binding.RuntimeKind, detection.State, detection.Note)
 		}
-		results, err := cmd.repairSetup(true)
+		results, err := cmd.repairSetup(true, scope)
 		if err != nil {
 			return err
 		}
@@ -702,8 +746,20 @@ func (cmd command) runMCP(ctx context.Context, args []string) error {
 }
 
 func (cmd command) runMCPInstall(args []string) error {
-	if len(args) != 0 {
-		return errors.New("mcp install accepts no arguments")
+	scopeValue := "user"
+	parser := newFlaggyParser("mcp install")
+	parser.String(&scopeValue, "", "service-scope", "service scope user or system")
+	err := parseFlaggyArgs(parser, args)
+	if err != nil {
+		return err
+	}
+	scope, err := service.ParseServiceScope(scopeValue)
+	if err != nil {
+		return err
+	}
+	cmd.store = cmd.storeForServiceScope(scope)
+	if err := validateServiceScopeForBindings(scope, cmd.store.ListBindings(), true); err != nil {
+		return err
 	}
 	results, err := cmd.installMCP()
 	if err != nil {
@@ -716,8 +772,20 @@ func (cmd command) runMCPInstall(args []string) error {
 }
 
 func (cmd command) runMCPRepair(args []string) error {
-	if len(args) != 0 {
-		return errors.New("mcp repair accepts no arguments")
+	scopeValue := "user"
+	parser := newFlaggyParser("mcp repair")
+	parser.String(&scopeValue, "", "service-scope", "service scope user or system")
+	err := parseFlaggyArgs(parser, args)
+	if err != nil {
+		return err
+	}
+	scope, err := service.ParseServiceScope(scopeValue)
+	if err != nil {
+		return err
+	}
+	cmd.store = cmd.storeForServiceScope(scope)
+	if err := validateServiceScopeForBindings(scope, cmd.store.ListBindings(), true); err != nil {
+		return err
 	}
 	results, err := cmd.installMCP()
 	if err != nil {
@@ -756,11 +824,21 @@ func (cmd command) installMCPForKind(kind runtime.AdapterKind) ([]string, error)
 
 func (cmd command) runMCPStdio(ctx context.Context, args []string) error {
 	bindingID := ""
+	scopeValue := "user"
 	parser := newFlaggyParser("mcp stdio")
 	parser.String(&bindingID, "", "binding", "Connector binding id")
+	parser.String(&scopeValue, "", "service-scope", "service scope user or system")
 
 	err := parseFlaggyArgs(parser, args)
 	if err != nil {
+		return err
+	}
+	scope, err := service.ParseServiceScope(scopeValue)
+	if err != nil {
+		return err
+	}
+	cmd.store = cmd.storeForServiceScope(scope)
+	if err := validateServiceScopeForBindings(scope, cmd.store.ListBindings(), true); err != nil {
 		return err
 	}
 	if bindingID == "" {
@@ -778,26 +856,34 @@ func (cmd command) runService(args []string) error {
 	if args[0] != "install" && args[0] != "plan" {
 		return fmt.Errorf("unknown service subcommand %q", args[0])
 	}
-	if len(args) != 1 {
-		return fmt.Errorf("service %s accepts no arguments", args[0])
-	}
-	if args[0] == "plan" {
-		result, err := (service.Installer{}).Plan()
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(cmd.stdout, "service plan kind=%s path=%s\n", result.Kind, result.Path)
-		return nil
-	}
-	result, err := (service.Installer{}).Install()
+	scopeValue := "user"
+	parser := newFlaggyParser("service " + args[0])
+	parser.String(&scopeValue, "", "service-scope", "service scope user or system")
+	err := parseFlaggyArgs(parser, args[1:])
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.stdout, "service installed kind=%s path=%s\n", result.Kind, result.Path)
+	scope, err := service.ParseServiceScope(scopeValue)
+	if err != nil {
+		return err
+	}
+	if args[0] == "plan" {
+		result, err := (service.Installer{ServiceScope: scope}).Plan()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.stdout, "service plan kind=%s scope=%s path=%s\n", result.Kind, result.Scope, result.Path)
+		return nil
+	}
+	result, err := (service.Installer{ServiceScope: scope}).Install()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.stdout, "service installed kind=%s scope=%s path=%s\n", result.Kind, result.Scope, result.Path)
 	return nil
 }
 
-func (cmd command) repairSetup(configureMCP bool) ([]string, error) {
+func (cmd command) repairSetup(configureMCP bool, scope service.ServiceScope) ([]string, error) {
 	var results []string
 	if configureMCP {
 		mcpResults, err := cmd.installMCP()
@@ -806,11 +892,11 @@ func (cmd command) repairSetup(configureMCP bool) ([]string, error) {
 		}
 		results = append(results, mcpResults...)
 	}
-	serviceResult, err := installService()
+	serviceResult, err := installService(scope)
 	if err != nil {
 		return nil, err
 	}
-	results = append(results, fmt.Sprintf("service installed kind=%s path=%s", serviceResult.Kind, serviceResult.Path))
+	results = append(results, fmt.Sprintf("service installed kind=%s scope=%s path=%s", serviceResult.Kind, serviceResult.Scope, serviceResult.Path))
 	return results, nil
 }
 
@@ -832,28 +918,55 @@ func (cmd command) installMCP() ([]string, error) {
 
 func (cmd command) runDaemon(ctx context.Context, args []string) error {
 	foreground := false
+	scopeValue := "user"
 	parser := newFlaggyParser("run")
 	parser.Bool(&foreground, "", "foreground", "run in foreground")
+	parser.String(&scopeValue, "", "service-scope", "service scope user or system")
 
 	err := parseFlaggyArgs(parser, args)
+	if err != nil {
+		return err
+	}
+	scope, err := service.ParseServiceScope(scopeValue)
 	if err != nil {
 		return err
 	}
 	if !foreground {
 		return errors.New("run requires --foreground")
 	}
+	store := cmd.storeForServiceScope(scope)
+	bindings := store.ListBindings()
+	if err := validateServiceScopeForBindings(scope, bindings, true); err != nil {
+		return err
+	}
 
-	if err := (daemon.Runner{Store: cmd.store}).RunForeground(ctx); err != nil {
+	if err := (daemon.Runner{Store: store, ServiceScope: protocolServiceScope(scope)}).RunForeground(ctx); err != nil {
 		return err
 	}
 	fmt.Fprintln(cmd.stdout, "connector daemon stopped")
 	return nil
 }
 
-func (cmd command) runUnpair(args []string) error {
-	if len(args) != 0 {
-		return errors.New("unpair accepts no arguments")
+func (cmd command) storeForServiceScope(scope service.ServiceScope) config.Store {
+	if scope != service.ServiceScopeSystemLaunchDaemon {
+		return cmd.store
 	}
+	return config.SystemFileStore(os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT"))
+}
+
+func (cmd command) runUnpair(args []string) error {
+	scopeValue := "user"
+	parser := newFlaggyParser("unpair")
+	parser.String(&scopeValue, "", "service-scope", "service scope user or system")
+	err := parseFlaggyArgs(parser, args)
+	if err != nil {
+		return err
+	}
+	scope, err := service.ParseServiceScope(scopeValue)
+	if err != nil {
+		return err
+	}
+	cmd.store = cmd.storeForServiceScope(scope)
 	deleting, ok := cmd.store.(config.DeletingStore)
 	if !ok {
 		return errors.New("connector store does not support unpair")
@@ -870,6 +983,48 @@ func (cmd command) runUnpair(args []string) error {
 		fmt.Fprintf(cmd.stdout, "unpaired connection=%s persona=%s\n", binding.ConnectionID, binding.PersonaID)
 	}
 	return nil
+}
+
+func validateServiceScopeForBindings(scope service.ServiceScope, bindings []config.Binding, allowEmpty bool) error {
+	if scope != service.ServiceScopeSystemLaunchDaemon {
+		return nil
+	}
+	if err := validateSystemServiceScopePlatform(); err != nil {
+		return err
+	}
+	if len(bindings) == 0 && allowEmpty {
+		return nil
+	}
+	for _, binding := range bindings {
+		if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
+			return errors.New("system service scope currently requires OpenClaw runtime")
+		}
+	}
+	return nil
+}
+
+func validateSystemServiceScopePlatform() error {
+	if currentGOOS != "darwin" {
+		return errors.New("system service scope requires macOS")
+	}
+	return nil
+}
+
+func validateSystemServiceScopeAccess() error {
+	if strings.TrimSpace(os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT")) != "" {
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		return errors.New("system service scope requires sudo before pairing")
+	}
+	return nil
+}
+
+func protocolServiceScope(scope service.ServiceScope) externalagentprotocol.ServiceScope {
+	if scope == service.ServiceScopeSystemLaunchDaemon {
+		return externalagentprotocol.ServiceScopeSystemLaunchDaemon
+	}
+	return externalagentprotocol.ServiceScopeUserLaunchAgent
 }
 
 func defaultStore() config.Store {

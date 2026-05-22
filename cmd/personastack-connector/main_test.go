@@ -111,6 +111,114 @@ func TestRunUnpairDeletesBindings(t *testing.T) {
 	}
 }
 
+func TestRunStatusReadsSystemScopeStore(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT", root)
+	store := config.SystemFileStore(root)
+	err := store.SaveBinding(config.Binding{ConnectionID: "conn-system", PersonaID: "persona-system", RuntimeKind: runtime.AdapterKindOpenClaw})
+	if err != nil {
+		t.Fatalf("save system binding: %v", err)
+	}
+	var stdout bytes.Buffer
+	cmd := command{stdout: &stdout, stderr: io.Discard, store: config.EmptyStore()}
+
+	if err := cmd.runStatus(context.Background(), []string{"--service-scope", "system"}); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "conn-system") {
+		t.Fatalf("status did not read system store: %s", stdout.String())
+	}
+}
+
+func TestRunUnpairDeletesSystemScopeStore(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT", root)
+	store := config.SystemFileStore(root)
+	err := store.SaveBinding(config.Binding{ConnectionID: "conn-system", PersonaID: "persona-system", RuntimeKind: runtime.AdapterKindOpenClaw})
+	if err != nil {
+		t.Fatalf("save system binding: %v", err)
+	}
+	var stdout bytes.Buffer
+	cmd := command{stdout: &stdout, stderr: io.Discard, store: config.EmptyStore()}
+
+	if err := cmd.runUnpair([]string{"--service-scope", "system"}); err != nil {
+		t.Fatalf("runUnpair() error = %v", err)
+	}
+	if bindings := store.ListBindings(); len(bindings) != 0 {
+		t.Fatalf("system bindings were not deleted: %+v", bindings)
+	}
+}
+
+func TestRunPairSystemScopeRejectsHermes(t *testing.T) {
+	keyring.MockInit()
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		store:  &store,
+	}
+
+	err := cmd.runPair([]string{"PAIR-1234", "--runtime", "hermes", "--service-scope", "system"})
+	if err == nil || !strings.Contains(err.Error(), "system service scope currently requires OpenClaw runtime") {
+		t.Fatalf("runPair() error = %v", err)
+	}
+}
+
+func TestRunPairSystemScopeRequiresAccessBeforeExchange(t *testing.T) {
+	oldGOOS := currentGOOS
+	currentGOOS = "darwin"
+	t.Cleanup(func() { currentGOOS = oldGOOS })
+	keyring.MockInit()
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		store:  &store,
+	}
+
+	err := cmd.runPair([]string{"PAIR-1234", "--runtime", "openclaw", "--service-scope", "system"})
+	if os.Geteuid() == 0 {
+		if err == nil || !strings.Contains(err.Error(), "Post") {
+			t.Fatalf("runPair() error = %v, want exchange only after root access", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "requires sudo before pairing") {
+		t.Fatalf("runPair() error = %v, want sudo preflight rejection", err)
+	}
+}
+
+func TestRunDaemonSystemScopeRejectsNonDarwin(t *testing.T) {
+	oldGOOS := currentGOOS
+	currentGOOS = "linux"
+	t.Cleanup(func() { currentGOOS = oldGOOS })
+	cmd := command{stdout: io.Discard, stderr: io.Discard, store: config.EmptyStore()}
+
+	err := cmd.runDaemon(context.Background(), []string{"--foreground", "--service-scope", "system"})
+	if err == nil || !strings.Contains(err.Error(), "requires macOS") {
+		t.Fatalf("runDaemon() error = %v, want macOS rejection", err)
+	}
+}
+
+func TestRuntimeRepairSystemScopeRejectsHermesBinding(t *testing.T) {
+	oldGOOS := currentGOOS
+	currentGOOS = "darwin"
+	t.Cleanup(func() { currentGOOS = oldGOOS })
+	root := t.TempDir()
+	t.Setenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT", root)
+	store := config.SystemFileStore(root)
+	err := store.SaveBinding(config.Binding{ConnectionID: "conn-hermes", PersonaID: "persona-1", RuntimeKind: runtime.AdapterKindHermes})
+	if err != nil {
+		t.Fatalf("save system binding: %v", err)
+	}
+	cmd := command{stdout: io.Discard, stderr: io.Discard, store: config.EmptyStore()}
+
+	err = cmd.runRuntime([]string{"repair", "--service-scope", "system"})
+	if err == nil || !strings.Contains(err.Error(), "requires OpenClaw") {
+		t.Fatalf("runRuntime() error = %v, want OpenClaw rejection", err)
+	}
+}
+
 func TestRunStatusIncludesActiveAssignmentState(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -210,8 +318,8 @@ func TestRunPairReportsSuccessState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	oldInstallService := installService
-	installService = func() (service.InstallResult, error) {
-		return service.InstallResult{Kind: "launchagent", Path: "/tmp/personastack-connector.plist"}, nil
+	installService = func(scope service.ServiceScope) (service.InstallResult, error) {
+		return service.InstallResult{Kind: "launchagent", Scope: scope, Path: "/tmp/personastack-connector.plist"}, nil
 	}
 	t.Cleanup(func() {
 		installService = oldInstallService
@@ -259,8 +367,8 @@ func TestRunPairReportsSuccessState(t *testing.T) {
 		"Status: waiting for bridge wake probe",
 		"Details:",
 		"installed mcp binding=connection-1 runtime=hermes",
-		"service installed kind=launchagent path=/tmp/personastack-connector.plist",
-		"paired persona=persona-1 connection=connection-1 runtime=hermes configure_mcp=true setup_state=pending_bridge_wake_probe",
+		"service installed kind=launchagent scope=user_launch_agent path=/tmp/personastack-connector.plist",
+		"paired persona=persona-1 connection=connection-1 runtime=hermes configure_mcp=true service_scope=user_launch_agent setup_state=pending_bridge_wake_probe",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("pair output missing %q: %s", want, output)
@@ -273,8 +381,8 @@ func TestRunPairReportsDegradedState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	oldInstallService := installService
-	installService = func() (service.InstallResult, error) {
-		return service.InstallResult{Kind: "no_user_service_manager", Path: "/tmp/personastack-connector.desktop"}, nil
+	installService = func(scope service.ServiceScope) (service.InstallResult, error) {
+		return service.InstallResult{Kind: "no_user_service_manager", Scope: scope, Path: "/tmp/personastack-connector.desktop"}, nil
 	}
 	t.Cleanup(func() {
 		installService = oldInstallService
@@ -317,8 +425,8 @@ func TestRunPairReportsDegradedState(t *testing.T) {
 		"Local link: active",
 		"Status: waiting for bridge wake probe",
 		"Details:",
-		"service installed kind=no_user_service_manager path=/tmp/personastack-connector.desktop",
-		"paired persona=persona-2 connection=connection-2 runtime=hermes configure_mcp=true setup_state=pending_bridge_wake_probe",
+		"service installed kind=no_user_service_manager scope=user_launch_agent path=/tmp/personastack-connector.desktop",
+		"paired persona=persona-2 connection=connection-2 runtime=hermes configure_mcp=true service_scope=user_launch_agent setup_state=pending_bridge_wake_probe",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("pair output missing %q: %s", want, output)
@@ -331,8 +439,8 @@ func TestRunPairReplacesPreviousLocalBinding(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	oldInstallService := installService
-	installService = func() (service.InstallResult, error) {
-		return service.InstallResult{Kind: "launchagent", Path: "/tmp/personastack-connector.plist"}, nil
+	installService = func(scope service.ServiceScope) (service.InstallResult, error) {
+		return service.InstallResult{Kind: "launchagent", Scope: scope, Path: "/tmp/personastack-connector.plist"}, nil
 	}
 	t.Cleanup(func() {
 		installService = oldInstallService
@@ -418,8 +526,8 @@ func TestRunPairOpenClawPromptsForTokenBeforePairingExchange(t *testing.T) {
 	keyring.MockInit()
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_OPENCLAW_GATEWAY_START", "1")
 	oldInstallService := installService
-	installService = func() (service.InstallResult, error) {
-		return service.InstallResult{Kind: "no_user_service_manager", Path: "/tmp/personastack-connector.desktop"}, nil
+	installService = func(scope service.ServiceScope) (service.InstallResult, error) {
+		return service.InstallResult{Kind: "no_user_service_manager", Scope: scope, Path: "/tmp/personastack-connector.desktop"}, nil
 	}
 	t.Cleanup(func() {
 		installService = oldInstallService
@@ -489,8 +597,8 @@ func TestRunPairOpenClawDetectsTokenBeforePrompt(t *testing.T) {
 	}
 
 	oldInstallService := installService
-	installService = func() (service.InstallResult, error) {
-		return service.InstallResult{Kind: "no_user_service_manager", Path: "/tmp/personastack-connector.desktop"}, nil
+	installService = func(scope service.ServiceScope) (service.InstallResult, error) {
+		return service.InstallResult{Kind: "no_user_service_manager", Scope: scope, Path: "/tmp/personastack-connector.desktop"}, nil
 	}
 	t.Cleanup(func() {
 		installService = oldInstallService

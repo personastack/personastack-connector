@@ -39,9 +39,10 @@ func CredentialFromBinding(binding config.Binding) (Credential, error) {
 }
 
 type Session struct {
-	Binding    config.Binding
-	Credential Credential
-	Now        func() time.Time
+	Binding      config.Binding
+	Credential   Credential
+	ServiceScope externalagentprotocol.ServiceScope
+	Now          func() time.Time
 }
 
 func NewSession(binding config.Binding, credential Credential) (Session, error) {
@@ -105,6 +106,7 @@ func (s Session) HeartbeatFrameWithDiagnostic(state runtime.AdapterState, diagno
 		ReadinessStatus:        readinessForAdapterState(state, lastWakeProbeAt),
 		DiagnosticCode:         externalagentprotocol.DiagnosticCode(diagnosticCodeForAdapterState(state, diagnosticCode)),
 		RuntimeKind:            runtimeKindForAdapter(s.Binding.RuntimeKind),
+		ServiceScope:           s.serviceScope(),
 		ConnectionGeneration:   s.Binding.ConnectionGeneration,
 		Hostname:               localHostname(),
 		NativeMCPServerName:    strings.TrimSpace(s.Binding.NativeMCPServer),
@@ -119,6 +121,13 @@ func (s Session) HeartbeatFrameWithDiagnostic(state runtime.AdapterState, diagno
 		LastWakeProbeAt:        lastWakeProbeAt,
 	}
 	return frame
+}
+
+func (s Session) serviceScope() externalagentprotocol.ServiceScope {
+	if s.ServiceScope != "" {
+		return s.ServiceScope
+	}
+	return externalagentprotocol.ServiceScopeUserLaunchAgent
 }
 
 func localHostname() string {

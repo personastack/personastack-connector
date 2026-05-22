@@ -147,6 +147,14 @@ func DefaultFileStore() (FileStore, error) {
 	return NewFileStore(filepath.Join(dir, "personastack", "connector", "state.json")), nil
 }
 
+func SystemFileStore(systemRoot string) FileStore {
+	root := strings.TrimSpace(systemRoot)
+	if root == "" {
+		root = string(filepath.Separator)
+	}
+	return NewFileStore(filepath.Join(root, "Library", "Application Support", "PersonaStack", "Connector", "state.json"))
+}
+
 func NewFileStore(path string) FileStore {
 	return FileStore{path: path}
 }

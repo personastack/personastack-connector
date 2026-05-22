@@ -158,6 +158,19 @@ func TestHeartbeatFrameReportsDiagnosticCode(t *testing.T) {
 	}
 }
 
+func TestHeartbeatFrameReportsServiceScope(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session := testSession(t, publicKey, privateKey)
+	session.ServiceScope = externalagentprotocol.ServiceScopeSystemLaunchDaemon
+	frame := session.HeartbeatFrame(runtime.AdapterStateReady, nil)
+	if frame.Heartbeat.ServiceScope != externalagentprotocol.ServiceScopeSystemLaunchDaemon {
+		t.Fatalf("service scope = %q", frame.Heartbeat.ServiceScope)
+	}
+}
+
 func testSession(t *testing.T, publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey) Session {
 	t.Helper()
 	session, err := NewSession(config.Binding{
