@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/personastack/personastack-connector/internal/runtime"
@@ -88,14 +89,23 @@ type DeletingStore interface {
 }
 
 type MemoryStore struct {
-	state State
+	mu    *sync.RWMutex
+	state *State
 }
 
 func NewMemoryStore(state State) MemoryStore {
-	return MemoryStore{state: state}
+	copied := state
+	return MemoryStore{mu: &sync.RWMutex{}, state: &copied}
 }
 
 func (store MemoryStore) Binding(connectionID ConnectionID) (Binding, bool) {
+	if store.mu != nil {
+		store.mu.RLock()
+		defer store.mu.RUnlock()
+	}
+	if store.state == nil {
+		return Binding{}, false
+	}
 	for _, binding := range store.state.Bindings {
 		if binding.ConnectionID == connectionID {
 			return binding, true
@@ -105,6 +115,13 @@ func (store MemoryStore) Binding(connectionID ConnectionID) (Binding, bool) {
 }
 
 func (store MemoryStore) ListBindings() []Binding {
+	if store.mu != nil {
+		store.mu.RLock()
+		defer store.mu.RUnlock()
+	}
+	if store.state == nil {
+		return nil
+	}
 	bindings := make([]Binding, len(store.state.Bindings))
 	copy(bindings, store.state.Bindings)
 	return bindings
@@ -118,6 +135,13 @@ func (store *MemoryStore) SaveBinding(binding Binding) error {
 	if store == nil {
 		return fmt.Errorf("memory store required")
 	}
+	if store.mu != nil {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+	}
+	if store.state == nil {
+		store.state = &State{}
+	}
 	store.state.Bindings = []Binding{binding}
 	return nil
 }
@@ -125,6 +149,13 @@ func (store *MemoryStore) SaveBinding(binding Binding) error {
 func (store *MemoryStore) DeleteBinding(connectionID ConnectionID) error {
 	if store == nil {
 		return fmt.Errorf("memory store required")
+	}
+	if store.mu != nil {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+	}
+	if store.state == nil {
+		return nil
 	}
 	for i, binding := range store.state.Bindings {
 		if binding.ConnectionID == connectionID {

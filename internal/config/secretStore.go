@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/zalando/go-keyring"
 )
@@ -13,6 +14,7 @@ var (
 	keyringGet    = keyring.Get
 	keyringSet    = keyring.Set
 	keyringDelete = keyring.Delete
+	keyringMu     sync.Mutex
 )
 
 func storeBindingSecrets(binding Binding) (Binding, error) {
@@ -112,10 +114,10 @@ func bindingSecretKey(connectionID string, name string) string {
 
 func storeSecret(secretKey string, value string) error {
 	if shouldForceFallbackSecretStore() {
-		_ = keyringDelete(keyringService, secretKey)
+		_ = lockedKeyringDelete(secretKey)
 		return fallbackSecretSet(secretKey, value)
 	}
-	keyringErr := keyringSet(keyringService, secretKey, value)
+	keyringErr := lockedKeyringSet(secretKey, value)
 	fallbackErr := fallbackSecretSet(secretKey, value)
 	if keyringErr == nil || fallbackErr == nil {
 		return nil
@@ -130,7 +132,7 @@ func loadSecret(secretKey string) string {
 		}
 		return ""
 	}
-	if secret, err := keyringGet(keyringService, secretKey); err == nil && strings.TrimSpace(secret) != "" {
+	if secret, err := lockedKeyringGet(secretKey); err == nil && strings.TrimSpace(secret) != "" {
 		return strings.TrimSpace(secret)
 	}
 	if secret, err := fallbackSecretGet(secretKey); err == nil && strings.TrimSpace(secret) != "" {
@@ -141,12 +143,30 @@ func loadSecret(secretKey string) string {
 
 func deleteSecret(secretKey string) error {
 	if shouldForceFallbackSecretStore() {
-		_ = keyringDelete(keyringService, secretKey)
+		_ = lockedKeyringDelete(secretKey)
 		return fallbackSecretDelete(secretKey)
 	}
-	keyringErr := keyringDelete(keyringService, secretKey)
+	keyringErr := lockedKeyringDelete(secretKey)
 	if fallbackErr := fallbackSecretDelete(secretKey); fallbackErr != nil {
 		return fallbackErr
 	}
 	return keyringErr
+}
+
+func lockedKeyringGet(secretKey string) (string, error) {
+	keyringMu.Lock()
+	defer keyringMu.Unlock()
+	return keyringGet(keyringService, secretKey)
+}
+
+func lockedKeyringSet(secretKey string, value string) error {
+	keyringMu.Lock()
+	defer keyringMu.Unlock()
+	return keyringSet(keyringService, secretKey, value)
+}
+
+func lockedKeyringDelete(secretKey string) error {
+	keyringMu.Lock()
+	defer keyringMu.Unlock()
+	return keyringDelete(keyringService, secretKey)
 }
