@@ -77,6 +77,7 @@ func TestRunnerStaysAliveWithNoBindings(t *testing.T) {
 }
 
 func TestRunnerStartsBindingSavedAfterIdle(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)

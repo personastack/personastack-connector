@@ -108,6 +108,7 @@ func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 }
 
 func TestFileStoreUsesEncryptedFallbackWhenKeyringUnavailable(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
 	t.Setenv("HOME", t.TempDir())
 
 	originalGet := keyringGet
@@ -180,6 +181,7 @@ func TestFileStoreUsesEncryptedFallbackWhenKeyringUnavailable(t *testing.T) {
 }
 
 func TestFileStoreUsesEncryptedFallbackOnDarwinKeyringFailure(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
 	t.Setenv("HOME", t.TempDir())
 
 	originalGet := keyringGet
@@ -224,6 +226,7 @@ func TestFileStoreUsesEncryptedFallbackOnDarwinKeyringFailure(t *testing.T) {
 }
 
 func TestFileStoreKeepsEncryptedFallbackWhenKeyringWriteSucceeds(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
 	t.Setenv("HOME", t.TempDir())
 
 	secrets := map[string]string{}
