@@ -808,8 +808,9 @@ func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Bin
 }
 
 func contextForRunDeadline(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
-	if deadline.IsZero() {
-		return context.WithCancel(parent)
+	maxDeadline := time.Now().UTC().Add(time.Minute)
+	if deadline.IsZero() || deadline.UTC().After(maxDeadline) {
+		return context.WithDeadline(parent, maxDeadline)
 	}
 	return context.WithDeadline(parent, deadline.UTC())
 }

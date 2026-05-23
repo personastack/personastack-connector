@@ -82,6 +82,8 @@ external persona.
 - If the Connector reconnects while a run is still locally active, it must
   replay the accepted and started state for that run before waiting for the
   next dispatch.
+- Connector run observation must cap any received `run.start` deadline to one
+  minute from local receipt time.
 - A draining `server.draining` hint should start an overlapped replacement
   websocket attempt before the old websocket closes when possible, and the old
   websocket must stay usable until the drain deadline expires or the

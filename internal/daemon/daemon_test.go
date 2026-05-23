@@ -974,6 +974,19 @@ func TestContextForRunDeadlineExpires(t *testing.T) {
 	}
 }
 
+func TestContextForRunDeadlineCapsLongDeadlines(t *testing.T) {
+	before := time.Now().UTC()
+	ctx, cancel := contextForRunDeadline(t.Context(), before.Add(15*time.Minute))
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("deadline missing")
+	}
+	if deadline.After(before.Add(time.Minute + time.Second)) {
+		t.Fatalf("deadline = %s, want within one minute", deadline)
+	}
+}
+
 func TestObserveReplayedActiveRunExpiresWithStoredDeadlineAndCancelsAsync(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
