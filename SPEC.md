@@ -68,8 +68,10 @@ external persona.
 - Redelivered `run.start` frames for the currently active run id must reuse the
   journaled native run id and resend accepted/started frames instead of starting
   a second local runtime run.
-- A `run.start` for a different run id while one run is active must fail locally
-  without overwriting the active assignment or starting another native run.
+- A `run.start` for a different run id while local state still has an active
+  assignment must clear the stale local assignment and continue. The API owns run
+  admission and a gateway-dispatched new run is proof that the previous local
+  assignment is no longer authoritative.
 - Duplicate command `message_id` values within one websocket session must be
   idempotent: waitable commands replay the cached reply and side-effect-only
   commands are not re-applied.

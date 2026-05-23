@@ -713,7 +713,14 @@ func (r Runner) activeRunConflict(binding config.Binding, frame externalagentpro
 	if activeRunID == strings.TrimSpace(frame.RunID) && strings.TrimSpace(latest.ActiveAssignmentID) == strings.TrimSpace(frame.AssignmentID) {
 		return "", false
 	}
+	if r.clearStaleActiveRunConflict(binding, latest) {
+		return "", false
+	}
 	return activeRunID, true
+}
+
+func (r Runner) clearStaleActiveRunConflict(binding config.Binding, latest config.Binding) bool {
+	return r.clearRunState(binding, latest.ActiveRunID) == nil
 }
 
 func (r Runner) replayActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, writeFrame func(externalagentprotocol.Frame) error) error {

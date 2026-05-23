@@ -2167,7 +2167,7 @@ func TestRunnerReconnectsWithFreshGenerationAfterDrainHint(t *testing.T) {
 	}
 }
 
-func TestActiveRunConflictRejectsDifferentActiveRun(t *testing.T) {
+func TestActiveRunConflictClearsStaleDifferentActiveRun(t *testing.T) {
 	binding := config.Binding{
 		ConnectionID:       "conn-1",
 		PersonaID:          "persona-1",
@@ -2178,17 +2178,29 @@ func TestActiveRunConflictRejectsDifferentActiveRun(t *testing.T) {
 	runner := Runner{Store: &store}
 
 	activeRunID, conflict := runner.activeRunConflict(binding, externalagentprotocol.Frame{RunID: "run-2"})
-	if !conflict || activeRunID != "run-1" {
-		t.Fatalf("expected active run conflict, got conflict=%t active=%q", conflict, activeRunID)
+	if conflict || activeRunID != "" {
+		t.Fatalf("expected stale active run to clear, got conflict=%t active=%q", conflict, activeRunID)
+	}
+	cleared, ok := store.Binding("conn-1")
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" {
+		t.Fatalf("stale active run not cleared: %+v", cleared)
 	}
 
+	binding.ActiveRunID = "run-1"
+	binding.ActiveAssignmentID = "assignment-1"
+	store = config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	runner = Runner{Store: &store}
 	activeRunID, conflict = runner.activeRunConflict(binding, externalagentprotocol.Frame{RunID: "run-1", AssignmentID: "assignment-1"})
 	if conflict || activeRunID != "" {
 		t.Fatalf("did not expect same-run conflict, got conflict=%t active=%q", conflict, activeRunID)
 	}
 	activeRunID, conflict = runner.activeRunConflict(binding, externalagentprotocol.Frame{RunID: "run-1", AssignmentID: "assignment-2"})
-	if !conflict || activeRunID != "run-1" {
-		t.Fatalf("expected assignment conflict, got conflict=%t active=%q", conflict, activeRunID)
+	if conflict || activeRunID != "" {
+		t.Fatalf("expected stale assignment to clear, got conflict=%t active=%q", conflict, activeRunID)
+	}
+	cleared, ok = store.Binding("conn-1")
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveNativeRunID != "" || !cleared.ActiveRunDeadlineAt.IsZero() {
+		t.Fatalf("stale assignment not cleared: %+v", cleared)
 	}
 }
 
