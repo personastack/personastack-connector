@@ -60,6 +60,9 @@ external persona.
   remains in the user's config directory.
 - Pairing, connect, and heartbeat payloads include the local machine hostname as
   bounded non-secret operator-facing metadata.
+- Initial connect and heartbeat payloads include the compiled Connector version
+  so API-owned external persona state can display the installed Connector and
+  prompt upgrades when recommended releases advance.
 - Each binding has one PersonaStack connection id, persona id, external agent
   kind, bridge credential, PersonaStack MCP credential, native MCP server name,
   local runtime selection, and local readiness state.
@@ -84,10 +87,13 @@ external persona.
   next dispatch.
 - Connector run observation must cap any received `run.start` deadline to one
   minute from local receipt time.
-- A draining `server.draining` hint should start an overlapped replacement
-  websocket attempt before the old websocket closes when possible, and the old
-  websocket must stay usable until the drain deadline expires or the
-  replacement is established.
+- A draining `server.draining` hint must close the current websocket session and
+  reconnect through the same binding loop with a fresh connection generation.
+  The Connector must not run overlapping websocket sessions for one binding.
+- Local state mutations are owned by the current websocket generation. Stale
+  generations must not record heartbeat or wake-probe timestamps, activate or
+  clear runs, cancel native runs, refresh MCP config, revoke bindings, or update
+  runtime credentials after a newer generation exists.
 - Connection status must not report wakeable from persisted probe timestamps
   alone; each websocket session must complete a live wake probe before it may
   report wakeable or accept a new `run.start`, unless the current runtime state
@@ -116,6 +122,10 @@ external persona.
 - `personastack-connector run --foreground`
 - `personastack-connector run --foreground --service-scope user`
 - `personastack-connector run --foreground --service-scope system`
+- `personastack-connector service install --service-scope user`
+- `personastack-connector service install --service-scope system`
+- `personastack-connector service uninstall --service-scope user`
+- `personastack-connector service uninstall --service-scope system`
 - `personastack-connector unpair`
 
 Default setup must require only package installation plus the pairing command.
@@ -148,6 +158,14 @@ Adapters implement the same finite runtime operations:
 - `cancel_run`
 - `diagnose`
 - optional prompt-safe native capability discovery; transient discovery errors must leave native capabilities unreported rather than reporting an empty list
+- Native capability reports must include discovery status and the exact native
+  sources represented by the report. Partial discovery must report valid
+  same-source capabilities with `partial` status so receivers can replace only
+  the reported sources and preserve failed or unknown sources.
+- Unchanged capability reports must be retransmitted periodically while the
+  websocket session remains connected so best-effort downstream persistence can
+  recover from transient API or Redis write failures without waiting for local
+  capability content to change.
 
 Native MCP configuration and verification are Connector-level operations owned
 by `internal/mcp`, not runtime-adapter methods. The daemon combines adapter
@@ -176,6 +194,9 @@ Adapter result states must be concrete typed enums, including:
 - Connector journals the active PersonaStack run id, assignment id, and native
   runtime run id in binding state while the run is active and clears them on
   terminal cleanup.
+- If native runtime start succeeds but native run id journaling fails, Connector
+  must best-effort cancel that native run and include the native run id in the
+  failure frame instead of leaving a still-executing uncorrelated native run.
 - Native runtime config intentionally contains a direct PersonaStack bearer
   header for the external persona's durable MCP credential so users can call
   PersonaStack MCP from Hermes/OpenClaw outside PersonaStack-dispatched runs.
@@ -217,6 +238,10 @@ Adapter result states must be concrete typed enums, including:
 - Hermes response and chat-completions fallbacks must report degraded streaming
   and cancel support and must not claim full wakeability.
 - Put API-rendered `fully_composed_prompt` in Hermes `input` by default.
+- Connector-dispatched Hermes `/v1/runs` requests must set
+  `include_native_tools=true` so Hermes builds its normal native tool registry
+  and adds the configured PersonaStack MCP server instead of replacing native
+  tools with MCP-only tooling.
 - Include PersonaStack run id, assignment id, native MCP server name, and native
   MCP namespace as bounded non-secret Hermes run metadata.
 - Use Hermes `instructions` only when API provides explicit structured prompt
@@ -227,9 +252,11 @@ Adapter result states must be concrete typed enums, including:
 - Map Hermes native run events to Connector protocol run events.
 - Treat cancellation as best-effort until Hermes returns terminal state or the
   Connector cancellation timeout expires.
-- Hermes capability discovery uses only `/v1/capabilities` and reports verified
+- Hermes runtime feature discovery uses `/v1/capabilities` and reports verified
   runtime features such as delegated task acceptance, status, streaming, and
-  cancellation. It must not parse local Hermes config to infer native tools.
+  cancellation. Prompt-safe native tool summaries use
+  `hermes tools list --platform cli`; Connector must not parse local Hermes
+  config to infer native tools.
 
 ## OpenClaw Runtime
 
@@ -244,9 +271,8 @@ Adapter result states must be concrete typed enums, including:
   write success alone.
 - OpenClaw CLI fallback is degraded only and must not claim Gateway streaming or
   cancel parity unless the same native run id can be waited and cancelled.
-- OpenClaw capability discovery uses Gateway `tools.catalog` with plugins
-  included, filters out the PersonaStack injected MCP server, and reports one
-  prompt-safe capability summary per remaining tool group.
+- OpenClaw capability discovery uses Gateway `skills.status` and reports one
+  prompt-safe capability summary per ready skill.
 
 ## Security
 
@@ -263,7 +289,8 @@ Adapter result states must be concrete typed enums, including:
 
 ## Packaging
 
-- V1 release targets are macOS and Linux.
+- V1 release targets are macOS `darwin/amd64`, macOS `darwin/arm64`, Linux
+  `linux/amd64`, and Linux `linux/arm64`.
 - Termux is unsupported as a Connector host even if Hermes can run there.
 - GitHub Actions must run unit tests and a GoReleaser snapshot dry-run on pull
   requests and `main` pushes. Snapshot artifacts are validation outputs only
@@ -292,6 +319,12 @@ Adapter result states must be concrete typed enums, including:
 - macOS system-scope setup requires `sudo` and does not prevent machine sleep.
   The persona may report offline while the Mac is asleep; Connector must
   reconnect and re-probe after wake.
+- Service uninstall removes only Connector-owned OS background service
+  registration. It must not delete pairing state, local config, credentials, or
+  logs.
+- macOS service uninstall unloads, disables, and removes the selected
+  `ai.personastack.connector` LaunchAgent or LaunchDaemon plist. System-scope
+  uninstall requires `sudo`.
 - Tagged releases also publish cosign-bundled signatures for the checksum file
   and the release manifest, so advanced guidance can verify release artifacts
   without making verification part of the primary install command.
@@ -322,6 +355,9 @@ Adapter result states must be concrete typed enums, including:
 - WSL2 uses the Linux Connector inside the WSL2 environment.
 - Linux service installation prefers `systemd --user` and falls back to an XDG
   autostart desktop entry when user systemd is unavailable.
+- Linux service uninstall disables the `systemd --user` unit when present,
+  removes the systemd user unit and default-target wants symlink, and removes
+  the XDG autostart fallback entry.
 - OpenClaw mobile nodes are not Connector hosts; they require Gateway on
   macOS, Linux, or the Linux Connector inside WSL2.
 - iOS and Android are not Connector host targets in V1.

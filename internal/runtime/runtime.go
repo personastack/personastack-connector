@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -105,7 +106,9 @@ type NativeCapabilitySource string
 
 const (
 	NativeCapabilitySourceOpenClawToolsCatalog NativeCapabilitySource = "openclaw_tools_catalog"
+	NativeCapabilitySourceOpenClawReadySkills  NativeCapabilitySource = "openclaw_ready_skills"
 	NativeCapabilitySourceHermesRuntimeAPI     NativeCapabilitySource = "hermes_runtime_api"
+	NativeCapabilitySourceHermesToolsList      NativeCapabilitySource = "hermes_tools_list"
 )
 
 type NativeCapabilityKind string
@@ -113,6 +116,8 @@ type NativeCapabilityKind string
 const (
 	NativeCapabilityKindToolGroup      NativeCapabilityKind = "tool_group"
 	NativeCapabilityKindRuntimeFeature NativeCapabilityKind = "runtime_feature"
+	NativeCapabilityKindNativeTool     NativeCapabilityKind = "native_tool"
+	NativeCapabilityKindSkill          NativeCapabilityKind = "skill"
 )
 
 type NativeCapability struct {
@@ -121,6 +126,17 @@ type NativeCapability struct {
 	CapabilityID string
 	Label        string
 	Summary      string
+	Degraded     bool
+}
+
+func nativeCapabilitySource(source NativeCapabilitySource) NativeCapability {
+	return NativeCapability{Source: source}
+}
+
+func markNativeCapabilitiesDegraded(capabilities []NativeCapability) {
+	for index := range capabilities {
+		capabilities[index].Degraded = true
+	}
 }
 
 type NativeCapabilityDescriber interface {
@@ -190,23 +206,55 @@ type RunRequest struct {
 	Metadata               map[string]string
 }
 
+const maxRunMetadataEntries = 24
+const maxRunMetadataCanonicalEntries = 4
+const maxRunMetadataCallerEntries = maxRunMetadataEntries - maxRunMetadataCanonicalEntries
+const maxRunMetadataKeyRunes = 80
+const maxRunMetadataValueRunes = 512
+
 func runMetadata(request RunRequest) map[string]string {
 	metadata := map[string]string{}
-	for key, value := range request.Metadata {
-		trimmedKey := strings.TrimSpace(key)
-		trimmedValue := strings.TrimSpace(value)
+	keys := make([]string, 0, len(request.Metadata))
+	for key := range request.Metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if len(metadata) >= maxRunMetadataCallerEntries {
+			break
+		}
+		trimmedKey := boundedRunMetadataText(key, maxRunMetadataKeyRunes)
+		trimmedValue := boundedRunMetadataText(request.Metadata[key], maxRunMetadataValueRunes)
 		if trimmedKey == "" || trimmedValue == "" {
 			continue
 		}
 		metadata[trimmedKey] = trimmedValue
 	}
-	if strings.TrimSpace(request.RunID) != "" {
-		metadata["personastack_run_id"] = strings.TrimSpace(request.RunID)
-	}
-	if strings.TrimSpace(request.AssignmentID) != "" {
-		metadata["personastack_assignment_id"] = strings.TrimSpace(request.AssignmentID)
-	}
+	setRunMetadata(metadata, "personastack_run_id", request.RunID)
+	setRunMetadata(metadata, "personastack_assignment_id", request.AssignmentID)
+	setRunMetadata(metadata, "native_mcp_server", request.NativeMCPServerName)
+	setRunMetadata(metadata, "native_mcp_namespace", request.NativeMCPToolNamespace)
 	return metadata
+}
+
+func setRunMetadata(metadata map[string]string, key string, value string) {
+	boundedValue := boundedRunMetadataText(value, maxRunMetadataValueRunes)
+	if boundedValue == "" {
+		return
+	}
+	metadata[key] = boundedValue
+}
+
+func boundedRunMetadataText(value string, limit int) string {
+	trimmed := strings.TrimSpace(value)
+	if limit <= 0 {
+		return trimmed
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= limit {
+		return trimmed
+	}
+	return strings.TrimSpace(string(runes[:limit]))
 }
 
 type RunResult struct {

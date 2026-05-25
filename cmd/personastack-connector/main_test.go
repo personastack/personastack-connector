@@ -33,7 +33,7 @@ func TestRunHelp(t *testing.T) {
 	}
 
 	output := stdout.String()
-	for _, want := range []string{"pair <code>", "status [--repair]", "diagnostics", "runtime detect", "mcp stdio --binding", "service plan", "run --foreground", "version"} {
+	for _, want := range []string{"pair <code>", "status [--repair]", "diagnostics", "runtime detect", "mcp stdio --binding", "service plan", "service uninstall", "run --foreground", "version"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("help output missing %q: %s", want, output)
 		}
@@ -80,6 +80,80 @@ func TestRunServicePlan(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "service plan kind=") {
 		t.Fatalf("unexpected service plan output: %s", stdout.String())
+	}
+}
+
+func TestRunServiceUninstall(t *testing.T) {
+	homeDir := t.TempDir()
+	path := filepath.Join(homeDir, ".config", "systemd", "user", "personastack-connector.service")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir service dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("write service file: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	oldGOOS := currentGOOS
+	currentGOOS = "linux"
+	t.Cleanup(func() { currentGOOS = oldGOOS })
+	oldServiceInstaller := newServiceInstaller
+	newServiceInstaller = func(scope service.ServiceScope) service.Installer {
+		return service.Installer{
+			HomeDir:      homeDir,
+			GOOS:         "linux",
+			Runner:       &serviceRecordingRunner{},
+			ServiceScope: scope,
+		}
+	}
+	t.Cleanup(func() { newServiceInstaller = oldServiceInstaller })
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Run(context.Background(), []string{"service", "uninstall"}, strings.NewReader(""), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "service uninstalled kind=") || !strings.Contains(output, "removed=true") {
+		t.Fatalf("unexpected uninstall output: %s", output)
+	}
+}
+
+type serviceRecordingRunner struct{}
+
+func (serviceRecordingRunner) Run(string, ...string) error {
+	return nil
+}
+
+func TestRunServiceUninstallSystemScopeRequiresAccess(t *testing.T) {
+	oldGOOS := currentGOOS
+	currentGOOS = "darwin"
+	t.Cleanup(func() { currentGOOS = oldGOOS })
+	if os.Geteuid() == 0 {
+		t.Setenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT", t.TempDir())
+	}
+	oldServiceInstaller := newServiceInstaller
+	newServiceInstaller = func(scope service.ServiceScope) service.Installer {
+		return service.Installer{
+			HomeDir:      t.TempDir(),
+			GOOS:         "darwin",
+			Runner:       &serviceRecordingRunner{},
+			ServiceScope: scope,
+			SystemRoot:   os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT"),
+		}
+	}
+	t.Cleanup(func() { newServiceInstaller = oldServiceInstaller })
+	cmd := command{stdout: io.Discard, stderr: io.Discard, store: config.EmptyStore()}
+
+	err := cmd.runService([]string{"uninstall", "--service-scope", "system"})
+	if os.Geteuid() == 0 {
+		if err != nil {
+			t.Fatalf("runService() error = %v, want root access allowed", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "requires sudo before uninstall") {
+		t.Fatalf("runService() error = %v, want sudo uninstall rejection", err)
 	}
 }
 

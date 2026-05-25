@@ -153,6 +153,33 @@ type openClawToolsCatalogTool struct {
 	PluginID string `json:"pluginId,omitempty"`
 }
 
+type openClawSkillsStatusResult struct {
+	Skills []openClawSkillStatus `json:"skills"`
+}
+
+type openClawSkillStatus struct {
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	Key                 string   `json:"key"`
+	Slug                string   `json:"slug"`
+	Label               string   `json:"label"`
+	Title               string   `json:"title"`
+	Source              string   `json:"source"`
+	SourceID            string   `json:"sourceId"`
+	SourceName          string   `json:"sourceName"`
+	PluginID            string   `json:"pluginId"`
+	PluginName          string   `json:"pluginName"`
+	MCPServerName       string   `json:"mcpServerName"`
+	Description         string   `json:"description"`
+	Summary             string   `json:"summary"`
+	Status              string   `json:"status"`
+	Eligible            *bool    `json:"eligible"`
+	Ready               *bool    `json:"ready"`
+	Enabled             *bool    `json:"enabled"`
+	MissingRequirements []string `json:"missingRequirements"`
+	Missing             []string `json:"missing"`
+}
+
 type OpenClawMCPVerificationResult struct {
 	OK   bool
 	Note string
@@ -177,11 +204,58 @@ func (adapter OpenClawAdapter) VerifyMCPCatalog(ctx context.Context, serverName 
 }
 
 func (adapter OpenClawAdapter) DescribeNativeCapabilities(ctx context.Context, nativeMCPServerName string) ([]NativeCapability, error) {
-	catalog, err := adapter.fetchOpenClawToolsCatalog(ctx, "native-capabilities-1")
+	status, err := adapter.fetchOpenClawSkillsStatus(ctx, "native-capabilities-1")
 	if err != nil {
 		return nil, err
 	}
-	return catalog.nativeCapabilitySummaries(nativeMCPServerName), nil
+	capabilities := status.nativeCapabilitySummaries(nativeMCPServerName)
+	if len(capabilities) == 0 {
+		capabilities = append(capabilities, nativeCapabilitySource(NativeCapabilitySourceOpenClawReadySkills))
+	}
+	return capabilities, nil
+}
+
+func (adapter OpenClawAdapter) fetchOpenClawSkillsStatus(ctx context.Context, requestID string) (openClawSkillsStatusResult, error) {
+	connectCtx, cancel := context.WithTimeout(ctx, openClawSetupRetryBudget)
+	defer cancel()
+	conn, err := adapter.connectOperatorWithRetry(connectCtx)
+	if err != nil {
+		return openClawSkillsStatusResult{}, fmt.Errorf("OpenClaw skills.status connect failed: %w", err)
+	}
+	defer conn.Close()
+	params := map[string]any{}
+	if trimmed := strings.TrimSpace(adapter.AgentID); trimmed != "" {
+		params["agentId"] = trimmed
+	}
+	trimmedRequestID := strings.TrimSpace(requestID)
+	if trimmedRequestID == "" {
+		trimmedRequestID = "skills-status-1"
+	}
+	err = conn.WriteJSON(openClawRequest{
+		Type:   "req",
+		ID:     trimmedRequestID,
+		Method: "skills.status",
+		Params: params,
+	})
+	if err != nil {
+		return openClawSkillsStatusResult{}, fmt.Errorf("OpenClaw skills.status request failed: %w", err)
+	}
+	var response openClawResponse
+	err = readOpenClawResponse(conn, trimmedRequestID, &response)
+	if err != nil {
+		return openClawSkillsStatusResult{}, fmt.Errorf("OpenClaw skills.status response failed: %w", err)
+	}
+	if errText := response.errorString(); errText != "" {
+		return openClawSkillsStatusResult{}, fmt.Errorf("OpenClaw skills.status error: %s", errText)
+	}
+	if !response.isResponseOK() {
+		return openClawSkillsStatusResult{}, fmt.Errorf("OpenClaw skills.status response not ok")
+	}
+	status, err := openClawSkillsStatusFromResult(response.payload())
+	if err != nil {
+		return openClawSkillsStatusResult{}, fmt.Errorf("OpenClaw skills.status invalid: %w", err)
+	}
+	return status, nil
 }
 
 func (adapter OpenClawAdapter) fetchOpenClawToolsCatalog(ctx context.Context, requestID string) (openClawToolsCatalogResult, error) {
@@ -237,6 +311,7 @@ func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 	if assignmentID == "" {
 		return "", fmt.Errorf("OpenClaw assignment id required")
 	}
+	nativeRunID := assignmentID
 	connectCtx, cancel := context.WithTimeout(context.Background(), openClawSetupRetryBudget)
 	defer cancel()
 	conn, err := adapter.connectOperatorWithRetry(connectCtx)
@@ -250,8 +325,12 @@ func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 	}
 	defer conn.Close()
 	params := map[string]any{
-		"message":        strings.TrimSpace(runRequest.FullyComposedPrompt),
-		"idempotencyKey": assignmentID,
+		"message":                strings.TrimSpace(runRequest.FullyComposedPrompt),
+		"idempotencyKey":         assignmentID,
+		"runId":                  nativeRunID,
+		"nativeMcpServerName":    boundedRunMetadataText(runRequest.NativeMCPServerName, maxRunMetadataValueRunes),
+		"nativeMcpToolNamespace": boundedRunMetadataText(runRequest.NativeMCPToolNamespace, maxRunMetadataValueRunes),
+		"metadata":               runMetadata(runRequest),
 	}
 	agentID := strings.TrimSpace(adapter.AgentID)
 	if agentID == "" {
@@ -285,7 +364,7 @@ func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 	if status != "" && status != "accepted" && status != "in_flight" && status != "running" {
 		return "", fmt.Errorf("OpenClaw agent rejected with status %q", accepted.Status)
 	}
-	return strings.TrimSpace(assignmentID), nil
+	return nativeRunID, nil
 }
 
 func (adapter OpenClawAdapter) CancelRun(nativeRunID string) error {
@@ -761,6 +840,41 @@ func openClawToolsCatalogFromResult(raw json.RawMessage) (openClawToolsCatalogRe
 	return catalog, nil
 }
 
+func openClawSkillsStatusFromResult(raw json.RawMessage) (openClawSkillsStatusResult, error) {
+	if len(raw) == 0 {
+		return openClawSkillsStatusResult{}, fmt.Errorf("skills status missing")
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return openClawSkillsStatusResult{}, fmt.Errorf("skills status missing")
+	}
+	var array []openClawSkillStatus
+	if err := json.Unmarshal(raw, &array); err == nil {
+		return openClawSkillsStatusResult{Skills: array}, nil
+	}
+	var envelope struct {
+		Skills *[]openClawSkillStatus `json:"skills"`
+		Items  *[]openClawSkillStatus `json:"items"`
+		Data   *[]openClawSkillStatus `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return openClawSkillsStatusResult{}, err
+	}
+	skills, ok := firstOpenClawSkillList(envelope.Skills, envelope.Items, envelope.Data)
+	if !ok {
+		return openClawSkillsStatusResult{}, fmt.Errorf("skills status missing known skill list")
+	}
+	return openClawSkillsStatusResult{Skills: skills}, nil
+}
+
+func firstOpenClawSkillList(values ...*[]openClawSkillStatus) ([]openClawSkillStatus, bool) {
+	for _, value := range values {
+		if value != nil {
+			return *value, true
+		}
+	}
+	return nil, false
+}
+
 func (catalog openClawToolsCatalogResult) hasNativeMCPServer(expectedServerName string) bool {
 	target := strings.TrimSpace(expectedServerName)
 	if target == "" {
@@ -809,6 +923,91 @@ func (catalog openClawToolsCatalogResult) nativeCapabilitySummaries(nativeMCPSer
 	return out
 }
 
+func (status openClawSkillsStatusResult) nativeCapabilitySummaries(nativeMCPServerName string) []NativeCapability {
+	const maxOpenClawSkillCapabilities = 40
+	out := []NativeCapability{}
+	seen := map[string]bool{}
+	for _, skill := range status.Skills {
+		if !skill.ready() {
+			continue
+		}
+		if skill.matchesNativeMCPServer(nativeMCPServerName) {
+			continue
+		}
+		id := boundedCapabilityText(firstNonEmpty(skill.ID, skill.Key, skill.Slug, skill.Name), 96)
+		label := boundedCapabilityText(firstNonEmpty(skill.Label, skill.Title, skill.Name, skill.Slug, skill.ID), 80)
+		if id == "" || label == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, NativeCapability{
+			Source:       NativeCapabilitySourceOpenClawReadySkills,
+			Kind:         NativeCapabilityKindSkill,
+			CapabilityID: id,
+			Label:        label,
+			Summary:      boundedCapabilityText(firstNonEmpty(skill.Summary, skill.Description, label), 160),
+		})
+		if len(out) >= maxOpenClawSkillCapabilities {
+			break
+		}
+	}
+	return out
+}
+
+func (skill openClawSkillStatus) ready() bool {
+	if skill.Enabled != nil && !*skill.Enabled {
+		return false
+	}
+	if hasOpenClawMissingRequirements(skill.MissingRequirements) || hasOpenClawMissingRequirements(skill.Missing) {
+		return false
+	}
+	if skill.Ready != nil {
+		return *skill.Ready
+	}
+	switch strings.ToLower(strings.TrimSpace(skill.Status)) {
+	case "ready":
+		return true
+	default:
+		return false
+	}
+}
+
+func (skill openClawSkillStatus) matchesNativeMCPServer(nativeMCPServerName string) bool {
+	target := strings.ToLower(strings.TrimSpace(nativeMCPServerName))
+	if target == "" {
+		return false
+	}
+	for _, value := range []string{
+		skill.ID,
+		skill.Key,
+		skill.Slug,
+		skill.Name,
+		skill.Label,
+		skill.Title,
+		skill.Source,
+		skill.SourceID,
+		skill.SourceName,
+		skill.PluginID,
+		skill.PluginName,
+		skill.MCPServerName,
+	} {
+		trimmed := strings.ToLower(strings.TrimSpace(value))
+		if trimmed == target || trimmed == "plugin:"+target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasOpenClawMissingRequirements(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (group openClawToolsCatalogGroup) matchesNativeMCPServer(nativeMCPServerName string) bool {
 	target := strings.TrimSpace(nativeMCPServerName)
 	if target == "" {
@@ -819,10 +1018,17 @@ func (group openClawToolsCatalogGroup) matchesNativeMCPServer(nativeMCPServerNam
 
 func boundedCapabilityText(value string, limit int) string {
 	trimmed := strings.TrimSpace(value)
-	if limit <= 0 || len(trimmed) <= limit {
+	if limit <= 0 {
 		return trimmed
 	}
-	return strings.TrimSpace(trimmed[:limit])
+	count := 0
+	for idx := range trimmed {
+		if count == limit {
+			return strings.TrimSpace(trimmed[:idx])
+		}
+		count++
+	}
+	return trimmed
 }
 
 func (hello openClawHello) hasScope(scope string) bool {

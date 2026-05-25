@@ -226,7 +226,9 @@ type NativeCapabilitySource string
 
 const (
 	NativeCapabilitySourceOpenClawToolsCatalog NativeCapabilitySource = "openclaw_tools_catalog"
+	NativeCapabilitySourceOpenClawReadySkills  NativeCapabilitySource = "openclaw_ready_skills"
 	NativeCapabilitySourceHermesRuntimeAPI     NativeCapabilitySource = "hermes_runtime_api"
+	NativeCapabilitySourceHermesToolsList      NativeCapabilitySource = "hermes_tools_list"
 )
 
 // NativeCapabilityKind identifies a bounded external runtime delegation capability shape.
@@ -235,6 +237,18 @@ type NativeCapabilityKind string
 const (
 	NativeCapabilityKindToolGroup      NativeCapabilityKind = "tool_group"
 	NativeCapabilityKindRuntimeFeature NativeCapabilityKind = "runtime_feature"
+	NativeCapabilityKindNativeTool     NativeCapabilityKind = "native_tool"
+	NativeCapabilityKindSkill          NativeCapabilityKind = "skill"
+)
+
+// NativeCapabilityDiscoveryStatus identifies whether native capability sources are complete.
+type NativeCapabilityDiscoveryStatus string
+
+const (
+	NativeCapabilityDiscoveryUnsupported NativeCapabilityDiscoveryStatus = "unsupported"
+	NativeCapabilityDiscoveryFailed      NativeCapabilityDiscoveryStatus = "failed"
+	NativeCapabilityDiscoveryComplete    NativeCapabilityDiscoveryStatus = "complete"
+	NativeCapabilityDiscoveryPartial     NativeCapabilityDiscoveryStatus = "partial"
 )
 
 // Frame is the typed envelope for all Connector websocket messages.
@@ -317,8 +331,11 @@ type HeartbeatPayload struct {
 }
 
 type CapabilitiesPayload struct {
-	Capabilities       []CapabilityReport       `json:"capabilities"`
-	NativeCapabilities []NativeCapabilityReport `json:"native_capabilities"`
+	ConnectionGeneration            int64                           `json:"connection_generation"`
+	Capabilities                    []CapabilityReport              `json:"capabilities"`
+	NativeCapabilities              []NativeCapabilityReport        `json:"native_capabilities"`
+	NativeCapabilityDiscoveryStatus NativeCapabilityDiscoveryStatus `json:"native_capability_discovery_status,omitempty"`
+	NativeCapabilityReportedSources []NativeCapabilitySource        `json:"native_capability_reported_sources,omitempty"`
 }
 
 type CapabilityReport struct {

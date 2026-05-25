@@ -112,6 +112,7 @@ jobs:
       - name: Build release manifest
         run: go run ./cmd/release-manifest --dist dist --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA" --output "dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json"
         env:
+          PERSONASTACK_RELEASE_SIGNING: "1"
           MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
           MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}

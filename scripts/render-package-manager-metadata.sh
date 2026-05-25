@@ -73,6 +73,16 @@ class PersonastackConnector < Formula
     bin.install "personastack-connector"
   end
 
+  def caveats
+    <<~EOS
+      Before brew remove, run:
+        #{opt_bin}/personastack-connector service uninstall --service-scope user
+
+      macOS system-scope uninstall/removal requires sudo:
+        sudo #{opt_bin}/personastack-connector service uninstall --service-scope system
+    EOS
+  end
+
   test do
     assert_match "personastack-connector version=", shell_output("#{bin}/personastack-connector version")
   end

@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/personastack/personastack-connector/internal/hermessetup"
 )
@@ -27,6 +29,7 @@ const hermesDegradedRunEventsSSEFeature = "run_events_sse"
 const hermesDegradedRunStopFeature = "run_stop"
 
 var errHermesRunEventsUnavailable = errors.New("Hermes run events unavailable")
+var hermesToolsListCommand = exec.CommandContext
 
 type HermesAdapter struct {
 	BaseURL string
@@ -99,12 +102,28 @@ func (adapter HermesAdapter) Detect() Detection {
 }
 
 func (adapter HermesAdapter) DescribeNativeCapabilities(ctx context.Context, nativeMCPServerName string) ([]NativeCapability, error) {
-	_ = nativeMCPServerName
 	capabilities, err := adapter.fetchHermesCapabilities(ctx)
-	if err != nil {
-		return nil, err
+	capabilitiesErr := err
+	out := []NativeCapability{}
+	if err == nil {
+		summaries := capabilities.nativeCapabilitySummaries()
+		if len(summaries) == 0 {
+			summaries = append(summaries, nativeCapabilitySource(NativeCapabilitySourceHermesRuntimeAPI))
+		}
+		out = append(out, summaries...)
 	}
-	return capabilities.nativeCapabilitySummaries(), nil
+	tools, err := hermesToolListCapabilities(ctx, nativeMCPServerName)
+	toolsErr := err
+	if err == nil {
+		if capabilitiesErr != nil {
+			markNativeCapabilitiesDegraded(tools)
+		}
+		out = append(out, tools...)
+	}
+	if capabilitiesErr != nil || toolsErr != nil {
+		return out, errors.Join(capabilitiesErr, toolsErr)
+	}
+	return out, nil
 }
 
 func (adapter HermesAdapter) fetchHermesCapabilities(ctx context.Context) (hermesCapabilities, error) {
@@ -200,10 +219,11 @@ func (adapter HermesAdapter) StartRun(request RunRequest) (string, error) {
 func (adapter HermesAdapter) startHermesRun(request RunRequest) (string, error) {
 	body := map[string]any{
 		"input":                strings.TrimSpace(request.FullyComposedPrompt),
-		"session_id":           strings.TrimSpace(firstNonEmpty(request.RunID, request.AssignmentID)),
-		"conversation":         strings.TrimSpace(request.AssignmentID),
-		"native_mcp_server":    strings.TrimSpace(request.NativeMCPServerName),
-		"native_mcp_namespace": strings.TrimSpace(request.NativeMCPToolNamespace),
+		"session_id":           boundedRunMetadataText(firstNonEmpty(request.RunID, request.AssignmentID), maxRunMetadataValueRunes),
+		"conversation":         boundedRunMetadataText(request.AssignmentID, maxRunMetadataValueRunes),
+		"native_mcp_server":    boundedRunMetadataText(request.NativeMCPServerName, maxRunMetadataValueRunes),
+		"native_mcp_namespace": boundedRunMetadataText(request.NativeMCPToolNamespace, maxRunMetadataValueRunes),
+		"include_native_tools": true,
 		"metadata":             runMetadata(request),
 	}
 	raw, err := json.Marshal(body)
@@ -242,7 +262,7 @@ func (adapter HermesAdapter) startHermesResponse(request RunRequest) (string, er
 		"model":        "hermes-agent",
 		"input":        strings.TrimSpace(request.FullyComposedPrompt),
 		"store":        true,
-		"conversation": strings.TrimSpace(request.AssignmentID),
+		"conversation": boundedRunMetadataText(request.AssignmentID, maxRunMetadataValueRunes),
 		"metadata":     runMetadata(request),
 	}
 	raw, err := json.Marshal(body)
@@ -504,13 +524,13 @@ func hermesRunEventResultLegacy(raw string) (RunResult, bool) {
 
 func hermesRunEventsForEvent(event hermesRunEvent) []RunEvent {
 	events := []RunEvent{}
-	if delta := firstNonEmpty(hermesRunEventString(event, "deltaText"), hermesRunEventString(event, "delta"), hermesRunEventString(event, "text"), event.Output); delta != "" {
+	if delta := firstNonEmpty(hermesRunEventString(event, "deltaText"), hermesRunEventString(event, "delta"), hermesRunEventString(event, "text")); delta != "" {
 		events = append(events, RunEvent{Kind: RunEventOutputDelta, Delta: delta})
 	}
 	toolName := firstNonEmpty(hermesRunEventString(event, "toolName"), hermesRunEventString(event, "tool"), hermesRunEventString(event, "name"))
 	phase := firstNonEmpty(hermesRunEventString(event, "phase"), hermesRunEventString(event, "status"))
 	summary := firstNonEmpty(hermesRunEventString(event, "summary"), hermesRunEventString(event, "message"), event.Output, event.Error)
-	if toolName != "" || phase != "" || summary != "" {
+	if toolName != "" && phase != "" {
 		events = append(events, RunEvent{Kind: RunEventToolEvent, ToolName: toolName, ToolPhase: phase, Summary: summary})
 	}
 	return events
@@ -930,6 +950,94 @@ func hermesNativeCapability(id string, label string, summary string) NativeCapab
 		Label:        strings.TrimSpace(label),
 		Summary:      strings.TrimSpace(summary),
 	}
+}
+
+func hermesToolListCapabilities(ctx context.Context, nativeMCPServerName string) ([]NativeCapability, error) {
+	command := hermesToolsListCommand(ctx, "hermes", "tools", "list", "--platform", "cli")
+	raw, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("Hermes tools list: %w", err)
+	}
+	capabilities := parseHermesToolsList(string(raw), nativeMCPServerName)
+	if len(capabilities) == 0 {
+		capabilities = append(capabilities, nativeCapabilitySource(NativeCapabilitySourceHermesToolsList))
+	}
+	return capabilities, nil
+}
+
+func parseHermesToolsList(raw string, nativeMCPServerName string) []NativeCapability {
+	const maxHermesToolCapabilities = 40
+	out := []NativeCapability{}
+	seen := map[string]bool{}
+	mcpPrefix := hermesNativeMCPToolPrefix(nativeMCPServerName)
+	for _, line := range strings.Split(raw, "\n") {
+		id, label, ok := parseHermesToolListLine(line)
+		boundedID := boundedCapabilityText(id, 96)
+		if !ok || boundedID == "" || seen[boundedID] || hermesToolMatchesPrefix(id, mcpPrefix) {
+			continue
+		}
+		seen[boundedID] = true
+		summary := id
+		if label != "" && label != id {
+			summary = id + " (" + label + ")"
+		}
+		out = append(out, NativeCapability{
+			Source:       NativeCapabilitySourceHermesToolsList,
+			Kind:         NativeCapabilityKindNativeTool,
+			CapabilityID: boundedID,
+			Label:        boundedCapabilityText(firstNonEmpty(label, id), 80),
+			Summary:      boundedCapabilityText(summary, 160),
+		})
+		if len(out) >= maxHermesToolCapabilities {
+			break
+		}
+	}
+	return out
+}
+
+func hermesNativeMCPToolPrefix(nativeMCPServerName string) string {
+	trimmed := strings.TrimSpace(nativeMCPServerName)
+	if trimmed == "" {
+		return ""
+	}
+	return "mcp_" + trimmed + "_"
+}
+
+func hermesToolMatchesPrefix(toolID string, prefix string) bool {
+	return prefix != "" && strings.HasPrefix(strings.TrimSpace(toolID), prefix)
+}
+
+func parseHermesToolListLine(line string) (string, string, bool) {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 2 {
+		return "", "", false
+	}
+	statusIndex, ok := hermesToolStatusIndex(fields)
+	if !ok {
+		return "", "", false
+	}
+	if fields[statusIndex] == "disabled" || statusIndex+1 >= len(fields) {
+		return "", "", false
+	}
+	id := strings.TrimSpace(fields[statusIndex+1])
+	if id == "" || id == "MCP" {
+		return "", "", false
+	}
+	label := strings.Join(fields[statusIndex+2:], " ")
+	label = strings.TrimSpace(strings.TrimLeftFunc(label, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}))
+	return id, label, true
+}
+
+func hermesToolStatusIndex(fields []string) (int, bool) {
+	for index := 0; index < len(fields) && index < 2; index++ {
+		switch fields[index] {
+		case "enabled", "disabled":
+			return index, true
+		}
+	}
+	return 0, false
 }
 
 type hermesRunResponse struct {

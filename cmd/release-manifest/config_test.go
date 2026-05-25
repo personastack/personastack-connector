@@ -322,6 +322,9 @@ func TestReleaseWorkflowContainsDryRunValidationSteps(t *testing.T) {
 			t.Fatalf("missing release validation step %q", want)
 		}
 	}
+	if !strings.Contains(string(release), "Build release manifest\n        run: go run ./cmd/release-manifest --dist dist --version \"${GITHUB_REF_NAME#v}\" --commit \"$GITHUB_SHA\" --output \"dist/personastack-connector_${GITHUB_REF_NAME#v}_release_manifest.json\"\n        env:\n          PERSONASTACK_RELEASE_SIGNING: \"1\"") {
+		t.Fatalf("release manifest generation must enable PERSONASTACK_RELEASE_SIGNING")
+	}
 	for _, retired := range []string{
 		"windows-latest",
 		"WINDOWS_CODE_SIGN",
@@ -377,6 +380,10 @@ func TestRenderPackageManagerMetadata(t *testing.T) {
 		"4444444444444444444444444444444444444444444444444444444444444444",
 		"license :cannot_represent",
 		`bin.install "personastack-connector"`,
+		"Before brew remove, run:",
+		"#{opt_bin}/personastack-connector service uninstall --service-scope user",
+		"macOS system-scope uninstall/removal requires sudo:",
+		"sudo #{opt_bin}/personastack-connector service uninstall --service-scope system",
 	} {
 		if !strings.Contains(string(homebrew), want) {
 			t.Fatalf("homebrew metadata missing %q: %s", want, string(homebrew))

@@ -42,7 +42,15 @@ type ExecRunner struct{}
 
 func (ExecRunner) Run(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
-	return cmd.Run()
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		return err
+	}
+	return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, message)
 }
 
 type Installer struct {
@@ -59,6 +67,13 @@ type InstallResult struct {
 	Kind  string
 	Path  string
 	Scope ServiceScope
+}
+
+type UninstallResult struct {
+	Kind    string
+	Path    string
+	Scope   ServiceScope
+	Removed bool
 }
 
 type ShimResult struct {
@@ -184,6 +199,41 @@ func (installer Installer) Install() (InstallResult, error) {
 	}
 }
 
+func (installer Installer) Uninstall() ([]UninstallResult, error) {
+	homeDir, err := installer.homeDir()
+	if err != nil {
+		return nil, err
+	}
+	goos := strings.TrimSpace(installer.GOOS)
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	scope, err := installer.serviceScope(goos)
+	if err != nil {
+		return nil, err
+	}
+	switch goos {
+	case "darwin":
+		if scope == ServiceScopeSystemLaunchDaemon {
+			result, err := installer.uninstallLaunchDaemon()
+			return singleUninstallResult(result, err)
+		}
+		result, err := installer.uninstallLaunchAgent(homeDir)
+		return singleUninstallResult(result, err)
+	case "linux":
+		return installer.uninstallLinuxUser(homeDir)
+	default:
+		return nil, fmt.Errorf("unsupported service platform: %s", goos)
+	}
+}
+
+func singleUninstallResult(result UninstallResult, err error) ([]UninstallResult, error) {
+	if err != nil {
+		return nil, err
+	}
+	return []UninstallResult{result}, nil
+}
+
 func (installer Installer) installLaunchAgent(homeDir string, executablePath string) (InstallResult, error) {
 	path := filepath.Join(homeDir, "Library", "LaunchAgents", launchdLabel+".plist")
 	if err := installer.disableOppositeLaunchdService(ServiceScopeUserLaunchAgent, homeDir); err != nil {
@@ -282,6 +332,53 @@ func (installer Installer) installLaunchDaemon(executablePath string) (InstallRe
 	return InstallResult{Kind: "launchdaemon", Path: path, Scope: ServiceScopeSystemLaunchDaemon}, nil
 }
 
+func (installer Installer) uninstallLaunchAgent(homeDir string) (UninstallResult, error) {
+	guiDomain, homeDir := installer.launchAgentTarget(homeDir)
+	path := filepath.Join(homeDir, "Library", "LaunchAgents", launchdLabel+".plist")
+	labelTarget := guiDomain + "/" + launchdLabel
+	if err := installer.unloadLaunchdService(path, guiDomain, labelTarget); err != nil {
+		return UninstallResult{}, err
+	}
+	removed, err := removeServiceFile(path)
+	if err != nil {
+		return UninstallResult{}, err
+	}
+	return UninstallResult{Kind: "launchagent", Path: path, Scope: ServiceScopeUserLaunchAgent, Removed: removed}, nil
+}
+
+func (installer Installer) uninstallLaunchDaemon() (UninstallResult, error) {
+	path := filepath.Join(installer.systemRoot(), "Library", "LaunchDaemons", launchdLabel+".plist")
+	if err := installer.unloadLaunchdService(path, "system", "system/"+launchdLabel); err != nil {
+		return UninstallResult{}, err
+	}
+	removed, err := removeServiceFile(path)
+	if err != nil {
+		return UninstallResult{}, err
+	}
+	return UninstallResult{Kind: "launchdaemon", Path: path, Scope: ServiceScopeSystemLaunchDaemon, Removed: removed}, nil
+}
+
+func (installer Installer) unloadLaunchdService(path string, domain string, labelTarget string) error {
+	runner := installer.runner()
+	exists, err := serviceFileExists(path)
+	if err != nil {
+		return err
+	}
+	if exists {
+		err = runner.Run("launchctl", "bootout", domain, path)
+	} else {
+		err = runner.Run("launchctl", "bootout", labelTarget)
+	}
+	if err != nil && !isIgnorableLaunchctlUninstallError(err) {
+		return fmt.Errorf("launchctl bootout %s: %w", labelTarget, err)
+	}
+	err = runner.Run("launchctl", "disable", labelTarget)
+	if err != nil && !isIgnorableLaunchctlUninstallError(err) {
+		return fmt.Errorf("launchctl disable %s: %w", labelTarget, err)
+	}
+	return nil
+}
+
 func (installer Installer) disableOppositeLaunchdService(scope ServiceScope, homeDir string) error {
 	runner := installer.runner()
 	switch scope {
@@ -305,10 +402,38 @@ func (installer Installer) disableOppositeLaunchdService(scope ServiceScope, hom
 }
 
 func removeOppositeLaunchdPlist(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if _, err := removeServiceFile(path); err != nil {
 		return fmt.Errorf("remove opposite launchd service: %w", err)
 	}
 	return nil
+}
+
+func removeServiceFile(path string) (bool, error) {
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("remove service file: %w", err)
+	}
+	return true, nil
+}
+
+func serviceFileExists(path string) (bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat service file: %w", err)
+	}
+	return true, nil
+}
+
+func isIgnorableLaunchctlUninstallError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "could not find service") ||
+		strings.Contains(message, "no such process") ||
+		strings.Contains(message, "service is not loaded") ||
+		strings.Contains(message, "service could not be found")
 }
 
 func (installer Installer) launchAgentTarget(defaultHomeDir string) (string, string) {
@@ -365,6 +490,62 @@ X-GNOME-Autostart-enabled=true
 		return InstallResult{}, err
 	}
 	return InstallResult{Kind: "no_user_service_manager", Path: path, Scope: ServiceScopeUserLaunchAgent}, nil
+}
+
+func (installer Installer) uninstallLinuxUser(homeDir string) ([]UninstallResult, error) {
+	runner := installer.runner()
+	systemdPath := filepath.Join(homeDir, ".config", "systemd", "user", serviceName+".service")
+	systemdWantsPath := filepath.Join(homeDir, ".config", "systemd", "user", "default.target.wants", serviceName+".service")
+	autostartPath := filepath.Join(homeDir, ".config", "autostart", serviceName+".desktop")
+
+	systemdExists, err := serviceFileExists(systemdPath)
+	if err != nil {
+		return nil, err
+	}
+	systemdWantsExists, err := serviceFileExists(systemdWantsPath)
+	if err != nil {
+		return nil, err
+	}
+	err = runner.Run("systemctl", "--user", "disable", "--now", serviceName+".service")
+	if err != nil && (systemdExists || systemdWantsExists) && !isIgnorableSystemctlUninstallError(err) {
+		return nil, fmt.Errorf("systemctl disable user service: %w", err)
+	}
+	systemdRemoved, err := removeServiceFile(systemdPath)
+	if err != nil {
+		return nil, err
+	}
+	systemdWantsRemoved, err := removeServiceFile(systemdWantsPath)
+	if err != nil {
+		return nil, err
+	}
+	err = runner.Run("systemctl", "--user", "daemon-reload")
+	if err != nil && (systemdExists || systemdWantsExists || systemdRemoved || systemdWantsRemoved) && !isIgnorableSystemctlUninstallError(err) {
+		return nil, fmt.Errorf("systemctl daemon-reload: %w", err)
+	}
+	autostartRemoved, err := removeServiceFile(autostartPath)
+	if err != nil {
+		return nil, err
+	}
+
+	results := []UninstallResult{{Kind: "systemd-user", Path: systemdPath, Scope: ServiceScopeUserLaunchAgent, Removed: systemdRemoved}}
+	if systemdWantsRemoved {
+		results = append(results, UninstallResult{Kind: "systemd-user-wants", Path: systemdWantsPath, Scope: ServiceScopeUserLaunchAgent, Removed: true})
+	}
+	results = append(results, UninstallResult{Kind: "no_user_service_manager", Path: autostartPath, Scope: ServiceScopeUserLaunchAgent, Removed: autostartRemoved})
+	return results, nil
+}
+
+func isIgnorableSystemctlUninstallError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not loaded") ||
+		strings.Contains(message, "does not exist") ||
+		strings.Contains(message, "executable file not found") ||
+		strings.Contains(message, "failed to connect to bus") ||
+		strings.Contains(message, "no medium found") ||
+		strings.Contains(message, "no user bus") ||
+		strings.Contains(message, "system has not been booted with systemd") ||
+		strings.Contains(message, "transport endpoint is not connected") ||
+		(strings.Contains(message, "unit ") && strings.Contains(message, " not found"))
 }
 
 func (installer Installer) installWindowsTask(homeDir string, executablePath string) (InstallResult, error) {

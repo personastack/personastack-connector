@@ -40,6 +40,9 @@ func TestConnectFrameSignsAPIVerifiableMessage(t *testing.T) {
 	if len(frame.Connect.SupportedProtocolVersions) != 1 || frame.Connect.SupportedProtocolVersions[0] != externalagentprotocol.ProtocolVersionV1 {
 		t.Fatalf("supported protocol versions: %+v", frame.Connect.SupportedProtocolVersions)
 	}
+	if frame.Connect.ConnectorVersion != buildinfo.VersionString() {
+		t.Fatalf("connector version: got=%s want=%s", frame.Connect.ConnectorVersion, buildinfo.VersionString())
+	}
 }
 
 func TestRunAcceptedFrameCorrelatesRequestMessageID(t *testing.T) {

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +48,14 @@ func TestHermesAdapterDetectsRunSubmission(t *testing.T) {
 }
 
 func TestHermesAdapterDescribeNativeCapabilitiesUsesRuntimeFeatures(t *testing.T) {
+	binDir := t.TempDir()
+	hermesPath := filepath.Join(binDir, "hermes")
+	err := os.WriteFile(hermesPath, []byte("#!/bin/sh\necho 'enabled skills Skills'\n"), 0o700)
+	if err != nil {
+		t.Fatalf("write hermes stub: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/capabilities":
@@ -58,15 +69,160 @@ func TestHermesAdapterDescribeNativeCapabilitiesUsesRuntimeFeatures(t *testing.T
 	}))
 	defer server.Close()
 
-	capabilities, err := NewHermesAdapter(server.URL, "key-1").DescribeNativeCapabilities(context.Background(), "")
+	capabilities, err := NewHermesAdapter(server.URL, "key-1").DescribeNativeCapabilities(context.Background(), "personastack-conn-1")
 	if err != nil {
 		t.Fatalf("DescribeNativeCapabilities() error = %v", err)
 	}
-	if len(capabilities) != 3 {
-		t.Fatalf("expected three runtime features, got %#v", capabilities)
+	if len(capabilities) != 4 {
+		t.Fatalf("expected three runtime features and one native tool, got %#v", capabilities)
 	}
 	if capabilities[0].Summary != "can accept delegated tasks" || capabilities[2].Summary != "can stream progress updates" {
 		t.Fatalf("unexpected Hermes capability summaries: %#v", capabilities)
+	}
+}
+
+func TestHermesAdapterDescribeNativeCapabilitiesKeepsRuntimeFeaturesWhenToolsListFails(t *testing.T) {
+	binDir := t.TempDir()
+	hermesPath := filepath.Join(binDir, "hermes")
+	err := os.WriteFile(hermesPath, []byte("#!/bin/sh\nexit 1\n"), 0o700)
+	if err != nil {
+		t.Fatalf("write hermes stub: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/capabilities":
+			_, _ = w.Write([]byte(`{"features":{"run_submission":true,"run_status":true,"run_events_sse":true,"run_stop":false}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	capabilities, err := NewHermesAdapter(server.URL, "key-1").DescribeNativeCapabilities(context.Background(), "personastack-conn-1")
+	if err == nil || !strings.Contains(err.Error(), "Hermes tools list") {
+		t.Fatalf("DescribeNativeCapabilities() error = %v", err)
+	}
+	if len(capabilities) != 3 {
+		t.Fatalf("expected runtime capabilities despite tools-list failure, got %#v", capabilities)
+	}
+	for _, capability := range capabilities {
+		if capability.Source != NativeCapabilitySourceHermesRuntimeAPI {
+			t.Fatalf("unexpected tools-list capability after tools-list failure: %#v", capability)
+		}
+	}
+}
+
+func TestHermesAdapterDescribeNativeCapabilitiesKeepsToolsWhenCapabilitiesFail(t *testing.T) {
+	binDir := t.TempDir()
+	hermesPath := filepath.Join(binDir, "hermes")
+	err := os.WriteFile(hermesPath, []byte("#!/bin/sh\necho 'enabled skills Skills'\n"), 0o700)
+	if err != nil {
+		t.Fatalf("write hermes stub: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	capabilities, err := NewHermesAdapter(server.URL, "key-1").DescribeNativeCapabilities(context.Background(), "personastack-conn-1")
+	if err == nil || !strings.Contains(err.Error(), "Hermes capabilities status 503") {
+		t.Fatalf("DescribeNativeCapabilities() error = %v", err)
+	}
+	if len(capabilities) != 1 || capabilities[0].Source != NativeCapabilitySourceHermesToolsList {
+		t.Fatalf("expected tools-list capability despite capabilities failure, got %#v", capabilities)
+	}
+	if !capabilities[0].Degraded {
+		t.Fatalf("expected tools-list capability to be degraded after capabilities failure, got %#v", capabilities[0])
+	}
+}
+
+func TestParseHermesToolsListReportsEnabledCLITools(t *testing.T) {
+	capabilities := parseHermesToolsList(`
+Built-in toolsets (cli):
+  ✓ enabled  web  🔍 Web Search & Scraping
+  ✓ enabled  browser  🌐 Browser Automation
+  ✓ enabled  terminal  💻 Terminal & Processes
+  ✓ enabled  file  📁 File Operations
+  ✓ enabled  code_execution  ⚡ Code Execution
+  ✓ enabled  vision  👁️  Vision / Image Analysis
+  ✗ disabled  video  🎬 Video Analysis
+  ✓ enabled  image_gen  🎨 Image Generation
+  ✗ disabled  video_gen  🎬 Video Generation
+  ✗ disabled  x_search  🐦 X Search
+  ✗ disabled  moa  🧠 Mixture of Agents
+  ✓ enabled  tts  🔊 Text-to-Speech
+  ✓ enabled  skills  📚 Skills
+  ✓ enabled  todo  📋 Task Planning
+  ✓ enabled  memory  💾 Memory
+  ✓ enabled  session_search  🔎 Session Search
+  ✓ enabled  clarify  ❓ Clarifying Questions
+  ✓ enabled  delegation  👥 Task Delegation
+  ✓ enabled  cronjob  ⏰ Cron Jobs
+  ✓ enabled  messaging  📨 Cross-Platform Messaging
+  ✗ disabled  homeassistant  🏠 Home Assistant
+  ✗ disabled  spotify  🎵 Spotify
+  ✗ disabled  yuanbao  🤖 Yuanbao
+  ✓ enabled  computer_use  🖱️  Computer Use (macOS)
+
+MCP servers:
+  personastack_2d647f33a8262545  all tools enabled
+  personastack_544eb62b75647f8c  all tools enabled
+  personastack_ae5e947e1d736189  all tools enabled
+  ✓ enabled  mcp_personastack-conn-1_persona_chat_reply  PersonaStack reply
+`, "personastack-conn-1")
+	expected := []string{
+		"web",
+		"browser",
+		"terminal",
+		"file",
+		"code_execution",
+		"vision",
+		"image_gen",
+		"tts",
+		"skills",
+		"todo",
+		"memory",
+		"session_search",
+		"clarify",
+		"delegation",
+		"cronjob",
+		"messaging",
+		"computer_use",
+	}
+	got := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		got = append(got, capability.CapabilityID)
+	}
+	if !slices.Equal(got, expected) {
+		t.Fatalf("tools = %#v, want %#v", got, expected)
+	}
+	if capabilities[0].Source != NativeCapabilitySourceHermesToolsList || capabilities[0].Kind != NativeCapabilityKindNativeTool {
+		t.Fatalf("unexpected source/kind: %#v", capabilities[0])
+	}
+	if capabilities[0].Summary != "web (Web Search & Scraping)" {
+		t.Fatalf("unexpected web summary: %q", capabilities[0].Summary)
+	}
+	if capabilities[len(capabilities)-1].Summary != "computer_use (Computer Use (macOS))" {
+		t.Fatalf("unexpected computer_use summary: %q", capabilities[len(capabilities)-1].Summary)
+	}
+}
+
+func TestParseHermesToolsListDedupesAfterBoundingIDs(t *testing.T) {
+	prefix := strings.Repeat("a", 96)
+	capabilities := parseHermesToolsList(
+		"✓ enabled  "+prefix+"first  First\n"+
+			"✓ enabled  "+prefix+"second  Second\n",
+		"personastack-conn-1",
+	)
+	if len(capabilities) != 1 {
+		t.Fatalf("expected one bounded capability, got %#v", capabilities)
+	}
+	if capabilities[0].CapabilityID != prefix {
+		t.Fatalf("unexpected bounded capability id: %q", capabilities[0].CapabilityID)
 	}
 }
 
@@ -131,15 +287,77 @@ func TestHermesAdapterStartRun(t *testing.T) {
 		if body["session_id"] != "run-1" || body["conversation"] != "assignment-1" || body["input"] != "prompt" || body["native_mcp_server"] != "personastack-conn-1" || metadata["personastack_run_id"] != "run-1" {
 			t.Fatalf("unexpected body: %+v", body)
 		}
+		if metadata["native_mcp_server"] != "personastack-conn-1" || metadata["native_mcp_namespace"] != "personastack" {
+			t.Fatalf("unexpected body: %+v", body)
+		}
+		if body["include_native_tools"] != true {
+			t.Fatalf("unexpected body: %+v", body)
+		}
 		_, _ = w.Write([]byte(`{"run_id":"hermes-run-1"}`))
 	}))
 	defer server.Close()
 
 	runID, err := NewHermesAdapter(server.URL, "key-1").StartRun(RunRequest{
-		RunID:               "run-1",
-		AssignmentID:        "assignment-1",
-		FullyComposedPrompt: "prompt",
-		NativeMCPServerName: "personastack-conn-1",
+		RunID:                  "run-1",
+		AssignmentID:           "assignment-1",
+		FullyComposedPrompt:    "prompt",
+		NativeMCPServerName:    "personastack-conn-1",
+		NativeMCPToolNamespace: "personastack",
+	})
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if runID != "hermes-run-1" {
+		t.Fatalf("run id = %q", runID)
+	}
+}
+
+func TestHermesAdapterStartRunBoundsNativeMCPFields(t *testing.T) {
+	longRunID := strings.Repeat("r", maxRunMetadataValueRunes+10)
+	longAssignmentID := strings.Repeat("a", maxRunMetadataValueRunes+10)
+	longServerName := strings.Repeat("s", maxRunMetadataValueRunes+10)
+	longNamespace := strings.Repeat("n", maxRunMetadataValueRunes+10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/runs" {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		metadata, ok := body["metadata"].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata missing: %+v", body)
+		}
+		if len([]rune(body["session_id"].(string))) != maxRunMetadataValueRunes {
+			t.Fatalf("unbounded session_id: %q", body["session_id"])
+		}
+		if len([]rune(body["conversation"].(string))) != maxRunMetadataValueRunes {
+			t.Fatalf("unbounded conversation: %q", body["conversation"])
+		}
+		if len([]rune(body["native_mcp_server"].(string))) != maxRunMetadataValueRunes {
+			t.Fatalf("unbounded native_mcp_server: %q", body["native_mcp_server"])
+		}
+		if len([]rune(body["native_mcp_namespace"].(string))) != maxRunMetadataValueRunes {
+			t.Fatalf("unbounded native_mcp_namespace: %q", body["native_mcp_namespace"])
+		}
+		if len([]rune(metadata["native_mcp_server"].(string))) != maxRunMetadataValueRunes {
+			t.Fatalf("unbounded metadata native_mcp_server: %q", metadata["native_mcp_server"])
+		}
+		if len([]rune(metadata["native_mcp_namespace"].(string))) != maxRunMetadataValueRunes {
+			t.Fatalf("unbounded metadata native_mcp_namespace: %q", metadata["native_mcp_namespace"])
+		}
+		_, _ = w.Write([]byte(`{"run_id":"hermes-run-1"}`))
+	}))
+	defer server.Close()
+
+	runID, err := NewHermesAdapter(server.URL, "key-1").StartRun(RunRequest{
+		RunID:                  longRunID,
+		AssignmentID:           longAssignmentID,
+		FullyComposedPrompt:    "prompt",
+		NativeMCPServerName:    longServerName,
+		NativeMCPToolNamespace: longNamespace,
 	})
 	if err != nil {
 		t.Fatalf("start run: %v", err)
@@ -163,6 +381,13 @@ func TestHermesAdapterFallsBackToResponsesWhenRunsUnavailable(t *testing.T) {
 			if r.Method != http.MethodPost {
 				http.NotFound(w, r)
 				return
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode response fallback body: %v", err)
+			}
+			if body["conversation"] != "assignment-1" {
+				t.Fatalf("unexpected response fallback body: %+v", body)
 			}
 			_, _ = w.Write([]byte(`{"id":"resp-1","status":"completed","output_text":"done"}`))
 		case "/v1/responses/resp-1":
@@ -307,6 +532,34 @@ func TestHermesAdapterStreamOrPollRunForwardsDeltaAndStarted(t *testing.T) {
 	}
 	if events[0].StartedAt.IsZero() {
 		t.Fatalf("started event missing timestamp")
+	}
+}
+
+func TestHermesAdapterStreamOrPollRunDoesNotDuplicateTerminalOutput(t *testing.T) {
+	events := []RunEvent{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"run.completed\",\"output\":\"done\"}\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewHermesAdapter(server.URL, "key-1").StreamOrPollRun(context.Background(), "hermes-run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(events) != 1 || events[0].Kind != RunEventStarted {
+		t.Fatalf("unexpected events: %+v", events)
 	}
 }
 

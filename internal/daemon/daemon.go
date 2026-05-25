@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -46,19 +47,12 @@ func (r Runner) RunForeground(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	errs := make(chan bindingRunResult, 16)
-	reconnects := make(chan config.Binding, 16)
 	var wg sync.WaitGroup
 	active := map[int]bindingRun{}
 	nextToken := 0
 	sendResult := func(result bindingRunResult) {
 		select {
 		case errs <- result:
-		case <-runCtx.Done():
-		}
-	}
-	requestReconnect := func(binding config.Binding) {
-		select {
-		case reconnects <- binding:
 		case <-runCtx.Done():
 		}
 	}
@@ -70,8 +64,8 @@ func (r Runner) RunForeground(ctx context.Context) error {
 		}
 		return false
 	}
-	startBinding := func(binding config.Binding, allowOverlap bool) error {
-		if !allowOverlap && hasActiveBinding(binding.ConnectionID) {
+	startBinding := func(binding config.Binding) error {
+		if hasActiveBinding(binding.ConnectionID) {
 			return nil
 		}
 		nextToken++
@@ -99,7 +93,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 			sendResult(bindingRunResult{
 				connectionID: binding.ConnectionID,
 				token:        token,
-				err:          r.runBinding(bindingCtx, binding, requestReconnect),
+				err:          r.runBinding(bindingCtx, binding),
 			})
 		}()
 		active[token] = bindingRun{cancel: logCancel, connectionID: binding.ConnectionID, token: token}
@@ -121,7 +115,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 
 	bindings := r.Store.ListBindings()
 	for _, binding := range bindings {
-		if err := startBinding(binding, false); err != nil {
+		if err := startBinding(binding); err != nil {
 			cancel()
 			wg.Wait()
 			return err
@@ -136,12 +130,6 @@ func (r Runner) RunForeground(ctx context.Context) error {
 			cancel()
 			wg.Wait()
 			return nil
-		case binding := <-reconnects:
-			if err := startBinding(binding, true); err != nil {
-				cancel()
-				wg.Wait()
-				return err
-			}
 		case result := <-errs:
 			current, ok := active[result.token]
 			if ok && current.connectionID != result.connectionID {
@@ -163,7 +151,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 			bindings := r.Store.ListBindings()
 			cancelMissingBindings(bindings)
 			for _, binding := range bindings {
-				if err := startBinding(binding, false); err != nil {
+				if err := startBinding(binding); err != nil {
 					cancel()
 					wg.Wait()
 					return err
@@ -178,11 +166,11 @@ func supportsExternalBindingReload(store config.Store) bool {
 	return ok
 }
 
-func (r Runner) runBinding(ctx context.Context, binding config.Binding, requestReconnect func(config.Binding)) error {
-	return r.runBindingLoop(ctx, binding, requestReconnect)
+func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
+	return r.runBindingLoop(ctx, binding)
 }
 
-func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding, requestReconnect func(config.Binding)) error {
+func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) error {
 	connectionID := binding.ConnectionID
 	backoff := r.reconnectMin()
 	for {
@@ -211,12 +199,13 @@ func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding, requ
 			return err
 		}
 		session.ServiceScope = r.serviceScope()
-		err = r.runBindingSession(ctx, current, session, requestReconnect)
+		err = r.runBindingSession(ctx, current, session)
 		if ctx.Err() != nil {
 			return nil
 		}
 		if errors.Is(err, errConnectorDraining) {
-			return nil
+			backoff = r.reconnectMin()
+			continue
 		}
 		if err == nil {
 			backoff = r.reconnectMin()
@@ -239,17 +228,19 @@ func (r Runner) serviceScope() externalagentprotocol.ServiceScope {
 	return externalagentprotocol.ServiceScopeUserLaunchAgent
 }
 
-func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, session bridge.Session, requestReconnect func(config.Binding)) error {
+func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, session bridge.Session) error {
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, binding.GatewayWebsocketURL, nil)
 	if err != nil {
 		return fmt.Errorf("connect gateway websocket: %w", err)
 	}
 	defer conn.Close()
+	sessionCtx, cancelSession := context.WithCancel(ctx)
+	defer cancelSession()
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-sessionCtx.Done():
 			_ = conn.Close()
 		case <-done:
 		}
@@ -283,7 +274,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	}
 	adapter := r.adapterForBinding(binding)
 	detection := r.bindingReadiness(adapter, binding)
-	_ = r.recordHeartbeat(binding.ConnectionID, r.now())
+	_ = r.recordHeartbeat(binding, r.now())
 	var wakeProbeMu sync.Mutex
 	var sessionWakeProbeAt *time.Time
 	var runStartedMu sync.Mutex
@@ -320,7 +311,8 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	if err := writeFrame(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
-	if err := r.replayActiveRun(ctx, binding, session, adapter, writeFrame); err != nil {
+	capabilityReporter := newNativeCapabilityChangeReporter()
+	if err := r.replayActiveRun(sessionCtx, binding, session, adapter, writeFrame); err != nil {
 		return err
 	}
 	if r.Store != nil {
@@ -331,29 +323,28 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	heartbeatStop := make(chan struct{})
 	defer close(heartbeatStop)
 	go func() {
+		readiness := r.bindingReadiness(adapter, binding)
+		_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-heartbeatStop:
 				return
+			case <-sessionCtx.Done():
+				return
 			case <-ticker.C:
-				_ = r.recordHeartbeat(binding.ConnectionID, r.now())
+				_ = r.recordHeartbeat(binding, r.now())
 				readiness := r.bindingReadiness(adapter, binding)
 				_ = writeFrame(session.HeartbeatFrameWithDetection(readiness, lastSessionWakeProbeAt()))
-				_ = r.writeCapabilitiesFrame(ctx, session, adapter, binding, readiness, writeFrame)
+				_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
 			}
 		}
 	}()
-	draining := false
-	drainOnce := sync.Once{}
 	commandCache := newCommandFrameCache()
 	for {
 		var frame externalagentprotocol.Frame
 		if err := conn.ReadJSON(&frame); err != nil {
-			if draining {
-				return errConnectorDraining
-			}
 			return nil
 		}
 		switch frame.MessageType {
@@ -361,25 +352,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.ServerDraining == nil {
 				continue
 			}
-			draining = true
-			drainOnce.Do(func() {
-				if requestReconnect != nil {
-					requestReconnect(binding)
-				}
-			})
-			if deadline := frame.ServerDraining.DeadlineAt; !deadline.IsZero() {
-				go func(deadline time.Time) {
-					timer := time.NewTimer(time.Until(deadline))
-					defer timer.Stop()
-					select {
-					case <-ctx.Done():
-						return
-					case <-timer.C:
-						_ = conn.Close()
-					}
-				}(deadline.UTC())
-			}
-			continue
+			return errConnectorDraining
 		case externalagentprotocol.FrameTypeWakeProbe:
 			if frame.WakeProbe == nil {
 				continue
@@ -395,7 +368,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				continue
 			}
 			probedAt := r.now()
-			_ = r.recordWakeProbe(binding.ConnectionID, binding.ConnectionGeneration, probedAt)
+			_ = r.recordWakeProbe(binding, probedAt)
 			recordSessionWakeProbe(probedAt)
 			accepted := session.WakeProbeAcceptedFrame(frame.WakeProbe.ProbeID)
 			commandCache.storeReply(frame, accepted)
@@ -406,6 +379,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := writeFrame(session.HeartbeatFrameWithDetection(wakeReadiness, lastSessionWakeProbeAt())); err != nil {
 				return fmt.Errorf("write wake probe heartbeat: %w", err)
 			}
+			_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, wakeReadiness, lastSessionWakeProbeAt, writeFrame)
 		case externalagentprotocol.FrameTypeConfigRefresh:
 			if frame.ConfigRefresh == nil {
 				continue
@@ -424,9 +398,24 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.RunStart == nil {
 				continue
 			}
-			if cached, ok := commandCache.cachedReply(frame); ok {
-				if err := writeFrame(cached); err != nil {
-					return fmt.Errorf("write cached run response: %w", err)
+			if cached, ok := commandCache.cachedReplies(frame); ok {
+				for _, reply := range cached {
+					if err := writeFrame(reply); err != nil {
+						return fmt.Errorf("write cached run response: %w", err)
+					}
+				}
+				continue
+			}
+			if nativeRunID, ok := r.activeNativeRunIDForRunStart(binding, frame); ok {
+				accepted := session.RunAcceptedFrame(frame, nativeRunID)
+				started := session.RunStartedFrame(frame, nativeRunID, time.Time{})
+				commandCache.storeReplies(frame, []externalagentprotocol.Frame{accepted, started})
+				if err := writeFrame(accepted); err != nil {
+					return fmt.Errorf("write redelivered run accepted: %w", err)
+				}
+				_ = markRunStarted(frame.RunID)
+				if err := writeFrame(started); err != nil {
+					return fmt.Errorf("write redelivered run started: %w", err)
 				}
 				continue
 			}
@@ -438,16 +427,11 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
-			if nativeRunID, ok := r.activeNativeRunIDForRunStart(binding, frame); ok {
-				accepted := session.RunAcceptedFrame(frame, nativeRunID)
-				commandCache.storeReply(frame, accepted)
-				if err := writeFrame(accepted); err != nil {
-					return fmt.Errorf("write redelivered run accepted: %w", err)
-				}
-				if markRunStarted(frame.RunID) {
-					if err := writeFrame(session.RunStartedFrame(frame, nativeRunID, time.Time{})); err != nil {
-						return fmt.Errorf("write redelivered run started: %w", err)
-					}
+			if activeRunID, conflict := r.activeRunConflict(binding, frame); conflict {
+				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external persona already has active run "+activeRunID)
+				commandCache.storeReply(frame, failed)
+				if writeErr := writeFrame(failed); writeErr != nil {
+					return fmt.Errorf("write active run conflict: %w", writeErr)
 				}
 				continue
 			}
@@ -457,14 +441,6 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run readiness failure: %w", writeErr)
-				}
-				continue
-			}
-			if activeRunID, conflict := r.activeRunConflict(binding, frame); conflict {
-				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external persona already has active run "+activeRunID)
-				commandCache.storeReply(frame, failed)
-				if writeErr := writeFrame(failed); writeErr != nil {
-					return fmt.Errorf("write active run conflict: %w", writeErr)
 				}
 				continue
 			}
@@ -493,7 +469,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				continue
 			}
 			if err := r.recordNativeRunID(binding, frame.RunID, nativeRunID); err != nil {
-				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+				failed := runRecordFailureTerminal(adapter, session, frame, nativeRunID, err)
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run journal failure: %w", writeErr)
@@ -509,10 +485,12 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				if !markRunStarted(frame.RunID) {
 					return nil
 				}
-				return writeFrame(session.RunStartedFrame(frame, nativeRunID, startedAt))
+				started := session.RunStartedFrame(frame, nativeRunID, startedAt)
+				commandCache.storeReplies(frame, []externalagentprotocol.Frame{accepted, started})
+				return writeFrame(started)
 			}
 			go func(frame externalagentprotocol.Frame, nativeRunID string) {
-				observeCtx, cancelObserve := contextForRunDeadline(ctx, frame.RunStart.DeadlineAt)
+				observeCtx, cancelObserve := contextForRunDeadline(sessionCtx, frame.RunStart.DeadlineAt)
 				defer cancelObserve()
 				result, err := adapter.StreamOrPollRun(observeCtx, nativeRunID, func(event runtime.RunEvent) error {
 					switch event.Kind {
@@ -527,6 +505,9 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 					}
 				})
 				if err != nil {
+					if errors.Is(observeCtx.Err(), context.Canceled) {
+						return
+					}
 					reason := externalagentprotocol.TerminalReasonFailed
 					output := err.Error()
 					if errors.Is(observeCtx.Err(), context.DeadlineExceeded) {
@@ -594,6 +575,9 @@ func (r Runner) refreshMCPConfig(binding config.Binding) error {
 	if !ok {
 		return nil
 	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
+		return nil
+	}
 	transport := mcp.MCPProxyTransportAuto
 	if strings.TrimSpace(latest.LocalMCPProxyURL) != "" || strings.TrimSpace(latest.LocalMCPProxyToken) != "" {
 		transport = mcp.MCPProxyTransportLoopbackHTTP
@@ -610,13 +594,14 @@ func (r Runner) now() time.Time {
 }
 
 type commandFrameCache struct {
-	replies map[string]externalagentprotocol.Frame
+	mu      sync.Mutex
+	replies map[string][]externalagentprotocol.Frame
 	seenIDs map[string]struct{}
 }
 
 func newCommandFrameCache() *commandFrameCache {
 	return &commandFrameCache{
-		replies: map[string]externalagentprotocol.Frame{},
+		replies: map[string][]externalagentprotocol.Frame{},
 		seenIDs: map[string]struct{}{},
 	}
 }
@@ -626,20 +611,39 @@ func (cache *commandFrameCache) key(frame externalagentprotocol.Frame) string {
 }
 
 func (cache *commandFrameCache) cachedReply(frame externalagentprotocol.Frame) (externalagentprotocol.Frame, bool) {
-	key := cache.key(frame)
-	if key == "" {
+	replies, ok := cache.cachedReplies(frame)
+	if !ok || len(replies) == 0 {
 		return externalagentprotocol.Frame{}, false
 	}
-	reply, ok := cache.replies[key]
-	return reply, ok
+	return replies[0], true
+}
+
+func (cache *commandFrameCache) cachedReplies(frame externalagentprotocol.Frame) ([]externalagentprotocol.Frame, bool) {
+	key := cache.key(frame)
+	if key == "" {
+		return nil, false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	replies, ok := cache.replies[key]
+	if !ok {
+		return nil, false
+	}
+	return append([]externalagentprotocol.Frame(nil), replies...), true
 }
 
 func (cache *commandFrameCache) storeReply(frame externalagentprotocol.Frame, reply externalagentprotocol.Frame) {
+	cache.storeReplies(frame, []externalagentprotocol.Frame{reply})
+}
+
+func (cache *commandFrameCache) storeReplies(frame externalagentprotocol.Frame, replies []externalagentprotocol.Frame) {
 	key := cache.key(frame)
 	if key == "" {
 		return
 	}
-	cache.replies[key] = reply
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.replies[key] = append([]externalagentprotocol.Frame(nil), replies...)
 	cache.seenIDs[key] = struct{}{}
 }
 
@@ -648,6 +652,8 @@ func (cache *commandFrameCache) seen(frame externalagentprotocol.Frame) bool {
 	if key == "" {
 		return false
 	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
 	_, ok := cache.seenIDs[key]
 	return ok
 }
@@ -657,6 +663,8 @@ func (cache *commandFrameCache) mark(frame externalagentprotocol.Frame) {
 	if key == "" {
 		return
 	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
 	cache.seenIDs[key] = struct{}{}
 }
 
@@ -666,6 +674,9 @@ func (r Runner) activeNativeRunIDForRunStart(binding config.Binding, frame exter
 	}
 	latest, ok := r.Store.Binding(binding.ConnectionID)
 	if !ok {
+		return "", false
+	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
 		return "", false
 	}
 	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(frame.RunID) {
@@ -689,6 +700,9 @@ func (r Runner) activeRunMatchesWithoutNativeRunID(binding config.Binding, frame
 	if !ok {
 		return false
 	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
+		return false
+	}
 	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(frame.RunID) {
 		return false
 	}
@@ -704,6 +718,9 @@ func (r Runner) activeRunConflict(binding config.Binding, frame externalagentpro
 	}
 	latest, ok := r.Store.Binding(binding.ConnectionID)
 	if !ok {
+		return "", false
+	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
 		return "", false
 	}
 	activeRunID := strings.TrimSpace(latest.ActiveRunID)
@@ -729,6 +746,9 @@ func (r Runner) replayActiveRun(ctx context.Context, binding config.Binding, ses
 	}
 	latest, ok := r.Store.Binding(binding.ConnectionID)
 	if !ok {
+		return nil
+	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
 		return nil
 	}
 	if strings.TrimSpace(latest.ActiveRunID) == "" || strings.TrimSpace(latest.ActiveAssignmentID) == "" || strings.TrimSpace(latest.ActiveNativeRunID) == "" {
@@ -776,6 +796,9 @@ func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Bin
 		}
 	})
 	if err != nil {
+		if errors.Is(observeCtx.Err(), context.Canceled) {
+			return
+		}
 		reason := externalagentprotocol.TerminalReasonFailed
 		output := err.Error()
 		if errors.Is(observeCtx.Err(), context.DeadlineExceeded) {
@@ -817,6 +840,9 @@ func contextForRunDeadline(parent context.Context, deadline time.Time) (context.
 
 func (r Runner) revokeBinding(binding config.Binding, adapter runtime.Adapter, reason string) error {
 	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if ok && latest.ConnectionGeneration != binding.ConnectionGeneration {
+		return nil
+	}
 	if ok && strings.TrimSpace(latest.ActiveNativeRunID) != "" {
 		_ = adapter.CancelRun(strings.TrimSpace(latest.ActiveNativeRunID))
 	}
@@ -836,6 +862,9 @@ func (r Runner) activateRun(binding config.Binding, frame externalagentprotocol.
 	if !ok {
 		return fmt.Errorf("binding %s not found", binding.ConnectionID)
 	}
+	if active.ConnectionGeneration != binding.ConnectionGeneration {
+		return fmt.Errorf("stale connection generation")
+	}
 	active.ActiveRunID = strings.TrimSpace(frame.RunID)
 	active.ActiveAssignmentID = strings.TrimSpace(frame.AssignmentID)
 	if frame.RunStart != nil {
@@ -844,17 +873,29 @@ func (r Runner) activateRun(binding config.Binding, frame externalagentprotocol.
 	return writable.SaveBinding(active)
 }
 
+func runRecordFailureTerminal(adapter runtime.Adapter, session bridge.Session, frame externalagentprotocol.Frame, nativeRunID string, recordErr error) externalagentprotocol.Frame {
+	_ = adapter.CancelRun(strings.TrimSpace(nativeRunID))
+	failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, recordErr.Error())
+	if failed.RunTerminal != nil {
+		failed.RunTerminal.NativeRunID = strings.TrimSpace(nativeRunID)
+	}
+	return failed
+}
+
 func (r Runner) recordNativeRunID(binding config.Binding, runID string, nativeRunID string) error {
 	writable, ok := r.Store.(config.WritableStore)
 	if !ok {
-		return nil
+		return fmt.Errorf("writable connector store required")
 	}
 	latest, ok := r.Store.Binding(binding.ConnectionID)
 	if !ok {
-		return nil
+		return fmt.Errorf("binding %s not found", binding.ConnectionID)
+	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
+		return fmt.Errorf("stale connection generation")
 	}
 	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(runID) {
-		return nil
+		return fmt.Errorf("active run changed before native run id journal")
 	}
 	latest.ActiveNativeRunID = strings.TrimSpace(nativeRunID)
 	return writable.SaveBinding(latest)
@@ -869,6 +910,9 @@ func (r Runner) clearRunState(binding config.Binding, runID string) error {
 	if !ok {
 		return nil
 	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
+		return nil
+	}
 	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(runID) {
 		return nil
 	}
@@ -879,30 +923,36 @@ func (r Runner) clearRunState(binding config.Binding, runID string) error {
 	return writable.SaveBinding(latest)
 }
 
-func (r Runner) recordHeartbeat(connectionID config.ConnectionID, at time.Time) error {
+func (r Runner) recordHeartbeat(binding config.Binding, at time.Time) error {
 	writable, ok := r.Store.(config.WritableStore)
 	if !ok {
 		return nil
 	}
-	latest, ok := r.Store.Binding(connectionID)
+	latest, ok := r.Store.Binding(binding.ConnectionID)
 	if !ok {
+		return nil
+	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
 		return nil
 	}
 	latest.LastHeartbeatAt = at.UTC()
 	return writable.SaveBinding(latest)
 }
 
-func (r Runner) recordWakeProbe(connectionID config.ConnectionID, generation int64, at time.Time) error {
+func (r Runner) recordWakeProbe(binding config.Binding, at time.Time) error {
 	writable, ok := r.Store.(config.WritableStore)
 	if !ok {
 		return nil
 	}
-	latest, ok := r.Store.Binding(connectionID)
+	latest, ok := r.Store.Binding(binding.ConnectionID)
 	if !ok {
 		return nil
 	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
+		return nil
+	}
 	latest.LastWakeProbeAt = at.UTC()
-	latest.LastWakeProbeGeneration = generation
+	latest.LastWakeProbeGeneration = binding.ConnectionGeneration
 	return writable.SaveBinding(latest)
 }
 
@@ -919,6 +969,9 @@ func (r Runner) nativeRunIDForCancel(binding config.Binding, runID string) (stri
 	latest, ok := r.Store.Binding(binding.ConnectionID)
 	if !ok {
 		return "", fmt.Errorf("binding %s not found", binding.ConnectionID)
+	}
+	if latest.ConnectionGeneration != binding.ConnectionGeneration {
+		return "", fmt.Errorf("stale connection generation")
 	}
 	if strings.TrimSpace(latest.ActiveRunID) != strings.TrimSpace(runID) {
 		return "", fmt.Errorf("run %s is not active", strings.TrimSpace(runID))
@@ -978,6 +1031,9 @@ func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
 		if !ok {
 			return nil
 		}
+		if latest.ConnectionGeneration != binding.ConnectionGeneration {
+			return nil
+		}
 		latest.OpenClawDeviceToken = strings.TrimSpace(deviceToken)
 		latest.HasOpenClawDevice = latest.OpenClawDeviceToken != ""
 		return writable.SaveBinding(latest)
@@ -993,30 +1049,95 @@ func (r Runner) writeCapabilitiesFrame(
 	detection runtime.Detection,
 	writeFrame func(externalagentprotocol.Frame) error,
 ) error {
-	var nativeCapabilities []externalagentprotocol.NativeCapabilityReport
-	describer, ok := adapter.(runtime.NativeCapabilityDescriber)
-	if ok {
-		describeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		capabilities, err := describer.DescribeNativeCapabilities(describeCtx, binding.NativeMCPServer)
-		cancel()
-		if err == nil {
-			nativeCapabilities = nativeCapabilityReports(capabilities, r.now())
-		}
-	}
-	frame := session.CapabilitiesFrame(detectionCapabilities(detection, r.now()), nativeCapabilities)
+	frame, _ := r.capabilitiesFrame(ctx, session, adapter, binding, detection, nil)
 	if err := writeFrame(frame); err != nil {
 		return fmt.Errorf("write capabilities frame: %w", err)
 	}
 	return nil
 }
 
-func detectionCapabilities(detection runtime.Detection, reportedAt time.Time) []externalagentprotocol.CapabilityReport {
+type nativeCapabilityChangeReporter struct {
+	mu              sync.Mutex
+	lastFingerprint string
+	lastWriteAt     time.Time
+	seen            bool
+}
+
+const nativeCapabilityReportRetryInterval = time.Minute
+
+func newNativeCapabilityChangeReporter() *nativeCapabilityChangeReporter {
+	return &nativeCapabilityChangeReporter{}
+}
+
+func (reporter *nativeCapabilityChangeReporter) writeIfChanged(
+	ctx context.Context,
+	r Runner,
+	session bridge.Session,
+	adapter runtime.Adapter,
+	binding config.Binding,
+	detection runtime.Detection,
+	lastWakeProbeAt func() *time.Time,
+	writeFrame func(externalagentprotocol.Frame) error,
+) error {
+	reporter.mu.Lock()
+	defer reporter.mu.Unlock()
+	frame, fingerprint := r.capabilitiesFrame(ctx, session, adapter, binding, detection, lastWakeProbeAt)
+	now := r.now()
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if reporter.seen && reporter.lastFingerprint == fingerprint && now.Sub(reporter.lastWriteAt) < nativeCapabilityReportRetryInterval {
+		return nil
+	}
+	if err := writeFrame(frame); err != nil {
+		return fmt.Errorf("write capabilities frame: %w", err)
+	}
+	reporter.seen = true
+	reporter.lastFingerprint = fingerprint
+	reporter.lastWriteAt = now.UTC()
+	return nil
+}
+
+func (r Runner) capabilitiesFrame(
+	ctx context.Context,
+	session bridge.Session,
+	adapter runtime.Adapter,
+	binding config.Binding,
+	detection runtime.Detection,
+	lastWakeProbeAt func() *time.Time,
+) (externalagentprotocol.Frame, string) {
+	var nativeCapabilities []externalagentprotocol.NativeCapabilityReport
+	var nativeReportedSources []externalagentprotocol.NativeCapabilitySource
+	nativeDiscoveryStatus := externalagentprotocol.NativeCapabilityDiscoveryUnsupported
+	describer, ok := adapter.(runtime.NativeCapabilityDescriber)
+	if ok {
+		nativeDiscoveryStatus = externalagentprotocol.NativeCapabilityDiscoveryFailed
+		describeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		capabilities, err := describer.DescribeNativeCapabilities(describeCtx, binding.NativeMCPServer)
+		cancel()
+		nativeCapabilities = nativeCapabilityReports(capabilities, r.now())
+		nativeReportedSources = nativeCapabilityReportedSources(capabilities)
+		if err == nil {
+			nativeDiscoveryStatus = externalagentprotocol.NativeCapabilityDiscoveryComplete
+		} else if len(nativeReportedSources) > 0 {
+			nativeDiscoveryStatus = externalagentprotocol.NativeCapabilityDiscoveryPartial
+		}
+	}
+	capabilities := detectionCapabilities(detection, currentWakeProbeAt(lastWakeProbeAt), r.now())
+	frame := session.CapabilitiesFrame(capabilities, nativeCapabilities, nativeDiscoveryStatus, nativeReportedSources)
+	return frame, capabilityFrameFingerprint(capabilities, nativeCapabilities, nativeDiscoveryStatus, nativeReportedSources)
+}
+
+func detectionCapabilities(detection runtime.Detection, lastWakeProbeAt *time.Time, reportedAt time.Time) []externalagentprotocol.CapabilityReport {
 	status := externalagentprotocol.ReadinessStatusRuntimeHealthy
 	if detection.State == runtime.AdapterStateReady {
 		status = externalagentprotocol.ReadinessStatusWakeable
 	}
 	if detection.State == runtime.AdapterStateMCPVerified || detection.State == runtime.AdapterStateMCPRestartRequired {
 		status = externalagentprotocol.ReadinessStatusMCPConfigured
+	}
+	if detection.State == runtime.AdapterStateMCPVerified && lastWakeProbeAt != nil && !lastWakeProbeAt.IsZero() {
+		status = externalagentprotocol.ReadinessStatusWakeable
 	}
 	if detection.State == runtime.AdapterStateRuntimeMissing || detection.State == runtime.AdapterStateRuntimeStopped || detection.State == runtime.AdapterStateAuthMissing || detection.State == runtime.AdapterStateCapabilityMissing || detection.State == runtime.AdapterStateWakeProbeFailed {
 		status = externalagentprotocol.ReadinessStatusRuntimeError
@@ -1031,16 +1152,27 @@ func detectionCapabilities(detection runtime.Detection, reportedAt time.Time) []
 	}
 }
 
+func currentWakeProbeAt(lastWakeProbeAt func() *time.Time) *time.Time {
+	if lastWakeProbeAt == nil {
+		return nil
+	}
+	return lastWakeProbeAt()
+}
+
 func nativeCapabilityReports(capabilities []runtime.NativeCapability, reportedAt time.Time) []externalagentprotocol.NativeCapabilityReport {
 	reports := make([]externalagentprotocol.NativeCapabilityReport, 0, len(capabilities))
 	for _, capability := range capabilities {
+		status := externalagentprotocol.ReadinessStatusWakeable
+		if capability.Degraded {
+			status = externalagentprotocol.ReadinessStatusRuntimeHealthy
+		}
 		report := externalagentprotocol.NativeCapabilityReport{
 			Source:       externalagentprotocol.NativeCapabilitySource(strings.TrimSpace(string(capability.Source))),
 			Kind:         externalagentprotocol.NativeCapabilityKind(strings.TrimSpace(string(capability.Kind))),
 			CapabilityID: strings.TrimSpace(capability.CapabilityID),
 			Label:        strings.TrimSpace(capability.Label),
 			Summary:      strings.TrimSpace(capability.Summary),
-			Status:       externalagentprotocol.ReadinessStatusWakeable,
+			Status:       status,
 			ReportedAt:   reportedAt.UTC(),
 		}
 		if report.Source == "" || report.Kind == "" || report.CapabilityID == "" || report.Label == "" {
@@ -1051,7 +1183,86 @@ func nativeCapabilityReports(capabilities []runtime.NativeCapability, reportedAt
 		}
 		reports = append(reports, report)
 	}
+	sort.Slice(reports, func(i, j int) bool {
+		left := nativeCapabilityFingerprintKey(reports[i])
+		right := nativeCapabilityFingerprintKey(reports[j])
+		return left < right
+	})
 	return reports
+}
+
+func nativeCapabilityFingerprint(reports []externalagentprotocol.NativeCapabilityReport) string {
+	keys := make([]string, 0, len(reports))
+	for _, report := range reports {
+		keys = append(keys, nativeCapabilityFingerprintKey(report))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "\n")
+}
+
+func nativeCapabilityReportedSources(capabilities []runtime.NativeCapability) []externalagentprotocol.NativeCapabilitySource {
+	sources := make([]externalagentprotocol.NativeCapabilitySource, 0, len(capabilities))
+	seen := map[externalagentprotocol.NativeCapabilitySource]struct{}{}
+	for _, capability := range capabilities {
+		source := externalagentprotocol.NativeCapabilitySource(strings.TrimSpace(string(capability.Source)))
+		if source == "" {
+			continue
+		}
+		if _, ok := seen[source]; ok {
+			continue
+		}
+		seen[source] = struct{}{}
+		sources = append(sources, source)
+	}
+	sort.Slice(sources, func(i, j int) bool {
+		return string(sources[i]) < string(sources[j])
+	})
+	return sources
+}
+
+func capabilityFrameFingerprint(
+	capabilities []externalagentprotocol.CapabilityReport,
+	nativeCapabilities []externalagentprotocol.NativeCapabilityReport,
+	nativeDiscoveryStatus externalagentprotocol.NativeCapabilityDiscoveryStatus,
+	nativeReportedSources []externalagentprotocol.NativeCapabilitySource,
+) string {
+	keys := make([]string, 0, len(capabilities)+len(nativeCapabilities)+len(nativeReportedSources)+1)
+	keys = append(keys, "native_discovery\x1f"+strings.TrimSpace(string(nativeDiscoveryStatus)))
+	for _, capability := range capabilities {
+		keys = append(keys, capabilityFingerprintKey(capability))
+	}
+	for _, capability := range nativeCapabilities {
+		keys = append(keys, nativeCapabilityFingerprintKey(capability))
+	}
+	for _, source := range nativeReportedSources {
+		keys = append(keys, "native_reported_source\x1f"+strings.TrimSpace(string(source)))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "\n")
+}
+
+func capabilityFingerprintKey(report externalagentprotocol.CapabilityReport) string {
+	parts := []string{
+		"capability",
+		strings.TrimSpace(string(report.Kind)),
+		strings.TrimSpace(string(report.Status)),
+		strings.TrimSpace(report.Label),
+		strings.TrimSpace(string(report.Reason)),
+	}
+	return strings.Join(parts, "\x1f")
+}
+
+func nativeCapabilityFingerprintKey(report externalagentprotocol.NativeCapabilityReport) string {
+	parts := []string{
+		"native_capability",
+		strings.TrimSpace(string(report.Source)),
+		strings.TrimSpace(string(report.Kind)),
+		strings.TrimSpace(report.CapabilityID),
+		strings.TrimSpace(report.Label),
+		strings.TrimSpace(report.Summary),
+		strings.TrimSpace(string(report.Status)),
+	}
+	return strings.Join(parts, "\x1f")
 }
 
 func firstNonEmpty(values ...string) string {

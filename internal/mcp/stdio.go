@@ -134,7 +134,7 @@ func (proxy StdioProxy) forward(ctx context.Context, mcpURL string, token string
 		return nil, fmt.Errorf("post mcp request: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, err := readMCPHTTPResponse(resp)
+	raw, err := readMCPHTTPResponse(resp, message.ID)
 	if err != nil {
 		return nil, fmt.Errorf("read mcp response: %w", err)
 	}
@@ -146,9 +146,9 @@ func (proxy StdioProxy) forward(ctx context.Context, mcpURL string, token string
 	return raw, nil
 }
 
-func readMCPHTTPResponse(resp *http.Response) ([]byte, error) {
+func readMCPHTTPResponse(resp *http.Response, requestID json.RawMessage) ([]byte, error) {
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		return readSSEJSONPayloads(resp.Body)
+		return readSSEJSONPayloads(resp.Body, requestID)
 	}
 	return io.ReadAll(resp.Body)
 }
@@ -240,7 +240,11 @@ func (stream *mcpGetStream) once(ctx context.Context, client *http.Client, mcpUR
 			stream.setLastEventID(event.ID)
 		}
 		payload := event.dataPayload()
-		if !json.Valid(payload) {
+		ok, err := event.isJSONRPCPayload()
+		if err != nil {
+			return err
+		}
+		if !ok {
 			return nil
 		}
 		return output.writeLine(payload)
@@ -260,27 +264,121 @@ func (stream *mcpGetStream) setLastEventID(value string) {
 }
 
 type sseEvent struct {
-	ID   string
-	Data []string
+	ID    string
+	Event string
+	Data  []string
 }
 
 func (event sseEvent) dataPayload() []byte {
 	return []byte(strings.Join(event.Data, "\n"))
 }
 
-func readSSEJSONPayloads(body io.Reader) ([]byte, error) {
+func readSSEJSONPayloads(body io.Reader, requestID json.RawMessage) ([]byte, error) {
 	var output bytes.Buffer
 	err := readSSEStream(body, func(event sseEvent) error {
+		payload := event.dataPayload()
+		ok, err := event.isJSONRPCPayload()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+		if !jsonRPCPayloadMatchesRequestID(payload, requestID) {
+			return nil
+		}
 		if output.Len() > 0 {
 			output.WriteByte('\n')
 		}
-		output.Write(event.dataPayload())
+		output.Write(payload)
 		return io.EOF
 	})
 	if errors.Is(err, io.EOF) {
 		return output.Bytes(), nil
 	}
+	if err == nil && output.Len() == 0 {
+		return nil, fmt.Errorf("mcp SSE response ended without JSON-RPC event matching request")
+	}
 	return output.Bytes(), err
+}
+
+func jsonRPCPayloadMatchesRequestID(payload []byte, requestID json.RawMessage) bool {
+	if len(requestID) == 0 {
+		return true
+	}
+	var envelope struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return false
+	}
+	if len(envelope.ID) == 0 {
+		return false
+	}
+	return jsonRawMessagesEqual(envelope.ID, requestID)
+}
+
+func jsonRawMessagesEqual(left json.RawMessage, right json.RawMessage) bool {
+	var leftBuffer bytes.Buffer
+	if err := json.Compact(&leftBuffer, left); err != nil {
+		return false
+	}
+	var rightBuffer bytes.Buffer
+	if err := json.Compact(&rightBuffer, right); err != nil {
+		return false
+	}
+	return bytes.Equal(leftBuffer.Bytes(), rightBuffer.Bytes())
+}
+
+func (event sseEvent) isJSONRPCPayload() (bool, error) {
+	payload := event.dataPayload()
+	if isJSONRPCPayload(payload) {
+		return true, nil
+	}
+	if jsonRPCPayloadMalformed(payload) {
+		return false, fmt.Errorf("mcp SSE event contained malformed JSON-RPC-looking payload")
+	}
+	return false, nil
+}
+
+func isJSONRPCPayload(payload []byte) bool {
+	if !json.Valid(payload) {
+		return false
+	}
+	var envelope struct {
+		JSONRPC string `json:"jsonrpc"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return false
+	}
+	return strings.TrimSpace(envelope.JSONRPC) != ""
+}
+
+func jsonRPCPayloadMalformed(payload []byte) bool {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if !json.Valid(trimmed) {
+		return trimmed[0] == '{' || bytes.Contains(trimmed, []byte("jsonrpc"))
+	}
+	if trimmed[0] != '{' {
+		return false
+	}
+	var envelope struct {
+		JSONRPC *string         `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Result  json.RawMessage `json:"result"`
+		Error   json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return true
+	}
+	if envelope.JSONRPC != nil {
+		return strings.TrimSpace(*envelope.JSONRPC) == ""
+	}
+	return len(envelope.ID) > 0 || strings.TrimSpace(envelope.Method) != "" || len(envelope.Result) > 0 || len(envelope.Error) > 0
 }
 
 func readSSEStream(body io.Reader, handle func(sseEvent) error) error {
@@ -299,7 +397,7 @@ func readSSEStream(body io.Reader, handle func(sseEvent) error) error {
 		return err
 	}
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if line == "" {
 			if err := flush(); err != nil {
 				return err
@@ -311,6 +409,10 @@ func readSSEStream(body io.Reader, handle func(sseEvent) error) error {
 		}
 		if strings.HasPrefix(line, "id:") {
 			event.ID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+			continue
+		}
+		if strings.HasPrefix(line, "event:") {
+			event.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 			continue
 		}
 		if strings.HasPrefix(line, "data:") {

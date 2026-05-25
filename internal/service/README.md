@@ -1,9 +1,10 @@
 # service
 
-`service` owns user-level service installation for the Connector daemon.
+`service` owns OS service installation and uninstall for the Connector daemon.
 
-It writes one restart-persistent user service per OS:
+It writes and removes restart-persistent service registrations:
 
 - macOS LaunchAgent
+- macOS LaunchDaemon for supported system scope
 - Linux `systemd --user` unit
-- Windows Scheduled Task
+- Linux XDG autostart fallback

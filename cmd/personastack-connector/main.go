@@ -39,6 +39,7 @@ const usage = `Usage:
   personastack-connector mcp stdio --binding <connection_id> [--service-scope user|system]
   personastack-connector service install [--service-scope user|system]
   personastack-connector service plan [--service-scope user|system]
+  personastack-connector service uninstall [--service-scope user|system]
   personastack-connector run --foreground [--service-scope user|system]
   personastack-connector unpair [--service-scope user|system]
   personastack-connector version
@@ -53,6 +54,14 @@ type command struct {
 
 var installService = func(scope service.ServiceScope) (service.InstallResult, error) {
 	return (service.Installer{ServiceScope: scope}).Install()
+}
+
+var newServiceInstaller = func(scope service.ServiceScope) service.Installer {
+	return service.Installer{
+		ServiceScope: scope,
+		GOOS:         currentGOOS,
+		SystemRoot:   os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT"),
+	}
 }
 
 var currentGOOS = stdruntime.GOOS
@@ -215,7 +224,7 @@ func (cmd command) runPair(args []string) error {
 		if err := validateSystemServiceScopePlatform(); err != nil {
 			return err
 		}
-		if err := validateSystemServiceScopeAccess(); err != nil {
+		if err := validateSystemServiceScopeAccess("pairing"); err != nil {
 			return err
 		}
 	}
@@ -853,7 +862,7 @@ func (cmd command) runService(args []string) error {
 	if len(args) == 0 {
 		return errors.New("service requires a subcommand")
 	}
-	if args[0] != "install" && args[0] != "plan" {
+	if args[0] != "install" && args[0] != "plan" && args[0] != "uninstall" {
 		return fmt.Errorf("unknown service subcommand %q", args[0])
 	}
 	scopeValue := "user"
@@ -867,15 +876,34 @@ func (cmd command) runService(args []string) error {
 	if err != nil {
 		return err
 	}
+	installer := newServiceInstaller(scope)
 	if args[0] == "plan" {
-		result, err := (service.Installer{ServiceScope: scope}).Plan()
+		result, err := installer.Plan()
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(cmd.stdout, "service plan kind=%s scope=%s path=%s\n", result.Kind, result.Scope, result.Path)
 		return nil
 	}
-	result, err := (service.Installer{ServiceScope: scope}).Install()
+	if args[0] == "uninstall" {
+		if scope == service.ServiceScopeSystemLaunchDaemon {
+			if err := validateSystemServiceScopePlatform(); err != nil {
+				return err
+			}
+			if err := validateSystemServiceScopeAccess("uninstall"); err != nil {
+				return err
+			}
+		}
+		results, err := installer.Uninstall()
+		if err != nil {
+			return err
+		}
+		for _, result := range results {
+			fmt.Fprintf(cmd.stdout, "service uninstalled kind=%s scope=%s removed=%t path=%s\n", result.Kind, result.Scope, result.Removed, result.Path)
+		}
+		return nil
+	}
+	result, err := installer.Install()
 	if err != nil {
 		return err
 	}
@@ -1010,12 +1038,16 @@ func validateSystemServiceScopePlatform() error {
 	return nil
 }
 
-func validateSystemServiceScopeAccess() error {
+func validateSystemServiceScopeAccess(action string) error {
 	if strings.TrimSpace(os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT")) != "" {
 		return nil
 	}
 	if os.Geteuid() != 0 {
-		return errors.New("system service scope requires sudo before pairing")
+		action = strings.TrimSpace(action)
+		if action == "" {
+			return errors.New("system service scope requires sudo")
+		}
+		return fmt.Errorf("system service scope requires sudo before %s", action)
 	}
 	return nil
 }

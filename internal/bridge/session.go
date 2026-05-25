@@ -148,11 +148,19 @@ func (s Session) WakeProbeAcceptedFrame(probeID string) externalagentprotocol.Fr
 	return frame
 }
 
-func (s Session) CapabilitiesFrame(capabilities []externalagentprotocol.CapabilityReport, nativeCapabilities []externalagentprotocol.NativeCapabilityReport) externalagentprotocol.Frame {
+func (s Session) CapabilitiesFrame(
+	capabilities []externalagentprotocol.CapabilityReport,
+	nativeCapabilities []externalagentprotocol.NativeCapabilityReport,
+	nativeDiscoveryStatus externalagentprotocol.NativeCapabilityDiscoveryStatus,
+	nativeReportedSources []externalagentprotocol.NativeCapabilitySource,
+) externalagentprotocol.Frame {
 	frame := s.baseFrame(externalagentprotocol.FrameTypeCapabilitiesReport, s.now())
 	frame.Capabilities = &externalagentprotocol.CapabilitiesPayload{
-		Capabilities:       capabilities,
-		NativeCapabilities: nativeCapabilities,
+		ConnectionGeneration:            s.Binding.ConnectionGeneration,
+		Capabilities:                    capabilities,
+		NativeCapabilities:              nativeCapabilities,
+		NativeCapabilityDiscoveryStatus: nativeDiscoveryStatus,
+		NativeCapabilityReportedSources: nativeReportedSources,
 	}
 	return frame
 }

@@ -142,6 +142,120 @@ func TestStdioProxyDecodesSSEJSONPayload(t *testing.T) {
 	}
 }
 
+func TestStdioProxySkipsReadinessSSEBeforeJSONRPCPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: ready\n"))
+		_, _ = w.Write([]byte("data: connected\n\n"))
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte(`data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}` + "\n\n"))
+	}))
+	defer server.Close()
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "token-1",
+	}}})
+	var stdout bytes.Buffer
+	err := NewStdioProxy(store).Serve(context.Background(), "conn-1", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	if strings.Contains(stdout.String(), "connected") || !strings.Contains(stdout.String(), `"ok":true`) {
+		t.Fatalf("unexpected stdout: %s", stdout.String())
+	}
+}
+
+func TestStdioProxySkipsJSONRPCSSEWithDifferentRequestID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte(`data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"message":"working"}}` + "\n\n"))
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte(`data: {"jsonrpc":"2.0","id":99,"result":{"wrong":true}}` + "\n\n"))
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte(`data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}` + "\n\n"))
+	}))
+	defer server.Close()
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "token-1",
+	}}})
+	var stdout bytes.Buffer
+	err := NewStdioProxy(store).Serve(context.Background(), "conn-1", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	if strings.Contains(stdout.String(), `"wrong":true`) || !strings.Contains(stdout.String(), `"ok":true`) {
+		t.Fatalf("unexpected stdout: %s", stdout.String())
+	}
+}
+
+func TestStdioProxyFailsWhenSSEEndsWithoutJSONRPCPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: ready\n"))
+		_, _ = w.Write([]byte("data: connected\n\n"))
+	}))
+	defer server.Close()
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "token-1",
+	}}})
+	err := NewStdioProxy(store).Serve(context.Background(), "conn-1", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "without JSON-RPC event") {
+		t.Fatalf("Serve() error = %v", err)
+	}
+}
+
+func TestStdioProxyIgnoresNonJSONRPCMessageEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte("data: connected\n\n"))
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte(`data: {"type":"ready"}` + "\n\n"))
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte(`data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}` + "\n\n"))
+	}))
+	defer server.Close()
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "token-1",
+	}}})
+	var stdout bytes.Buffer
+	err := NewStdioProxy(store).Serve(context.Background(), "conn-1", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &stdout, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	if strings.Contains(stdout.String(), "connected") || !strings.Contains(stdout.String(), `"ok":true`) {
+		t.Fatalf("unexpected stdout: %s", stdout.String())
+	}
+}
+
+func TestStdioProxyFailsMalformedJSONRPCSSEEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message\n"))
+		_, _ = w.Write([]byte(`data: {"jsonrpc":` + "\n\n"))
+	}))
+	defer server.Close()
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "token-1",
+	}}})
+	err := NewStdioProxy(store).Serve(context.Background(), "conn-1", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "malformed JSON-RPC-looking payload") {
+		t.Fatalf("Serve() error = %v", err)
+	}
+}
+
 func TestStdioProxyReturnsAfterFirstLongLivedSSEEvent(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +292,45 @@ func TestStdioProxyReturnsAfterFirstLongLivedSSEEvent(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("Serve() did not return after first SSE event")
+	}
+}
+
+func TestStdioProxyReturnsAfterFirstLongLivedCRLFSSEEvent(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message\r\n"))
+		_, _ = w.Write([]byte(`data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}` + "\r\n\r\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-release
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaMCPURL:   server.URL,
+		PersonaMCPToken: "token-1",
+	}}})
+	done := make(chan error, 1)
+	go func() {
+		var stdout bytes.Buffer
+		err := NewStdioProxy(store).Serve(context.Background(), "conn-1", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &stdout, &bytes.Buffer{})
+		if err == nil && !strings.Contains(stdout.String(), `"ok":true`) {
+			err = errors.New("missing first SSE payload")
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("Serve() did not return after first CRLF SSE event")
 	}
 }
 

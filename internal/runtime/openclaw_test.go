@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	stdruntime "runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 )
@@ -154,25 +156,79 @@ func TestOpenClawAdapterStartRunUsesAgentMethod(t *testing.T) {
 		if params["message"] != "prompt" || params["idempotencyKey"] != "assignment-1" {
 			t.Fatalf("unexpected params: %+v", params)
 		}
-		for _, key := range []string{"runId", "nativeMcpServerName", "nativeMcpToolNamespace", "metadata"} {
-			if _, ok := params[key]; ok {
-				t.Fatalf("unexpected param %q: %+v", key, params)
-			}
+		if params["runId"] != "assignment-1" || params["nativeMcpServerName"] != "personastack-conn-1" || params["nativeMcpToolNamespace"] != "personastack" {
+			t.Fatalf("unexpected bounded metadata params: %+v", params)
+		}
+		metadata, ok := params["metadata"].(map[string]any)
+		if !ok {
+			t.Fatalf("missing metadata: %+v", params)
+		}
+		if metadata["personastack_run_id"] != "run-1" || metadata["personastack_assignment_id"] != "assignment-1" || metadata["native_mcp_server"] != "personastack-conn-1" || metadata["native_mcp_namespace"] != "personastack" {
+			t.Fatalf("unexpected metadata: %+v", metadata)
 		}
 		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"accepted":true}`)})
 	}))
 	defer server.Close()
 
 	runID, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StartRun(RunRequest{
-		RunID:               "run-1",
-		AssignmentID:        "assignment-1",
-		FullyComposedPrompt: "prompt",
-		NativeMCPServerName: "personastack-conn-1",
+		RunID:                  "run-1",
+		AssignmentID:           "assignment-1",
+		FullyComposedPrompt:    "prompt",
+		NativeMCPServerName:    "personastack-conn-1",
+		NativeMCPToolNamespace: "personastack",
 	})
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}
 	if runID != "assignment-1" {
+		t.Fatalf("run id = %q", runID)
+	}
+}
+
+func TestOpenClawAdapterStartRunPreservesNativeRunIDAndBoundsMetadataParams(t *testing.T) {
+	longAssignmentID := strings.Repeat("a", maxRunMetadataValueRunes+10)
+	longServerName := strings.Repeat("s", maxRunMetadataValueRunes+10)
+	longNamespace := strings.Repeat("n", maxRunMetadataValueRunes+10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		params, ok := request.Params.(map[string]any)
+		if !ok {
+			t.Fatalf("unexpected params: %+v", request.Params)
+		}
+		if params["runId"] != longAssignmentID || params["idempotencyKey"] != longAssignmentID || request.ID != longAssignmentID {
+			t.Fatalf("assignment id not preserved for native correlation: request=%+v params=%+v", request, params)
+		}
+		if len([]rune(params["nativeMcpServerName"].(string))) != maxRunMetadataValueRunes {
+			t.Fatalf("unbounded nativeMcpServerName: %q", params["nativeMcpServerName"])
+		}
+		if len([]rune(params["nativeMcpToolNamespace"].(string))) != maxRunMetadataValueRunes {
+			t.Fatalf("unbounded nativeMcpToolNamespace: %q", params["nativeMcpToolNamespace"])
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"accepted":true}`)})
+	}))
+	defer server.Close()
+
+	runID, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StartRun(RunRequest{
+		RunID:                  "run-1",
+		AssignmentID:           longAssignmentID,
+		FullyComposedPrompt:    "prompt",
+		NativeMCPServerName:    longServerName,
+		NativeMCPToolNamespace: longNamespace,
+	})
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if runID != longAssignmentID {
 		t.Fatalf("run id = %q", runID)
 	}
 }
@@ -853,7 +909,7 @@ func TestOpenClawAdapterVerifyMCPCatalogUsesLiveCatalogNames(t *testing.T) {
 	}
 }
 
-func TestOpenClawAdapterDescribeNativeCapabilitiesFiltersPersonaStackMCP(t *testing.T) {
+func TestOpenClawAdapterDescribeNativeCapabilitiesReportsReadySkills(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -864,30 +920,21 @@ func TestOpenClawAdapterDescribeNativeCapabilitiesFiltersPersonaStackMCP(t *test
 		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
 		var request openClawRequest
 		if err := conn.ReadJSON(&request); err != nil {
-			t.Fatalf("read tools.catalog: %v", err)
+			t.Fatalf("read skills.status: %v", err)
+		}
+		if request.Method != "skills.status" {
+			t.Fatalf("expected skills.status, got %+v", request)
 		}
 		_ = conn.WriteJSON(openClawResponse{
 			ID: request.ID,
 			Result: json.RawMessage(`{
-  "agentId":"agent-1",
-  "groups":[
-    {
-      "id":"plugin:personastack-conn-1",
-      "label":"personastack-conn-1",
-      "source":"plugin",
-      "pluginId":"personastack-conn-1",
-      "tools":[{"id":"persona","label":"PersonaStack","source":"plugin","pluginId":"personastack-conn-1"}]
-    },
-    {
-      "id":"plugin:github",
-      "label":"GitHub tools",
-      "source":"plugin",
-      "pluginId":"github",
-      "tools":[
-        {"id":"issues","label":"Issues","source":"plugin","pluginId":"github"},
-        {"id":"pulls","label":"Pull Requests","source":"plugin","pluginId":"github"}
-      ]
-    }
+  "skills":[
+    {"id":"github","label":"GitHub workflow","description":"Use GitHub safely","ready":true},
+    {"id":"personastack-conn-1","label":"personastack-conn-1","description":"PersonaStack MCP","ready":true},
+    {"id":"persona-by-plugin","label":"PersonaStack via plugin","pluginId":"personastack-conn-1","ready":true},
+    {"id":"persona-by-source","label":"PersonaStack via source","source":"plugin:personastack-conn-1","ready":true},
+    {"id":"missing-env","label":"Missing env","missingRequirements":["GITHUB_TOKEN"]},
+    {"id":"disabled","label":"Disabled","enabled":false}
   ]
 }`),
 		})
@@ -901,8 +948,116 @@ func TestOpenClawAdapterDescribeNativeCapabilitiesFiltersPersonaStackMCP(t *test
 	if len(capabilities) != 1 {
 		t.Fatalf("expected one native capability, got %#v", capabilities)
 	}
-	if capabilities[0].CapabilityID != "github" || capabilities[0].Summary != "GitHub tools (2 OpenClaw tools)" {
+	if capabilities[0].Source != NativeCapabilitySourceOpenClawReadySkills || capabilities[0].Kind != NativeCapabilityKindSkill {
+		t.Fatalf("unexpected capability source/kind: %#v", capabilities[0])
+	}
+	if capabilities[0].CapabilityID != "github" || capabilities[0].Summary != "Use GitHub safely" {
 		t.Fatalf("unexpected capability summary: %#v", capabilities[0])
+	}
+}
+
+func TestOpenClawAdapterDescribeNativeCapabilitiesRejectsNotOKSkillsStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort","skills.status"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read skills.status: %v", err)
+		}
+		notOK := false
+		_ = conn.WriteJSON(openClawResponse{
+			ID:     request.ID,
+			OK:     &notOK,
+			Result: json.RawMessage(`{"skills":[{"id":"github","label":"GitHub workflow","ready":true}]}`),
+		})
+	}))
+	defer server.Close()
+
+	_, err := NewOpenClawAdapterWithAuth("ws"+server.URL[len("http"):], OpenClawAuth{Token: "token-1"}, "agent-1").DescribeNativeCapabilities(context.Background(), "personastack-conn-1")
+	if err == nil || !strings.Contains(err.Error(), "response not ok") {
+		t.Fatalf("DescribeNativeCapabilities() error = %v", err)
+	}
+}
+
+func TestOpenClawSkillsStatusRequiresReadySummary(t *testing.T) {
+	ready := true
+	eligible := true
+	enabled := true
+	disabled := false
+	status := openClawSkillsStatusResult{Skills: []openClawSkillStatus{
+		{ID: "ready-bool", Label: "Ready bool", Ready: &ready},
+		{ID: "ready-status", Label: "Ready status", Status: "ready"},
+		{ID: "eligible", Label: "Eligible", Eligible: &eligible},
+		{ID: "enabled", Label: "Enabled", Enabled: &enabled},
+		{ID: "eligible-disabled", Label: "Eligible disabled", Eligible: &eligible, Enabled: &disabled},
+		{ID: "eligible-missing", Label: "Eligible missing", Eligible: &eligible, MissingRequirements: []string{"GITHUB_TOKEN"}},
+		{ID: "eligible-missing-alt", Label: "Eligible missing alt", Eligible: &eligible, Missing: []string{"token"}},
+		{ID: "eligible-busy", Label: "Eligible busy", Eligible: &eligible, Status: "busy"},
+		{ID: "available", Label: "Available", Status: "available"},
+		{ID: "incomplete", Label: "Incomplete"},
+	}}
+
+	capabilities := status.nativeCapabilitySummaries("personastack-conn-1")
+	got := make([]string, 0, len(capabilities))
+	for _, capability := range capabilities {
+		got = append(got, capability.CapabilityID)
+	}
+	want := []string{"ready-bool", "ready-status"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("skills = %#v, want %#v", got, want)
+	}
+}
+
+func TestOpenClawSkillsStatusFiltersNativeMCPServerSourceFields(t *testing.T) {
+	ready := true
+	status := openClawSkillsStatusResult{Skills: []openClawSkillStatus{
+		{ID: "github", Label: "GitHub", Ready: &ready},
+		{ID: "plugin-match", Label: "Plugin match", PluginID: "personastack-conn-1", Ready: &ready},
+		{ID: "source-match", Label: "Source match", Source: "plugin:personastack-conn-1", Ready: &ready},
+		{ID: "source-id-match", Label: "Source ID match", SourceID: "personastack-conn-1", Ready: &ready},
+		{ID: "mcp-server-match", Label: "MCP server match", MCPServerName: "personastack-conn-1", Ready: &ready},
+	}}
+
+	capabilities := status.nativeCapabilitySummaries("personastack-conn-1")
+	if len(capabilities) != 1 || capabilities[0].CapabilityID != "github" {
+		t.Fatalf("expected only non-PersonaStack skill, got %#v", capabilities)
+	}
+}
+
+func TestOpenClawSkillsStatusRejectsUnknownEnvelope(t *testing.T) {
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"ok":true}`),
+		json.RawMessage(`null`),
+	} {
+		_, err := openClawSkillsStatusFromResult(raw)
+		if err == nil || !strings.Contains(err.Error(), "missing") {
+			t.Fatalf("openClawSkillsStatusFromResult(%s) error = %v", raw, err)
+		}
+	}
+}
+
+func TestOpenClawSkillsStatusAcceptsKnownEmptyEnvelope(t *testing.T) {
+	status, err := openClawSkillsStatusFromResult(json.RawMessage(`{"skills":[]}`))
+	if err != nil {
+		t.Fatalf("openClawSkillsStatusFromResult() error = %v", err)
+	}
+	if len(status.Skills) != 0 {
+		t.Fatalf("expected no skills, got %#v", status.Skills)
+	}
+}
+
+func TestBoundedCapabilityTextPreservesUTF8(t *testing.T) {
+	got := boundedCapabilityText(strings.Repeat("界", 4), 3)
+	if !utf8.ValidString(got) {
+		t.Fatalf("bounded text is invalid UTF-8: %q", got)
+	}
+	if got != strings.Repeat("界", 3) {
+		t.Fatalf("bounded text = %q", got)
 	}
 }
 
