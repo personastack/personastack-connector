@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -30,6 +32,7 @@ const hermesDegradedRunStopFeature = "run_stop"
 
 var errHermesRunEventsUnavailable = errors.New("Hermes run events unavailable")
 var hermesToolsListCommand = exec.CommandContext
+var hermesLookPath = exec.LookPath
 
 type HermesAdapter struct {
 	BaseURL string
@@ -953,7 +956,11 @@ func hermesNativeCapability(id string, label string, summary string) NativeCapab
 }
 
 func hermesToolListCapabilities(ctx context.Context, nativeMCPServerName string) ([]NativeCapability, error) {
-	command := hermesToolsListCommand(ctx, "hermes", "tools", "list", "--platform", "cli")
+	hermesBin, err := resolveHermesBinary()
+	if err != nil {
+		return nil, err
+	}
+	command := hermesToolsListCommand(ctx, hermesBin, "tools", "list", "--platform", "cli")
 	raw, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("Hermes tools list: %w", err)
@@ -963,6 +970,72 @@ func hermesToolListCapabilities(ctx context.Context, nativeMCPServerName string)
 		capabilities = append(capabilities, nativeCapabilitySource(NativeCapabilitySourceHermesToolsList))
 	}
 	return capabilities, nil
+}
+
+func resolveHermesBinary() (string, error) {
+	if explicit := strings.TrimSpace(os.Getenv("HERMES_BIN")); explicit != "" {
+		if executableFile(explicit) {
+			return explicit, nil
+		}
+		return "", fmt.Errorf("Hermes binary not executable: %s", explicit)
+	}
+	if path, err := hermesLookPath("hermes"); err == nil && strings.TrimSpace(path) != "" {
+		return path, nil
+	}
+	for _, candidate := range hermesBinaryCandidates() {
+		if executableFile(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("Hermes binary not found in PATH or known install locations")
+}
+
+func hermesBinaryCandidates() []string {
+	candidates := []string{}
+	homeDir := strings.TrimSpace(os.Getenv("HOME"))
+	if homeDir != "" {
+		candidates = append(candidates,
+			filepath.Join(homeDir, ".local", "bin", "hermes"),
+			filepath.Join(homeDir, ".hermes", "bin", "hermes"),
+			filepath.Join(homeDir, ".hermes", "hermes-agent", "venv", "bin", "hermes"),
+			filepath.Join(homeDir, ".hermes", "hermes-agent", ".venv", "bin", "hermes"),
+			filepath.Join(homeDir, ".nix-profile", "bin", "hermes"),
+		)
+	}
+	user := strings.TrimSpace(os.Getenv("USER"))
+	if user != "" {
+		candidates = append(candidates, filepath.Join("/etc/profiles/per-user", user, "bin", "hermes"))
+	}
+	candidates = append(candidates,
+		"/run/current-system/sw/bin/hermes",
+		"/opt/homebrew/bin/hermes",
+		"/usr/local/bin/hermes",
+		"/usr/local/lib/hermes-agent/venv/bin/hermes",
+	)
+	prefix := strings.TrimSpace(os.Getenv("PREFIX"))
+	if prefix != "" {
+		candidates = append(candidates, filepath.Join(prefix, "bin", "hermes"))
+	}
+	localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+	if localAppData != "" {
+		candidates = append(candidates, filepath.Join(localAppData, "hermes", "hermes-agent", "venv", "Scripts", "hermes.exe"))
+	}
+	return candidates
+}
+
+func executableFile(path string) bool {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return false
+	}
+	info, err := os.Stat(trimmed)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if goruntime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode().Perm()&0o111 != 0
 }
 
 func parseHermesToolsList(raw string, nativeMCPServerName string) []NativeCapability {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -140,6 +141,93 @@ func TestHermesAdapterDescribeNativeCapabilitiesKeepsToolsWhenCapabilitiesFail(t
 	}
 }
 
+func TestResolveHermesBinaryUsesExplicitOverride(t *testing.T) {
+	binDir := t.TempDir()
+	hermesPath := filepath.Join(binDir, "custom-hermes")
+	err := os.WriteFile(hermesPath, []byte("#!/bin/sh\n"), 0o700)
+	if err != nil {
+		t.Fatalf("write hermes stub: %v", err)
+	}
+	t.Setenv("HERMES_BIN", hermesPath)
+	t.Setenv("PATH", "")
+
+	got, err := resolveHermesBinary()
+	if err != nil {
+		t.Fatalf("resolveHermesBinary() error = %v", err)
+	}
+	if got != hermesPath {
+		t.Fatalf("resolveHermesBinary() = %q, want %q", got, hermesPath)
+	}
+}
+
+func TestResolveHermesBinaryFallsBackToUserInstall(t *testing.T) {
+	homeDir := t.TempDir()
+	hermesPath := filepath.Join(homeDir, ".local", "bin", "hermes")
+	if err := os.MkdirAll(filepath.Dir(hermesPath), 0o700); err != nil {
+		t.Fatalf("create hermes dir: %v", err)
+	}
+	if err := os.WriteFile(hermesPath, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write hermes stub: %v", err)
+	}
+	t.Setenv("HERMES_BIN", "")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", "")
+	withHermesLookPath(t, func(string) (string, error) {
+		return "", exec.ErrNotFound
+	})
+
+	got, err := resolveHermesBinary()
+	if err != nil {
+		t.Fatalf("resolveHermesBinary() error = %v", err)
+	}
+	if got != hermesPath {
+		t.Fatalf("resolveHermesBinary() = %q, want %q", got, hermesPath)
+	}
+}
+
+func TestResolveHermesBinarySkipsMissingCandidates(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HERMES_BIN", "")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", "")
+	withHermesLookPath(t, func(string) (string, error) {
+		return "", exec.ErrNotFound
+	})
+
+	got, err := resolveHermesBinary()
+	if err == nil {
+		t.Fatalf("resolveHermesBinary() = %q, want error", got)
+	}
+	if !strings.Contains(err.Error(), "Hermes binary not found") {
+		t.Fatalf("resolveHermesBinary() error = %v", err)
+	}
+}
+
+func TestHermesToolListCapabilitiesUsesResolvedBinary(t *testing.T) {
+	homeDir := t.TempDir()
+	hermesPath := filepath.Join(homeDir, ".local", "bin", "hermes")
+	if err := os.MkdirAll(filepath.Dir(hermesPath), 0o700); err != nil {
+		t.Fatalf("create hermes dir: %v", err)
+	}
+	if err := os.WriteFile(hermesPath, []byte("#!/bin/sh\necho 'enabled computer_use Computer Use'\n"), 0o700); err != nil {
+		t.Fatalf("write hermes stub: %v", err)
+	}
+	t.Setenv("HERMES_BIN", "")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", "")
+	withHermesLookPath(t, func(string) (string, error) {
+		return "", exec.ErrNotFound
+	})
+
+	capabilities, err := hermesToolListCapabilities(context.Background(), "personastack-conn-1")
+	if err != nil {
+		t.Fatalf("hermesToolListCapabilities() error = %v", err)
+	}
+	if len(capabilities) != 1 || capabilities[0].CapabilityID != "computer_use" {
+		t.Fatalf("capabilities = %#v", capabilities)
+	}
+}
+
 func TestParseHermesToolsListReportsEnabledCLITools(t *testing.T) {
 	capabilities := parseHermesToolsList(`
 Built-in toolsets (cli):
@@ -209,6 +297,15 @@ MCP servers:
 	if capabilities[len(capabilities)-1].Summary != "computer_use (Computer Use (macOS))" {
 		t.Fatalf("unexpected computer_use summary: %q", capabilities[len(capabilities)-1].Summary)
 	}
+}
+
+func withHermesLookPath(t *testing.T, fn func(string) (string, error)) {
+	t.Helper()
+	previous := hermesLookPath
+	hermesLookPath = fn
+	t.Cleanup(func() {
+		hermesLookPath = previous
+	})
 }
 
 func TestParseHermesToolsListDedupesAfterBoundingIDs(t *testing.T) {

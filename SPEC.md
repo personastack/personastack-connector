@@ -255,8 +255,10 @@ Adapter result states must be concrete typed enums, including:
 - Hermes runtime feature discovery uses `/v1/capabilities` and reports verified
   runtime features such as delegated task acceptance, status, streaming, and
   cancellation. Prompt-safe native tool summaries use
-  `hermes tools list --platform cli`; Connector must not parse local Hermes
-  config to infer native tools.
+  `hermes tools list --platform cli`; Connector must resolve the Hermes binary
+  from `HERMES_BIN`, PATH, documented user/FHS/Nix install locations, and
+  platform-specific launcher paths while silently skipping missing candidates.
+  Connector must not parse local Hermes config to infer native tools.
 
 ## OpenClaw Runtime
 
