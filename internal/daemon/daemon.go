@@ -43,6 +43,58 @@ type bindingRunResult struct {
 	err          error
 }
 
+type observedRunCancel struct {
+	token  int
+	cancel context.CancelFunc
+}
+
+type runObservationRegistry struct {
+	mu      sync.Mutex
+	next    int
+	cancels map[string]observedRunCancel
+}
+
+func newRunObservationRegistry() *runObservationRegistry {
+	return &runObservationRegistry{cancels: map[string]observedRunCancel{}}
+}
+
+func (registry *runObservationRegistry) track(runID string, cancel context.CancelFunc) func() {
+	runID = strings.TrimSpace(runID)
+	if registry == nil || runID == "" {
+		return cancel
+	}
+	registry.mu.Lock()
+	registry.next++
+	entry := observedRunCancel{token: registry.next, cancel: cancel}
+	registry.cancels[runID] = entry
+	registry.mu.Unlock()
+	return func() {
+		registry.mu.Lock()
+		if current, ok := registry.cancels[runID]; ok && current.token == entry.token {
+			delete(registry.cancels, runID)
+		}
+		registry.mu.Unlock()
+		cancel()
+	}
+}
+
+func (registry *runObservationRegistry) cancel(runID string) bool {
+	runID = strings.TrimSpace(runID)
+	if registry == nil || runID == "" {
+		return false
+	}
+	registry.mu.Lock()
+	entry, ok := registry.cancels[runID]
+	if ok {
+		delete(registry.cancels, runID)
+	}
+	registry.mu.Unlock()
+	if ok {
+		entry.cancel()
+	}
+	return ok
+}
+
 func (r Runner) RunForeground(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -312,7 +364,8 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
 	capabilityReporter := newNativeCapabilityChangeReporter()
-	if err := r.replayActiveRun(sessionCtx, binding, session, adapter, writeFrame); err != nil {
+	runObservations := newRunObservationRegistry()
+	if err := r.replayActiveRun(sessionCtx, binding, session, adapter, runObservations, writeFrame); err != nil {
 		return err
 	}
 	if r.Store != nil {
@@ -391,6 +444,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.RunTerminalAck == nil {
 				continue
 			}
+			runObservations.cancel(frame.RunID)
 			if err := r.clearRunState(binding, frame.RunID); err != nil {
 				return fmt.Errorf("clear acknowledged run state: %w", err)
 			}
@@ -491,7 +545,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			}
 			go func(frame externalagentprotocol.Frame, nativeRunID string) {
 				observeCtx, cancelObserve := contextForRunDeadline(sessionCtx, frame.RunStart.DeadlineAt)
-				defer cancelObserve()
+				defer runObservations.track(frame.RunID, cancelObserve)()
 				result, err := adapter.StreamOrPollRun(observeCtx, nativeRunID, func(event runtime.RunEvent) error {
 					switch event.Kind {
 					case runtime.RunEventStarted:
@@ -551,9 +605,8 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				continue
 			}
 			commandCache.mark(frame)
-			if err := adapter.CancelRun(nativeRunID); err != nil {
-				continue
-			}
+			_ = adapter.CancelRun(nativeRunID)
+			runObservations.cancel(frame.RunID)
 		case externalagentprotocol.FrameTypeTokenRevoked:
 			if frame.TokenRevoked == nil {
 				continue
@@ -740,7 +793,7 @@ func (r Runner) clearStaleActiveRunConflict(binding config.Binding, latest confi
 	return r.clearRunState(binding, latest.ActiveRunID) == nil
 }
 
-func (r Runner) replayActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, writeFrame func(externalagentprotocol.Frame) error) error {
+func (r Runner) replayActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, runObservations *runObservationRegistry, writeFrame func(externalagentprotocol.Frame) error) error {
 	if r.Store == nil {
 		return nil
 	}
@@ -775,16 +828,20 @@ func (r Runner) replayActiveRun(ctx context.Context, binding config.Binding, ses
 		RunID:        latest.ActiveRunID,
 		AssignmentID: latest.ActiveAssignmentID,
 	}
-	go r.observeReplayedActiveRun(ctx, binding, session, adapter, replayRequest, latest.ActiveNativeRunID, latest.ActiveRunDeadlineAt, writeFrame)
+	go r.observeActiveRun(ctx, binding, session, adapter, replayRequest, latest.ActiveNativeRunID, latest.ActiveRunDeadlineAt, runObservations, writeFrame)
 	return nil
 }
 
 func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, frame externalagentprotocol.Frame, nativeRunID string, deadline time.Time, writeFrame func(externalagentprotocol.Frame) error) {
+	r.observeActiveRun(ctx, binding, session, adapter, frame, nativeRunID, deadline, nil, writeFrame)
+}
+
+func (r Runner) observeActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, frame externalagentprotocol.Frame, nativeRunID string, deadline time.Time, runObservations *runObservationRegistry, writeFrame func(externalagentprotocol.Frame) error) {
 	if adapter == nil {
 		return
 	}
 	observeCtx, cancelObserve := contextForRunDeadline(ctx, deadline)
-	defer cancelObserve()
+	defer runObservations.track(frame.RunID, cancelObserve)()
 	result, err := adapter.StreamOrPollRun(observeCtx, nativeRunID, func(event runtime.RunEvent) error {
 		switch event.Kind {
 		case runtime.RunEventOutputDelta:
@@ -831,9 +888,8 @@ func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Bin
 }
 
 func contextForRunDeadline(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
-	maxDeadline := time.Now().UTC().Add(time.Minute)
-	if deadline.IsZero() || deadline.UTC().After(maxDeadline) {
-		return context.WithDeadline(parent, maxDeadline)
+	if deadline.IsZero() {
+		return context.WithCancel(parent)
 	}
 	return context.WithDeadline(parent, deadline.UTC())
 }

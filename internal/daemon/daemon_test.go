@@ -1546,16 +1546,41 @@ func TestContextForRunDeadlineExpires(t *testing.T) {
 	}
 }
 
-func TestContextForRunDeadlineCapsLongDeadlines(t *testing.T) {
+func TestContextForRunDeadlineHonorsLongDeadlines(t *testing.T) {
 	before := time.Now().UTC()
-	ctx, cancel := contextForRunDeadline(t.Context(), before.Add(15*time.Minute))
+	upstream := before.Add(15 * time.Minute)
+	ctx, cancel := contextForRunDeadline(t.Context(), upstream)
 	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		t.Fatal("deadline missing")
 	}
-	if deadline.After(before.Add(time.Minute + time.Second)) {
-		t.Fatalf("deadline = %s, want within one minute", deadline)
+	if deadline.Before(upstream.Add(-time.Second)) || deadline.After(upstream.Add(time.Second)) {
+		t.Fatalf("deadline = %s, want upstream deadline", deadline)
+	}
+}
+
+func TestContextForRunDeadlineAllowsNoDeadline(t *testing.T) {
+	ctx, cancel := contextForRunDeadline(t.Context(), time.Time{})
+	defer cancel()
+	if deadline, ok := ctx.Deadline(); ok {
+		t.Fatalf("deadline = %s, want none", deadline)
+	}
+}
+
+func TestRunObservationRegistryCancelsNoDeadlineContext(t *testing.T) {
+	registry := newRunObservationRegistry()
+	ctx, cancel := contextForRunDeadline(t.Context(), time.Time{})
+	cleanup := registry.track("run-1", cancel)
+	defer cleanup()
+
+	if !registry.cancel("run-1") {
+		t.Fatal("expected registered run observation to cancel")
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for observation context cancellation")
 	}
 }
 
@@ -1628,7 +1653,7 @@ func TestObserveReplayedActiveRunSessionCancelDoesNotCancelNativeRun(t *testing.
 			sessionCancelReplayAdapter{cancelStarted: cancelStarted},
 			externalagentprotocol.Frame{RunID: "run-1", AssignmentID: "assignment-1"},
 			"native-1",
-			time.Now().Add(time.Minute),
+			time.Time{},
 			func(frame externalagentprotocol.Frame) error {
 				frames <- frame
 				return nil
@@ -2704,7 +2729,7 @@ func TestRunnerReplaysActiveRunOnReconnect(t *testing.T) {
 	}}})
 	runner := Runner{Store: &store}
 	frames := make([]externalagentprotocol.Frame, 0, 2)
-	if err := runner.replayActiveRun(context.Background(), config.Binding{ConnectionID: "conn-1", ConnectionGeneration: 2}, session, nil, func(frame externalagentprotocol.Frame) error {
+	if err := runner.replayActiveRun(context.Background(), config.Binding{ConnectionID: "conn-1", ConnectionGeneration: 2}, session, nil, newRunObservationRegistry(), func(frame externalagentprotocol.Frame) error {
 		frames = append(frames, frame)
 		return nil
 	}); err != nil {
@@ -2720,7 +2745,7 @@ func TestRunnerReplaysActiveRunOnReconnect(t *testing.T) {
 		t.Fatalf("unexpected started replay: %+v", frames[1])
 	}
 	frames = frames[:0]
-	if err := runner.replayActiveRun(context.Background(), config.Binding{ConnectionID: "conn-1", ConnectionGeneration: 1}, session, nil, func(frame externalagentprotocol.Frame) error {
+	if err := runner.replayActiveRun(context.Background(), config.Binding{ConnectionID: "conn-1", ConnectionGeneration: 1}, session, nil, newRunObservationRegistry(), func(frame externalagentprotocol.Frame) error {
 		frames = append(frames, frame)
 		return nil
 	}); err != nil {
