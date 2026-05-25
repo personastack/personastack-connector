@@ -28,6 +28,26 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "personastack-connector-daemon-test-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create temp dir: %v\n", err)
+		os.Exit(1)
+	}
+	hermesPath := filepath.Join(dir, "hermes")
+	if err := os.WriteFile(hermesPath, []byte("#!/bin/sh\nprintf 'enabled computer_use Computer Use\\n'\n"), 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "write hermes stub: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("HERMES_BIN", hermesPath); err != nil {
+		fmt.Fprintf(os.Stderr, "set HERMES_BIN: %v\n", err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 func readFrameOfType(t *testing.T, conn *websocket.Conn, want externalagentprotocol.FrameType) externalagentprotocol.Frame {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
