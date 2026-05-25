@@ -6,11 +6,11 @@ import (
 )
 
 const (
-	// ProtocolVersionV1 identifies the first Connector websocket protocol version.
-	ProtocolVersionV1 = "external-agent-v1"
+	// ProtocolVersionV2 identifies the second Connector websocket protocol version.
+	ProtocolVersionV2 = "external-agent-v2"
 )
 
-var supportedProtocolVersions = []string{ProtocolVersionV1}
+var supportedProtocolVersions = []string{ProtocolVersionV2}
 
 // SupportedProtocolVersions returns the protocol versions this binary can speak, in preference order.
 func SupportedProtocolVersions() []string {
@@ -410,7 +410,7 @@ type RunToolEventPayload struct {
 type RunTerminalPayload struct {
 	Status       RunStatus      `json:"status"`
 	Reason       TerminalReason `json:"reason"`
-	Output       string         `json:"output,omitempty"`
+	FinalMessage string         `json:"final_message,omitempty"`
 	ErrorCode    string         `json:"error_code,omitempty"`
 	ErrorMessage string         `json:"error_message,omitempty"`
 	NativeRunID  string         `json:"native_run_id,omitempty"`

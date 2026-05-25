@@ -74,16 +74,18 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 		return Result{}, err
 	}
 	payload := externalagentprotocol.PairingExchangeRequest{
-		Code:                code,
-		RuntimeKind:         runtimeKind,
-		ConnectorVersion:    buildinfo.VersionString(),
-		OS:                  goruntime.GOOS,
-		Arch:                goruntime.GOARCH,
-		DevicePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
-		Hostname:            localHostname(),
-		HostnameHash:        hostnameHash(),
-		GatewayWebsocketURL: websocketURL,
-		ConfigureMCP:        request.ConfigureMCP,
+		Code:                      code,
+		RuntimeKind:               runtimeKind,
+		ConnectorVersion:          buildinfo.VersionString(),
+		ProtocolVersion:           externalagentprotocol.ProtocolVersionV2,
+		SupportedProtocolVersions: externalagentprotocol.SupportedProtocolVersions(),
+		OS:                        goruntime.GOOS,
+		Arch:                      goruntime.GOARCH,
+		DevicePublicKey:           base64.StdEncoding.EncodeToString(publicKey),
+		Hostname:                  localHostname(),
+		HostnameHash:              hostnameHash(),
+		GatewayWebsocketURL:       websocketURL,
+		ConfigureMCP:              request.ConfigureMCP,
 	}
 	payload.DeviceKeyProof = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(deviceProofMessage(payload))))
 	raw, err := json.Marshal(payload)

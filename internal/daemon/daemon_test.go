@@ -147,7 +147,7 @@ func TestRunnerStartsBindingSavedAfterIdle(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -237,7 +237,7 @@ func TestRunnerCancelsRemovedBindingAndStartsReplacement(t *testing.T) {
 			ConnectionID: connectionID,
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -992,7 +992,7 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -1070,7 +1070,7 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -1168,7 +1168,7 @@ func TestRunnerReconnectsAfterServerDrainingWithoutOverlap(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -1357,7 +1357,7 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -1457,7 +1457,7 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 			t.Fatalf("missing run tool event: %+v", gotFrames)
 		}
 		terminal := gotFrames[len(gotFrames)-1]
-		if terminal.MessageType != externalagentprotocol.FrameTypeRunCompleted || terminal.RunTerminal == nil || terminal.RunTerminal.Status != externalagentprotocol.RunStatusCompleted || terminal.RunTerminal.Output != "done" {
+		if terminal.MessageType != externalagentprotocol.FrameTypeRunCompleted || terminal.RunTerminal == nil || terminal.RunTerminal.Status != externalagentprotocol.RunStatusCompleted || terminal.RunTerminal.FinalMessage != "done" {
 			t.Fatalf("unexpected run terminal frame: %+v", terminal)
 		}
 		if err := conn.WriteJSON(externalagentprotocol.Frame{
@@ -1834,7 +1834,7 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -1868,7 +1868,7 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 			if frame.MessageType != externalagentprotocol.FrameTypeRunFailed {
 				continue
 			}
-			if frame.RunTerminal == nil || !strings.Contains(frame.RunTerminal.Output, "native id missing") {
+			if frame.RunTerminal == nil || !strings.Contains(frame.RunTerminal.FinalMessage, "native id missing") {
 				t.Fatalf("unexpected terminal: %+v", frame)
 			}
 			close(terminalSent)
@@ -2139,7 +2139,7 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -2246,7 +2246,7 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 	if got[4].MessageType != externalagentprotocol.FrameTypeRunCompleted {
 		t.Fatalf("fifth frame = %+v", got[4])
 	}
-	if got[4].RunTerminal == nil || got[4].RunTerminal.Output != "done" {
+	if got[4].RunTerminal == nil || got[4].RunTerminal.FinalMessage != "done" {
 		t.Fatalf("unexpected terminal output: %+v", got[4])
 	}
 }
@@ -2277,7 +2277,7 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -2594,7 +2594,7 @@ func TestDuplicateRunStartMessageIDReplaysCachedStartedFrame(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -2834,7 +2834,7 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -3003,7 +3003,7 @@ func TestRunnerReconnectsWithFreshGenerationAfterDrainHint(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -3225,7 +3225,7 @@ func TestRunStartClearsStaleActiveRunBeforeReadinessRejection(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV1,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -3279,7 +3279,7 @@ func TestRunStartClearsStaleActiveRunBeforeReadinessRejection(t *testing.T) {
 
 	select {
 	case frame := <-failed:
-		if frame.RunTerminal == nil || !strings.Contains(frame.RunTerminal.Output, "external runtime is not ready") {
+		if frame.RunTerminal == nil || !strings.Contains(frame.RunTerminal.FinalMessage, "external runtime is not ready") {
 			t.Fatalf("unexpected failure frame: %+v", frame)
 		}
 	case <-time.After(5 * time.Second):

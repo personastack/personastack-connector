@@ -228,10 +228,10 @@ func (s Session) RunTerminalFrame(request externalagentprotocol.Frame, status ex
 	frame.RunID = strings.TrimSpace(request.RunID)
 	frame.AssignmentID = strings.TrimSpace(request.AssignmentID)
 	frame.RunTerminal = &externalagentprotocol.RunTerminalPayload{
-		Status:      status,
-		Reason:      reason,
-		Output:      strings.TrimSpace(output),
-		CompletedAt: frame.SentAt,
+		Status:       status,
+		Reason:       reason,
+		FinalMessage: strings.TrimSpace(output),
+		CompletedAt:  frame.SentAt,
 	}
 	return frame
 }

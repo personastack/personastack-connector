@@ -285,8 +285,9 @@ Adapter result states must be concrete typed enums, including:
   `agent-gateway`.
 - Pairing exchange must use Connector proof-of-possession before bridge and MCP
   credentials are issued.
-- If the pairing exchange returns `unsupported_connector_version`, Connector
-  must surface the finite failure state and exact update command to the user.
+- Pairing exchange must send Connector protocol version support. If the pairing
+  exchange returns `unsupported_connector_version`, Connector must surface the
+  finite failure state and exact update command to the user.
 - Bridge credentials cannot call PersonaStack MCP tools.
 - Persona MCP credentials cannot open Connector websocket sessions.
 - Diagnostics must redact prompts, bearer tokens, runtime secrets, account ids
