@@ -265,8 +265,10 @@ Adapter result states must be concrete typed enums, including:
 - Use Gateway `agent`, `agent.wait`, and `sessions.abort` for full support.
 - Put API-rendered `fully_composed_prompt` in `agent.params.message`.
 - Use PersonaStack assignment id as the OpenClaw idempotency key/native run id.
-- Include PersonaStack run id, assignment id, native MCP server name, and native
-  MCP namespace in OpenClaw `agent` params as bounded non-secret metadata.
+- OpenClaw `agent.params` must stay within the Gateway schema: `message`,
+  `idempotencyKey`, and optional `agentId`. Connector must not send
+  PersonaStack run metadata, native MCP fields, or alternate run id fields in
+  `agent.params`; current OpenClaw Gateway rejects unknown root params.
 - Verify MCP by effective tool visibility or controlled wake probe, not config
   write success alone.
 - OpenClaw CLI fallback is degraded only and must not claim Gateway streaming or

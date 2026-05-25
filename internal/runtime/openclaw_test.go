@@ -156,15 +156,10 @@ func TestOpenClawAdapterStartRunUsesAgentMethod(t *testing.T) {
 		if params["message"] != "prompt" || params["idempotencyKey"] != "assignment-1" {
 			t.Fatalf("unexpected params: %+v", params)
 		}
-		if params["runId"] != "assignment-1" || params["nativeMcpServerName"] != "personastack-conn-1" || params["nativeMcpToolNamespace"] != "personastack" {
-			t.Fatalf("unexpected bounded metadata params: %+v", params)
-		}
-		metadata, ok := params["metadata"].(map[string]any)
-		if !ok {
-			t.Fatalf("missing metadata: %+v", params)
-		}
-		if metadata["personastack_run_id"] != "run-1" || metadata["personastack_assignment_id"] != "assignment-1" || metadata["native_mcp_server"] != "personastack-conn-1" || metadata["native_mcp_namespace"] != "personastack" {
-			t.Fatalf("unexpected metadata: %+v", metadata)
+		for _, unexpected := range []string{"runId", "nativeMcpServerName", "nativeMcpToolNamespace", "metadata"} {
+			if _, ok := params[unexpected]; ok {
+				t.Fatalf("unexpected OpenClaw agent param %q: %+v", unexpected, params)
+			}
 		}
 		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"accepted":true}`)})
 	}))
@@ -185,10 +180,8 @@ func TestOpenClawAdapterStartRunUsesAgentMethod(t *testing.T) {
 	}
 }
 
-func TestOpenClawAdapterStartRunPreservesNativeRunIDAndBoundsMetadataParams(t *testing.T) {
+func TestOpenClawAdapterStartRunPreservesNativeRunIDAsIdempotencyKey(t *testing.T) {
 	longAssignmentID := strings.Repeat("a", maxRunMetadataValueRunes+10)
-	longServerName := strings.Repeat("s", maxRunMetadataValueRunes+10)
-	longNamespace := strings.Repeat("n", maxRunMetadataValueRunes+10)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -205,14 +198,13 @@ func TestOpenClawAdapterStartRunPreservesNativeRunIDAndBoundsMetadataParams(t *t
 		if !ok {
 			t.Fatalf("unexpected params: %+v", request.Params)
 		}
-		if params["runId"] != longAssignmentID || params["idempotencyKey"] != longAssignmentID || request.ID != longAssignmentID {
+		if params["idempotencyKey"] != longAssignmentID || request.ID != longAssignmentID {
 			t.Fatalf("assignment id not preserved for native correlation: request=%+v params=%+v", request, params)
 		}
-		if len([]rune(params["nativeMcpServerName"].(string))) != maxRunMetadataValueRunes {
-			t.Fatalf("unbounded nativeMcpServerName: %q", params["nativeMcpServerName"])
-		}
-		if len([]rune(params["nativeMcpToolNamespace"].(string))) != maxRunMetadataValueRunes {
-			t.Fatalf("unbounded nativeMcpToolNamespace: %q", params["nativeMcpToolNamespace"])
+		for _, unexpected := range []string{"runId", "nativeMcpServerName", "nativeMcpToolNamespace", "metadata"} {
+			if _, ok := params[unexpected]; ok {
+				t.Fatalf("unexpected OpenClaw agent param %q: %+v", unexpected, params)
+			}
 		}
 		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"accepted":true}`)})
 	}))
@@ -222,8 +214,8 @@ func TestOpenClawAdapterStartRunPreservesNativeRunIDAndBoundsMetadataParams(t *t
 		RunID:                  "run-1",
 		AssignmentID:           longAssignmentID,
 		FullyComposedPrompt:    "prompt",
-		NativeMCPServerName:    longServerName,
-		NativeMCPToolNamespace: longNamespace,
+		NativeMCPServerName:    strings.Repeat("s", maxRunMetadataValueRunes+10),
+		NativeMCPToolNamespace: strings.Repeat("n", maxRunMetadataValueRunes+10),
 	})
 	if err != nil {
 		t.Fatalf("start run: %v", err)

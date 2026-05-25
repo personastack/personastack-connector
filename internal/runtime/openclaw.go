@@ -325,12 +325,8 @@ func (adapter OpenClawAdapter) StartRun(runRequest RunRequest) (string, error) {
 	}
 	defer conn.Close()
 	params := map[string]any{
-		"message":                strings.TrimSpace(runRequest.FullyComposedPrompt),
-		"idempotencyKey":         assignmentID,
-		"runId":                  nativeRunID,
-		"nativeMcpServerName":    boundedRunMetadataText(runRequest.NativeMCPServerName, maxRunMetadataValueRunes),
-		"nativeMcpToolNamespace": boundedRunMetadataText(runRequest.NativeMCPToolNamespace, maxRunMetadataValueRunes),
-		"metadata":               runMetadata(runRequest),
+		"message":        strings.TrimSpace(runRequest.FullyComposedPrompt),
+		"idempotencyKey": nativeRunID,
 	}
 	agentID := strings.TrimSpace(adapter.AgentID)
 	if agentID == "" {
