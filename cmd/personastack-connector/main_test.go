@@ -223,7 +223,10 @@ func TestRunUnpairDeletesSystemScopeStore(t *testing.T) {
 	}
 }
 
-func TestRunPairSystemScopeRejectsHermes(t *testing.T) {
+func TestRunPairSystemScopeAllowsHermesAfterAccessPreflight(t *testing.T) {
+	oldGOOS := currentGOOS
+	currentGOOS = "darwin"
+	t.Cleanup(func() { currentGOOS = oldGOOS })
 	keyring.MockInit()
 	store := config.NewMemoryStore(config.State{})
 	cmd := command{
@@ -233,8 +236,14 @@ func TestRunPairSystemScopeRejectsHermes(t *testing.T) {
 	}
 
 	err := cmd.runPair([]string{"PAIR-1234", "--runtime", "hermes", "--service-scope", "system"})
-	if err == nil || !strings.Contains(err.Error(), "system service scope currently requires OpenClaw runtime") {
-		t.Fatalf("runPair() error = %v", err)
+	if os.Geteuid() == 0 {
+		if err == nil || !strings.Contains(err.Error(), "Post") {
+			t.Fatalf("runPair() error = %v, want exchange only after root access", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), "requires sudo before pairing") {
+		t.Fatalf("runPair() error = %v, want sudo preflight rejection", err)
 	}
 }
 
@@ -274,7 +283,7 @@ func TestRunDaemonSystemScopeRejectsNonDarwin(t *testing.T) {
 	}
 }
 
-func TestRuntimeRepairSystemScopeRejectsHermesBinding(t *testing.T) {
+func TestRuntimeRepairSystemScopeAllowsHermesBinding(t *testing.T) {
 	oldGOOS := currentGOOS
 	currentGOOS = "darwin"
 	t.Cleanup(func() { currentGOOS = oldGOOS })
@@ -288,8 +297,8 @@ func TestRuntimeRepairSystemScopeRejectsHermesBinding(t *testing.T) {
 	cmd := command{stdout: io.Discard, stderr: io.Discard, store: config.EmptyStore()}
 
 	err = cmd.runRuntime([]string{"repair", "--service-scope", "system"})
-	if err == nil || !strings.Contains(err.Error(), "requires OpenClaw") {
-		t.Fatalf("runRuntime() error = %v, want OpenClaw rejection", err)
+	if err != nil && strings.Contains(err.Error(), "requires OpenClaw") {
+		t.Fatalf("runRuntime() rejected Hermes system scope: %v", err)
 	}
 }
 
@@ -586,6 +595,63 @@ func TestRunPairOpenClawRequiresCredentialBeforePairingExchange(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("pairing exchange should not be called before OpenClaw credential validation; calls=%d", calls)
+	}
+}
+
+func TestRunPairLinuxSystemScopeRequiresAccessBeforeExchange(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("non-root access preflight test")
+	}
+	oldGOOS := currentGOOS
+	currentGOOS = "linux"
+	t.Cleanup(func() { currentGOOS = oldGOOS })
+	keyring.MockInit()
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "pairing code consumed", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		store:  &store,
+	}
+	err := cmd.runPair([]string{"PAIR-LINUX", "--gateway", server.URL, "--runtime", "hermes", "--service-scope", "linux-system"})
+	if err == nil || !strings.Contains(err.Error(), "linux system service scope requires sudo before pairing") {
+		t.Fatalf("runPair() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("pairing exchange should not be called before Linux system access validation; calls=%d", calls)
+	}
+}
+
+func TestRunPairLinuxSystemScopeRejectsNonLinuxBeforeExchange(t *testing.T) {
+	oldGOOS := currentGOOS
+	currentGOOS = "darwin"
+	t.Cleanup(func() { currentGOOS = oldGOOS })
+	keyring.MockInit()
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "pairing code consumed", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	store := config.NewMemoryStore(config.State{})
+	cmd := command{
+		stdout: io.Discard,
+		stderr: io.Discard,
+		store:  &store,
+	}
+	err := cmd.runPair([]string{"PAIR-LINUX", "--gateway", server.URL, "--runtime", "hermes", "--service-scope", "linux-system"})
+	if err == nil || !strings.Contains(err.Error(), "requires Linux") {
+		t.Fatalf("runPair() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("pairing exchange should not be called before Linux platform validation; calls=%d", calls)
 	}
 }
 

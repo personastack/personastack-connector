@@ -144,6 +144,7 @@ type ServiceScope string
 const (
 	ServiceScopeUserLaunchAgent    ServiceScope = "user_launch_agent"
 	ServiceScopeSystemLaunchDaemon ServiceScope = "system_launch_daemon"
+	ServiceScopeLinuxSystemService ServiceScope = "linux_system_service"
 )
 
 // ConnectionStatus identifies Connector bridge status reported to Gateway.

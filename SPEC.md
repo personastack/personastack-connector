@@ -53,8 +53,10 @@ external persona.
   Pairing a new external persona replaces the previous local binding and local
   binding secrets for that machine.
 - Connector service scope is explicit and finite: `user_launch_agent` runs as
-  the logged-in user, while `system_launch_daemon` is macOS-only and runs as a
-  root LaunchDaemon for pre-login OpenClaw hosts.
+  the logged-in user, `system_launch_daemon` runs as a macOS root LaunchDaemon
+  for pre-login Hermes/OpenClaw bridge availability, and
+  `linux_system_service` runs as a Linux systemd system service for boot-time
+  startup without a logged-in desktop session.
 - System-scope state is stored under
   `/Library/Application Support/PersonaStack/Connector`. User-scope state
   remains in the user's config directory.
@@ -140,8 +142,9 @@ variables, and OpenClaw-owned user config, env, device auth, or service env
 files. If no local credential is found, the CLI prompt must tell the user the
 easiest OpenClaw command to retrieve or rotate one. Browser setup surfaces must
 not collect OpenClaw tokens, passwords, or device credentials.
-System service scope is supported only for macOS OpenClaw in V1. Hermes system
-scope must fail closed until Hermes exposes a system-service runtime endpoint.
+System service scope keeps the Connector bridge online before login. It must
+report runtime readiness honestly and must not claim `wakeable` until the native
+Hermes/OpenClaw runtime, native MCP configuration, and wake probe are live.
 
 The V1 Connector does not expose a local HTTP UI/control listener. CLI control
 is local process execution and native MCP uses stdio; any future local control
@@ -359,8 +362,11 @@ Adapter result states must be concrete typed enums, including:
 - Stable public release activation is a separate `personastack-ship` gate and
   is not part of routine implementation completion.
 - WSL2 uses the Linux Connector inside the WSL2 environment.
-- Linux service installation prefers `systemd --user` and falls back to an XDG
-  autostart desktop entry when user systemd is unavailable.
+- Linux user-scope service installation prefers `systemd --user` and falls back
+  to an XDG autostart desktop entry when user systemd is unavailable.
+- Linux system-scope service installation writes a systemd system unit with
+  `Restart=always`, `RestartSec=30`, `After=network-online.target`, explicit
+  target user, explicit `HOME`, and `WantedBy=multi-user.target`.
 - Linux service uninstall disables the `systemd --user` unit when present,
   removes the systemd user unit and default-target wants symlink, and removes
   the XDG autostart fallback entry.

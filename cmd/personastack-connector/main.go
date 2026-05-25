@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	stdruntime "runtime"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/service"
 	"github.com/zalando/go-keyring"
+	"golang.org/x/sys/unix"
 )
 
 const usage = `Usage:
@@ -217,14 +219,19 @@ func (cmd command) runPair(args []string) error {
 	if err != nil {
 		return err
 	}
-	if serviceScope == service.ServiceScopeSystemLaunchDaemon && kind != runtime.AdapterKindOpenClaw {
-		return errors.New("system service scope currently requires OpenClaw runtime")
-	}
 	if serviceScope == service.ServiceScopeSystemLaunchDaemon {
 		if err := validateSystemServiceScopePlatform(); err != nil {
 			return err
 		}
 		if err := validateSystemServiceScopeAccess("pairing"); err != nil {
+			return err
+		}
+	}
+	if serviceScope == service.ServiceScopeLinuxSystemService {
+		if err := validateLinuxSystemServiceScopePlatform(); err != nil {
+			return err
+		}
+		if err := validateLinuxSystemServiceScopeAccess("pairing"); err != nil {
 			return err
 		}
 	}
@@ -256,8 +263,20 @@ func (cmd command) runPair(args []string) error {
 		return err
 	}
 	replaced := replacedBindingCount(cmd.store.ListBindings(), binding.ConnectionID)
-	if err := writable.SaveBinding(binding); err != nil {
-		return err
+	if serviceScope == service.ServiceScopeLinuxSystemService {
+		err = withLinuxSystemServiceConfigEnv(func() error {
+			if err := writable.SaveBinding(binding); err != nil {
+				return err
+			}
+			return chownLinuxSystemScopePaths()
+		})
+		if err != nil {
+			return err
+		}
+	} else {
+		if err := writable.SaveBinding(binding); err != nil {
+			return err
+		}
 	}
 	repairResults, err := cmd.repairSetup(configureMCP, serviceScope)
 	if err != nil {
@@ -770,7 +789,7 @@ func (cmd command) runMCPInstall(args []string) error {
 	if err := validateServiceScopeForBindings(scope, cmd.store.ListBindings(), true); err != nil {
 		return err
 	}
-	results, err := cmd.installMCP()
+	results, err := cmd.installMCPForServiceScope(scope)
 	if err != nil {
 		return err
 	}
@@ -796,7 +815,7 @@ func (cmd command) runMCPRepair(args []string) error {
 	if err := validateServiceScopeForBindings(scope, cmd.store.ListBindings(), true); err != nil {
 		return err
 	}
-	results, err := cmd.installMCP()
+	results, err := cmd.installMCPForServiceScope(scope)
 	if err != nil {
 		return err
 	}
@@ -829,6 +848,31 @@ func (cmd command) installMCPForKind(kind runtime.AdapterKind) ([]string, error)
 		lines = append(lines, line)
 	}
 	return lines, nil
+}
+
+func (cmd command) installMCPForServiceScope(scope service.ServiceScope) ([]string, error) {
+	if scope != service.ServiceScopeLinuxSystemService {
+		return cmd.installMCP()
+	}
+	if err := validateLinuxSystemServiceScopePlatform(); err != nil {
+		return nil, err
+	}
+	if err := validateLinuxSystemServiceScopeAccess("mcp install"); err != nil {
+		return nil, err
+	}
+	var results []string
+	err := withLinuxSystemServiceConfigEnv(func() error {
+		var installErr error
+		results, installErr = cmd.installMCP()
+		if chownErr := chownLinuxSystemScopePaths(); chownErr != nil {
+			return chownErr
+		}
+		return installErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 func (cmd command) runMCPStdio(ctx context.Context, args []string) error {
@@ -894,6 +938,14 @@ func (cmd command) runService(args []string) error {
 				return err
 			}
 		}
+		if scope == service.ServiceScopeLinuxSystemService {
+			if err := validateLinuxSystemServiceScopePlatform(); err != nil {
+				return err
+			}
+			if err := validateLinuxSystemServiceScopeAccess("uninstall"); err != nil {
+				return err
+			}
+		}
 		results, err := installer.Uninstall()
 		if err != nil {
 			return err
@@ -902,6 +954,14 @@ func (cmd command) runService(args []string) error {
 			fmt.Fprintf(cmd.stdout, "service uninstalled kind=%s scope=%s removed=%t path=%s\n", result.Kind, result.Scope, result.Removed, result.Path)
 		}
 		return nil
+	}
+	if scope == service.ServiceScopeLinuxSystemService {
+		if err := validateLinuxSystemServiceScopePlatform(); err != nil {
+			return err
+		}
+		if err := validateLinuxSystemServiceScopeAccess("install"); err != nil {
+			return err
+		}
 	}
 	result, err := installer.Install()
 	if err != nil {
@@ -912,6 +972,25 @@ func (cmd command) runService(args []string) error {
 }
 
 func (cmd command) repairSetup(configureMCP bool, scope service.ServiceScope) ([]string, error) {
+	if scope == service.ServiceScopeLinuxSystemService {
+		var results []string
+		err := withLinuxSystemServiceConfigEnv(func() error {
+			var setupErr error
+			results, setupErr = cmd.repairSetupInCurrentEnv(configureMCP, scope)
+			if chownErr := chownLinuxSystemScopePaths(); chownErr != nil {
+				return chownErr
+			}
+			return setupErr
+		})
+		if err != nil {
+			return nil, err
+		}
+		return results, nil
+	}
+	return cmd.repairSetupInCurrentEnv(configureMCP, scope)
+}
+
+func (cmd command) repairSetupInCurrentEnv(configureMCP bool, scope service.ServiceScope) ([]string, error) {
 	var results []string
 	if configureMCP {
 		mcpResults, err := cmd.installMCP()
@@ -976,10 +1055,18 @@ func (cmd command) runDaemon(ctx context.Context, args []string) error {
 }
 
 func (cmd command) storeForServiceScope(scope service.ServiceScope) config.Store {
-	if scope != service.ServiceScopeSystemLaunchDaemon {
+	switch scope {
+	case service.ServiceScopeSystemLaunchDaemon:
+		return config.SystemFileStore(os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT"))
+	case service.ServiceScopeLinuxSystemService:
+		target, err := (service.Installer{GOOS: currentGOOS}).SystemServiceTarget()
+		if err != nil {
+			return cmd.store
+		}
+		return config.NewFileStore(filepath.Join(target.HomeDir, ".config", "personastack", "connector", "state.json"))
+	default:
 		return cmd.store
 	}
-	return config.SystemFileStore(os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT"))
 }
 
 func (cmd command) runUnpair(args []string) error {
@@ -995,6 +1082,14 @@ func (cmd command) runUnpair(args []string) error {
 		return err
 	}
 	cmd.store = cmd.storeForServiceScope(scope)
+	if scope == service.ServiceScopeLinuxSystemService {
+		if err := validateLinuxSystemServiceScopePlatform(); err != nil {
+			return err
+		}
+		if err := validateLinuxSystemServiceScopeAccess("unpair"); err != nil {
+			return err
+		}
+	}
 	deleting, ok := cmd.store.(config.DeletingStore)
 	if !ok {
 		return errors.New("connector store does not support unpair")
@@ -1005,8 +1100,20 @@ func (cmd command) runUnpair(args []string) error {
 		return nil
 	}
 	for _, binding := range bindings {
-		if err := deleting.DeleteBinding(binding.ConnectionID); err != nil {
-			return err
+		if scope == service.ServiceScopeLinuxSystemService {
+			err := withLinuxSystemServiceConfigEnv(func() error {
+				return deleting.DeleteBinding(binding.ConnectionID)
+			})
+			if err != nil {
+				return err
+			}
+			if err := chownLinuxSystemScopePaths(); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		} else {
+			if err := deleting.DeleteBinding(binding.ConnectionID); err != nil {
+				return err
+			}
 		}
 		fmt.Fprintf(cmd.stdout, "unpaired connection=%s persona=%s\n", binding.ConnectionID, binding.PersonaID)
 	}
@@ -1024,8 +1131,8 @@ func validateServiceScopeForBindings(scope service.ServiceScope, bindings []conf
 		return nil
 	}
 	for _, binding := range bindings {
-		if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
-			return errors.New("system service scope currently requires OpenClaw runtime")
+		if binding.RuntimeKind != runtime.AdapterKindOpenClaw && binding.RuntimeKind != runtime.AdapterKindHermes {
+			return errors.New("system service scope requires Hermes or OpenClaw runtime")
 		}
 	}
 	return nil
@@ -1034,6 +1141,13 @@ func validateServiceScopeForBindings(scope service.ServiceScope, bindings []conf
 func validateSystemServiceScopePlatform() error {
 	if currentGOOS != "darwin" {
 		return errors.New("system service scope requires macOS")
+	}
+	return nil
+}
+
+func validateLinuxSystemServiceScopePlatform() error {
+	if currentGOOS != "linux" {
+		return errors.New("linux system service scope requires Linux")
 	}
 	return nil
 }
@@ -1052,9 +1166,126 @@ func validateSystemServiceScopeAccess(action string) error {
 	return nil
 }
 
+func validateLinuxSystemServiceScopeAccess(action string) error {
+	if strings.TrimSpace(os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT")) != "" {
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		action = strings.TrimSpace(action)
+		if action == "" {
+			return errors.New("linux system service scope requires sudo")
+		}
+		return fmt.Errorf("linux system service scope requires sudo before %s", action)
+	}
+	return nil
+}
+
+func withLinuxSystemServiceConfigEnv(fn func() error) error {
+	target, err := (service.Installer{GOOS: currentGOOS}).SystemServiceTarget()
+	if err != nil {
+		return err
+	}
+	configDir := filepath.Join(target.HomeDir, ".config")
+	oldHome, hadHome := os.LookupEnv("HOME")
+	oldXDG, hadXDG := os.LookupEnv("XDG_CONFIG_HOME")
+	if err := os.Setenv("HOME", target.HomeDir); err != nil {
+		return err
+	}
+	if err := os.Setenv("XDG_CONFIG_HOME", configDir); err != nil {
+		return err
+	}
+	defer func() {
+		if hadHome {
+			_ = os.Setenv("HOME", oldHome)
+		} else {
+			_ = os.Unsetenv("HOME")
+		}
+		if hadXDG {
+			_ = os.Setenv("XDG_CONFIG_HOME", oldXDG)
+		} else {
+			_ = os.Unsetenv("XDG_CONFIG_HOME")
+		}
+	}()
+	return fn()
+}
+
+func chownLinuxSystemScopePaths() error {
+	if os.Geteuid() != 0 {
+		return nil
+	}
+	target, err := (service.Installer{GOOS: currentGOOS}).SystemServiceTarget()
+	if err != nil {
+		return err
+	}
+	paths := []string{
+		filepath.Join(target.HomeDir, ".config", "personastack"),
+		filepath.Join(target.HomeDir, ".config", "personastack", "connector"),
+		filepath.Join(target.HomeDir, ".config", "personastack", "connector", "state.json"),
+		filepath.Join(target.HomeDir, ".config", "personastack", "connector", "secrets.enc"),
+		filepath.Join(target.HomeDir, ".config", "personastack", "connector", "secrets.key"),
+		filepath.Join(target.HomeDir, ".hermes"),
+		filepath.Join(target.HomeDir, ".hermes", ".env"),
+		filepath.Join(target.HomeDir, ".hermes", ".env.personastack.bak"),
+		filepath.Join(target.HomeDir, ".hermes", "config.yaml"),
+		filepath.Join(target.HomeDir, ".hermes", "config.yaml.personastack.bak"),
+		filepath.Join(target.HomeDir, ".openclaw"),
+		filepath.Join(target.HomeDir, ".openclaw", "openclaw.json"),
+		filepath.Join(target.HomeDir, ".openclaw", "openclaw.json.personastack.bak"),
+	}
+	for _, path := range paths {
+		if err := lchownPathNoSymlinkAncestors(path, target.UID, target.GID); err != nil {
+			return fmt.Errorf("chown linux system scope path: %w", err)
+		}
+	}
+	return nil
+}
+
+func lchownPathNoSymlinkAncestors(path string, uid int, gid int) error {
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) {
+		return fmt.Errorf("path must be absolute: %s", path)
+	}
+	components := strings.Split(strings.TrimPrefix(cleaned, string(os.PathSeparator)), string(os.PathSeparator))
+	if len(components) == 0 || components[0] == "" {
+		return nil
+	}
+	dirFd, err := unix.Open(string(os.PathSeparator), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = unix.Close(dirFd)
+	}()
+	for _, component := range components[:len(components)-1] {
+		nextFd, err := unix.Openat(dirFd, component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				return nil
+			}
+			return err
+		}
+		if err := unix.Close(dirFd); err != nil {
+			_ = unix.Close(nextFd)
+			return err
+		}
+		dirFd = nextFd
+	}
+	leaf := components[len(components)-1]
+	if err := unix.Fchownat(dirFd, leaf, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 func protocolServiceScope(scope service.ServiceScope) externalagentprotocol.ServiceScope {
 	if scope == service.ServiceScopeSystemLaunchDaemon {
 		return externalagentprotocol.ServiceScopeSystemLaunchDaemon
+	}
+	if scope == service.ServiceScopeLinuxSystemService {
+		return externalagentprotocol.ServiceScopeLinuxSystemService
 	}
 	return externalagentprotocol.ServiceScopeUserLaunchAgent
 }

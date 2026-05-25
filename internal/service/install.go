@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -21,14 +22,22 @@ type ServiceScope string
 const (
 	ServiceScopeUserLaunchAgent    ServiceScope = "user_launch_agent"
 	ServiceScopeSystemLaunchDaemon ServiceScope = "system_launch_daemon"
+	ServiceScopeLinuxSystemService ServiceScope = "linux_system_service"
 )
 
 func ParseServiceScope(value string) (ServiceScope, error) {
 	switch strings.TrimSpace(value) {
 	case "", "user", string(ServiceScopeUserLaunchAgent):
 		return ServiceScopeUserLaunchAgent, nil
-	case "system", string(ServiceScopeSystemLaunchDaemon):
+	case "system":
+		if runtime.GOOS == "linux" {
+			return ServiceScopeLinuxSystemService, nil
+		}
 		return ServiceScopeSystemLaunchDaemon, nil
+	case string(ServiceScopeSystemLaunchDaemon):
+		return ServiceScopeSystemLaunchDaemon, nil
+	case "linux-system", string(ServiceScopeLinuxSystemService):
+		return ServiceScopeLinuxSystemService, nil
 	default:
 		return "", fmt.Errorf("unsupported service scope: %s", value)
 	}
@@ -61,6 +70,13 @@ type Installer struct {
 	ServiceScope   ServiceScope
 	SystemRoot     string
 	Runner         CommandRunner
+}
+
+type SystemServiceTarget struct {
+	Username string
+	HomeDir  string
+	UID      int
+	GID      int
 }
 
 type InstallResult struct {
@@ -159,6 +175,9 @@ func (installer Installer) Plan() (InstallResult, error) {
 		}
 		return InstallResult{Kind: "launchagent", Path: filepath.Join(homeDir, "Library", "LaunchAgents", launchdLabel+".plist"), Scope: scope}, nil
 	case "linux":
+		if scope == ServiceScopeLinuxSystemService {
+			return InstallResult{Kind: "systemd-system", Path: filepath.Join(installer.systemRoot(), "etc", "systemd", "system", serviceName+".service"), Scope: scope}, nil
+		}
 		return InstallResult{Kind: "systemd-user", Path: filepath.Join(homeDir, ".config", "systemd", "user", serviceName+".service"), Scope: scope}, nil
 	case "windows":
 		return InstallResult{Kind: "windows-scheduled-task", Path: filepath.Join(homeDir, "AppData", "Local", "PersonaStack", "Connector", "install-task.ps1"), Scope: scope}, nil
@@ -191,6 +210,9 @@ func (installer Installer) Install() (InstallResult, error) {
 		}
 		return installer.installLaunchAgent(homeDir, executablePath)
 	case "linux":
+		if scope == ServiceScopeLinuxSystemService {
+			return installer.installSystemdSystem(homeDir, executablePath)
+		}
 		return installer.installSystemdUser(homeDir, executablePath)
 	case "windows":
 		return installer.installWindowsTask(homeDir, executablePath)
@@ -221,6 +243,10 @@ func (installer Installer) Uninstall() ([]UninstallResult, error) {
 		result, err := installer.uninstallLaunchAgent(homeDir)
 		return singleUninstallResult(result, err)
 	case "linux":
+		if scope == ServiceScopeLinuxSystemService {
+			result, err := installer.uninstallLinuxSystem()
+			return singleUninstallResult(result, err)
+		}
 		return installer.uninstallLinuxUser(homeDir)
 	default:
 		return nil, fmt.Errorf("unsupported service platform: %s", goos)
@@ -478,6 +504,42 @@ WantedBy=default.target
 	return InstallResult{Kind: "systemd-user", Path: path, Scope: ServiceScopeUserLaunchAgent}, nil
 }
 
+func (installer Installer) installSystemdSystem(_ string, executablePath string) (InstallResult, error) {
+	path := filepath.Join(installer.systemRoot(), "etc", "systemd", "system", serviceName+".service")
+	target, err := installer.SystemServiceTarget()
+	if err != nil {
+		return InstallResult{}, err
+	}
+	unit := fmt.Sprintf(`[Unit]
+Description=PersonaStack Connector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%s
+Environment=%s
+WorkingDirectory=%s
+ExecStart=%s run --foreground --service-scope %s
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+`, systemdValue(target.Username), systemdQuote("HOME="+target.HomeDir), systemdQuote(target.HomeDir), systemdQuote(executablePath), ServiceScopeLinuxSystemService)
+	if err := writeSystemServiceFile(path, []byte(unit)); err != nil {
+		return InstallResult{}, err
+	}
+	runner := installer.runner()
+	if err := runner.Run("systemctl", "daemon-reload"); err != nil {
+		return InstallResult{}, fmt.Errorf("systemctl daemon-reload: %w", err)
+	}
+	if err := runner.Run("systemctl", "enable", "--now", serviceName+".service"); err != nil {
+		return InstallResult{}, fmt.Errorf("systemctl enable system service: %w", err)
+	}
+	return InstallResult{Kind: "systemd-system", Path: path, Scope: ServiceScopeLinuxSystemService}, nil
+}
+
 func (installer Installer) installLinuxAutostart(homeDir string, executablePath string) (InstallResult, error) {
 	path := filepath.Join(homeDir, ".config", "autostart", serviceName+".desktop")
 	entry := fmt.Sprintf(`[Desktop Entry]
@@ -533,6 +595,28 @@ func (installer Installer) uninstallLinuxUser(homeDir string) ([]UninstallResult
 	}
 	results = append(results, UninstallResult{Kind: "no_user_service_manager", Path: autostartPath, Scope: ServiceScopeUserLaunchAgent, Removed: autostartRemoved})
 	return results, nil
+}
+
+func (installer Installer) uninstallLinuxSystem() (UninstallResult, error) {
+	runner := installer.runner()
+	path := filepath.Join(installer.systemRoot(), "etc", "systemd", "system", serviceName+".service")
+	exists, err := serviceFileExists(path)
+	if err != nil {
+		return UninstallResult{}, err
+	}
+	err = runner.Run("systemctl", "disable", "--now", serviceName+".service")
+	if err != nil && exists && !isIgnorableSystemctlUninstallError(err) {
+		return UninstallResult{}, fmt.Errorf("systemctl disable system service: %w", err)
+	}
+	removed, err := removeServiceFile(path)
+	if err != nil {
+		return UninstallResult{}, err
+	}
+	err = runner.Run("systemctl", "daemon-reload")
+	if err != nil && (exists || removed) && !isIgnorableSystemctlUninstallError(err) {
+		return UninstallResult{}, fmt.Errorf("systemctl daemon-reload: %w", err)
+	}
+	return UninstallResult{Kind: "systemd-system", Path: path, Scope: ServiceScopeLinuxSystemService, Removed: removed}, nil
 }
 
 func isIgnorableSystemctlUninstallError(err error) bool {
@@ -612,6 +696,11 @@ func (installer Installer) serviceScope(goos string) (ServiceScope, error) {
 			return "", fmt.Errorf("system launch daemon scope requires darwin")
 		}
 		return scope, nil
+	case ServiceScopeLinuxSystemService:
+		if goos != "linux" {
+			return "", fmt.Errorf("linux system service scope requires linux")
+		}
+		return scope, nil
 	default:
 		return "", fmt.Errorf("unsupported service scope: %s", scope)
 	}
@@ -623,6 +712,46 @@ func (installer Installer) systemRoot() string {
 		return launchdSystemRoot
 	}
 	return root
+}
+
+func (installer Installer) SystemServiceTarget() (SystemServiceTarget, error) {
+	account, err := installer.systemServiceUser()
+	if err != nil {
+		return SystemServiceTarget{}, fmt.Errorf("resolve service user: %w", err)
+	}
+	username := strings.TrimSpace(account.Username)
+	if username == "" {
+		return SystemServiceTarget{}, fmt.Errorf("resolve service user: empty username")
+	}
+	uid, err := strconv.Atoi(strings.TrimSpace(account.Uid))
+	if err != nil {
+		return SystemServiceTarget{}, fmt.Errorf("resolve service uid: %w", err)
+	}
+	gid, err := strconv.Atoi(strings.TrimSpace(account.Gid))
+	if err != nil {
+		return SystemServiceTarget{}, fmt.Errorf("resolve service gid: %w", err)
+	}
+	homeDir := strings.TrimSpace(installer.HomeDir)
+	if homeDir == "" {
+		homeDir = strings.TrimSpace(account.HomeDir)
+	}
+	if homeDir == "" {
+		return SystemServiceTarget{}, fmt.Errorf("resolve service home: empty home directory")
+	}
+	return SystemServiceTarget{Username: username, HomeDir: homeDir, UID: uid, GID: gid}, nil
+}
+
+func (installer Installer) systemServiceUser() (*user.User, error) {
+	if strings.TrimSpace(installer.HomeDir) == "" {
+		sudoUser := strings.TrimSpace(os.Getenv("SUDO_USER"))
+		if sudoUser != "" && sudoUser != "root" {
+			account, err := user.Lookup(sudoUser)
+			if err == nil {
+				return account, nil
+			}
+		}
+	}
+	return user.Current()
 }
 
 func writeOwnerOnly(path string, raw []byte) error {
@@ -641,6 +770,16 @@ func writeLaunchDaemonPlist(path string, raw []byte) error {
 	}
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		return fmt.Errorf("write launchdaemon plist: %w", err)
+	}
+	return nil
+}
+
+func writeSystemServiceFile(path string, raw []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create system service dir: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		return fmt.Errorf("write system service file: %w", err)
 	}
 	return nil
 }
@@ -687,6 +826,10 @@ func systemdQuote(value string) string {
 	escaped := strings.ReplaceAll(strings.TrimSpace(value), `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	return `"` + escaped + `"`
+}
+
+func systemdValue(value string) string {
+	return strings.ReplaceAll(strings.TrimSpace(value), " ", `\x20`)
 }
 
 func desktopExecQuote(value string) string {

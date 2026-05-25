@@ -69,12 +69,14 @@ func readFrameOfType(t *testing.T, conn *websocket.Conn, want externalagentproto
 	}
 }
 
-func TestRunnerFailsFastWhenLoopbackProxyCannotBind(t *testing.T) {
+func TestRunnerStaysAliveWhenLoopbackProxyCannotBind(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer listener.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	binding := config.Binding{
 		ConnectionID:          "conn-1",
 		PersonaID:             "persona-1",
@@ -84,9 +86,27 @@ func TestRunnerFailsFastWhenLoopbackProxyCannotBind(t *testing.T) {
 		PersonaMCPURL:         "http://127.0.0.1:1/mcp",
 		PersonaMCPToken:       "persona-token",
 	}
-	err = (Runner{Store: config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})}).RunForeground(t.Context())
-	if err == nil {
-		t.Fatal("RunForeground() expected loopback bind error")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{
+			Store:        config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}}),
+			ReconnectMin: 5 * time.Millisecond,
+			ReconnectMax: 5 * time.Millisecond,
+		}).RunForeground(ctx)
+	}()
+	select {
+	case err := <-errCh:
+		t.Fatalf("RunForeground() returned before cancellation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunForeground() after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
 	}
 }
 
@@ -3074,6 +3094,82 @@ func TestRunnerReconnectsWithFreshGenerationAfterDrainHint(t *testing.T) {
 	firstGeneration := <-connectGenerations
 	secondGeneration := <-connectGenerations
 	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run foreground: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+	if firstGeneration != 2 || secondGeneration != 3 {
+		t.Fatalf("unexpected reconnect generations: first=%d second=%d", firstGeneration, secondGeneration)
+	}
+}
+
+func TestRunnerReconnectsWhenWebsocketReadDeadlineExpires(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	connectGenerations := make(chan int64, 2)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		}); err != nil {
+			t.Fatalf("write connect accepted: %v", err)
+		}
+		var heartbeat externalagentprotocol.Frame
+		if err := conn.ReadJSON(&heartbeat); err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		connectGenerations <- connectFrame.Connect.ConnectionGeneration
+		if connectFrame.Connect.ConnectionGeneration >= 3 {
+			cancel()
+			return
+		}
+		<-ctx.Done()
+	}))
+	defer gateway.Close()
+
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ConnectionGeneration: 1,
+		GatewayWebsocketURL:  "ws" + gateway.URL[len("http"):],
+		BridgeCredentialID:   "cred-1",
+		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:          runtime.AdapterKindHermes,
+		HasBridgeSecret:      true,
+	}}})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond, ReadTimeout: 20 * time.Millisecond}).RunForeground(ctx)
+	}()
+	firstGeneration := <-connectGenerations
+	secondGeneration := <-connectGenerations
 	select {
 	case err := <-errCh:
 		if err != nil {

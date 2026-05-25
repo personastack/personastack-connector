@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"os"
 	"sort"
@@ -27,9 +28,12 @@ type Runner struct {
 	Now          func() time.Time
 	ReconnectMin time.Duration
 	ReconnectMax time.Duration
+	ReadTimeout  time.Duration
 }
 
 var errConnectorDraining = errors.New("connector draining")
+
+const websocketReadTimeout = 60 * time.Second
 
 type bindingRun struct {
 	cancel       func()
@@ -168,9 +172,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 	bindings := r.Store.ListBindings()
 	for _, binding := range bindings {
 		if err := startBinding(binding); err != nil {
-			cancel()
-			wg.Wait()
-			return err
+			log.Printf("connector binding start failed connection_id=%s err=%v", binding.ConnectionID, err)
 		}
 	}
 
@@ -192,9 +194,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 				delete(active, result.token)
 			}
 			if ok && result.err != nil {
-				cancel()
-				wg.Wait()
-				return result.err
+				log.Printf("connector binding stopped connection_id=%s err=%v", result.connectionID, result.err)
 			}
 		case <-ticker.C:
 			if len(active) > 0 && !supportsExternalBindingReload(r.Store) {
@@ -204,9 +204,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 			cancelMissingBindings(bindings)
 			for _, binding := range bindings {
 				if err := startBinding(binding); err != nil {
-					cancel()
-					wg.Wait()
-					return err
+					log.Printf("connector binding start failed connection_id=%s err=%v", binding.ConnectionID, err)
 				}
 			}
 		}
@@ -280,6 +278,13 @@ func (r Runner) serviceScope() externalagentprotocol.ServiceScope {
 	return externalagentprotocol.ServiceScopeUserLaunchAgent
 }
 
+func (r Runner) readTimeout() time.Duration {
+	if r.ReadTimeout > 0 {
+		return r.ReadTimeout
+	}
+	return websocketReadTimeout
+}
+
 func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, session bridge.Session) error {
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, binding.GatewayWebsocketURL, nil)
 	if err != nil {
@@ -302,6 +307,21 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		return conn.WriteJSON(frame)
+	}
+	extendReadDeadline := func() error {
+		return conn.SetReadDeadline(r.now().Add(r.readTimeout()))
+	}
+	if err := extendReadDeadline(); err != nil {
+		return fmt.Errorf("set websocket read deadline: %w", err)
+	}
+	conn.SetPongHandler(func(string) error {
+		return extendReadDeadline()
+	})
+	writePing := func() error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		deadline := r.now().Add(5 * time.Second)
+		return conn.WriteControl(websocket.PingMessage, []byte("personastack-connector"), deadline)
 	}
 
 	connectFrame, err := session.ConnectFrame("connector-startup")
@@ -390,6 +410,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				_ = r.recordHeartbeat(binding, r.now())
 				readiness := r.bindingReadiness(adapter, binding)
 				_ = writeFrame(session.HeartbeatFrameWithDetection(readiness, lastSessionWakeProbeAt()))
+				_ = writePing()
 				_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
 			}
 		}
@@ -400,6 +421,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		if err := conn.ReadJSON(&frame); err != nil {
 			return nil
 		}
+		_ = extendReadDeadline()
 		switch frame.MessageType {
 		case externalagentprotocol.FrameTypeServerDraining:
 			if frame.ServerDraining == nil {

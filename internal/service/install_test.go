@@ -54,6 +54,56 @@ func TestInstallerWritesSystemdUserUnit(t *testing.T) {
 	}
 }
 
+func TestParseServiceScopeAcceptsLinuxSystemAlias(t *testing.T) {
+	scope, err := ParseServiceScope("linux-system")
+	if err != nil {
+		t.Fatalf("ParseServiceScope() error = %v", err)
+	}
+	if scope != ServiceScopeLinuxSystemService {
+		t.Fatalf("scope = %q", scope)
+	}
+}
+
+func TestInstallerWritesSystemdSystemUnit(t *testing.T) {
+	homeDir := t.TempDir()
+	systemRoot := t.TempDir()
+	runner := &recordingRunner{}
+	result, err := (Installer{
+		HomeDir:        homeDir,
+		ExecutablePath: "/opt/PersonaStack Connector/personastack-connector",
+		GOOS:           "linux",
+		ServiceScope:   ServiceScopeLinuxSystemService,
+		SystemRoot:     systemRoot,
+		Runner:         runner,
+	}).Install()
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	if result.Kind != "systemd-system" || result.Scope != ServiceScopeLinuxSystemService {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	raw, err := os.ReadFile(filepath.Join(systemRoot, "etc", "systemd", "system", "personastack-connector.service"))
+	if err != nil {
+		t.Fatalf("read unit: %v", err)
+	}
+	unit := string(raw)
+	for _, want := range []string{
+		"After=network-online.target",
+		`Environment="HOME=` + homeDir + `"`,
+		`ExecStart="/opt/PersonaStack Connector/personastack-connector" run --foreground --service-scope linux_system_service`,
+		"Restart=always",
+		"RestartSec=30",
+		"WantedBy=multi-user.target",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("unit missing %q:\n%s", want, unit)
+		}
+	}
+	if len(runner.commands) != 2 || !strings.Contains(runner.commands[1], "enable --now") {
+		t.Fatalf("unexpected commands: %+v", runner.commands)
+	}
+}
+
 func TestInstallerPlansServiceWithoutWritingFiles(t *testing.T) {
 	tests := []struct {
 		goos     string
@@ -78,6 +128,12 @@ func TestInstallerPlansServiceWithoutWritingFiles(t *testing.T) {
 			scope:    ServiceScopeUserLaunchAgent,
 			wantKind: "systemd-user",
 			wantPath: filepath.Join(".config", "systemd", "user", "personastack-connector.service"),
+		},
+		{
+			goos:     "linux",
+			scope:    ServiceScopeLinuxSystemService,
+			wantKind: "systemd-system",
+			wantPath: filepath.Join("etc", "systemd", "system", "personastack-connector.service"),
 		},
 		{
 			goos:     "windows",
