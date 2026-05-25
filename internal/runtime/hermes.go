@@ -960,7 +960,7 @@ func hermesToolListCapabilities(ctx context.Context, nativeMCPServerName string)
 	if err != nil {
 		return nil, err
 	}
-	command := hermesToolsListCommand(ctx, hermesBin, "tools", "list", "--platform", "cli")
+	command := hermesToolsListCommand(ctx, hermesBin, "tools", "list", "--platform", "api_server")
 	raw, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("Hermes tools list: %w", err)

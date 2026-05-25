@@ -209,7 +209,7 @@ func TestHermesToolListCapabilitiesUsesResolvedBinary(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(hermesPath), 0o700); err != nil {
 		t.Fatalf("create hermes dir: %v", err)
 	}
-	if err := os.WriteFile(hermesPath, []byte("#!/bin/sh\necho 'enabled computer_use Computer Use'\n"), 0o700); err != nil {
+	if err := os.WriteFile(hermesPath, []byte("#!/bin/sh\nif [ \"$1 $2 $3 $4\" != \"tools list --platform api_server\" ]; then exit 7; fi\necho 'enabled computer_use Computer Use'\n"), 0o700); err != nil {
 		t.Fatalf("write hermes stub: %v", err)
 	}
 	t.Setenv("HERMES_BIN", "")
@@ -228,9 +228,9 @@ func TestHermesToolListCapabilitiesUsesResolvedBinary(t *testing.T) {
 	}
 }
 
-func TestParseHermesToolsListReportsEnabledCLITools(t *testing.T) {
+func TestParseHermesToolsListReportsEnabledAPIServerTools(t *testing.T) {
 	capabilities := parseHermesToolsList(`
-Built-in toolsets (cli):
+Built-in toolsets (api_server):
   ✓ enabled  web  🔍 Web Search & Scraping
   ✓ enabled  browser  🌐 Browser Automation
   ✓ enabled  terminal  💻 Terminal & Processes
