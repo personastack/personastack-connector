@@ -196,7 +196,7 @@ func TestRunStatusReadsSystemScopeStore(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := command{stdout: &stdout, stderr: io.Discard, store: config.EmptyStore()}
 
-	if err := cmd.runStatus(context.Background(), []string{"--service-scope", "system"}); err != nil {
+	if err := cmd.runStatus(context.Background(), []string{"--service-scope", "system_launch_daemon"}); err != nil {
 		t.Fatalf("runStatus() error = %v", err)
 	}
 	if !strings.Contains(stdout.String(), "conn-system") {
@@ -215,7 +215,7 @@ func TestRunUnpairDeletesSystemScopeStore(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := command{stdout: &stdout, stderr: io.Discard, store: config.EmptyStore()}
 
-	if err := cmd.runUnpair([]string{"--service-scope", "system"}); err != nil {
+	if err := cmd.runUnpair([]string{"--service-scope", "system_launch_daemon"}); err != nil {
 		t.Fatalf("runUnpair() error = %v", err)
 	}
 	if bindings := store.ListBindings(); len(bindings) != 0 {
