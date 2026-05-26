@@ -277,7 +277,7 @@ func TestRunDaemonSystemScopeRejectsNonDarwin(t *testing.T) {
 	t.Cleanup(func() { currentGOOS = oldGOOS })
 	cmd := command{stdout: io.Discard, stderr: io.Discard, store: config.EmptyStore()}
 
-	err := cmd.runDaemon(context.Background(), []string{"--foreground", "--service-scope", "system"})
+	err := cmd.runDaemon(context.Background(), []string{"--foreground", "--service-scope", "system_launch_daemon"})
 	if err == nil || !strings.Contains(err.Error(), "requires macOS") {
 		t.Fatalf("runDaemon() error = %v, want macOS rejection", err)
 	}

@@ -68,6 +68,16 @@ var newServiceInstaller = func(scope service.ServiceScope) service.Installer {
 
 var currentGOOS = stdruntime.GOOS
 
+func parseCommandServiceScope(value string) (service.ServiceScope, error) {
+	if strings.TrimSpace(value) == "system" {
+		if currentGOOS == "linux" {
+			return service.ServiceScopeLinuxSystemService, nil
+		}
+		return service.ServiceScopeSystemLaunchDaemon, nil
+	}
+	return service.ParseServiceScope(value)
+}
+
 var flaggyParseMu sync.Mutex
 
 func main() {
@@ -215,7 +225,7 @@ func (cmd command) runPair(args []string) error {
 		}
 		kind = detectedKind
 	}
-	serviceScope, err := service.ParseServiceScope(serviceScopeValue)
+	serviceScope, err := parseCommandServiceScope(serviceScopeValue)
 	if err != nil {
 		return err
 	}
@@ -486,7 +496,7 @@ func (cmd command) runStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	scope, err := service.ParseServiceScope(scopeValue)
+	scope, err := parseCommandServiceScope(scopeValue)
 	if err != nil {
 		return err
 	}
@@ -544,7 +554,7 @@ func (cmd command) runRuntime(args []string) error {
 		if err != nil {
 			return err
 		}
-		scope, err := service.ParseServiceScope(scopeValue)
+		scope, err := parseCommandServiceScope(scopeValue)
 		if err != nil {
 			return err
 		}
@@ -781,7 +791,7 @@ func (cmd command) runMCPInstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	scope, err := service.ParseServiceScope(scopeValue)
+	scope, err := parseCommandServiceScope(scopeValue)
 	if err != nil {
 		return err
 	}
@@ -807,7 +817,7 @@ func (cmd command) runMCPRepair(args []string) error {
 	if err != nil {
 		return err
 	}
-	scope, err := service.ParseServiceScope(scopeValue)
+	scope, err := parseCommandServiceScope(scopeValue)
 	if err != nil {
 		return err
 	}
@@ -886,7 +896,7 @@ func (cmd command) runMCPStdio(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	scope, err := service.ParseServiceScope(scopeValue)
+	scope, err := parseCommandServiceScope(scopeValue)
 	if err != nil {
 		return err
 	}
@@ -916,7 +926,7 @@ func (cmd command) runService(args []string) error {
 	if err != nil {
 		return err
 	}
-	scope, err := service.ParseServiceScope(scopeValue)
+	scope, err := parseCommandServiceScope(scopeValue)
 	if err != nil {
 		return err
 	}
@@ -1034,7 +1044,7 @@ func (cmd command) runDaemon(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	scope, err := service.ParseServiceScope(scopeValue)
+	scope, err := parseCommandServiceScope(scopeValue)
 	if err != nil {
 		return err
 	}
@@ -1077,7 +1087,7 @@ func (cmd command) runUnpair(args []string) error {
 	if err != nil {
 		return err
 	}
-	scope, err := service.ParseServiceScope(scopeValue)
+	scope, err := parseCommandServiceScope(scopeValue)
 	if err != nil {
 		return err
 	}
