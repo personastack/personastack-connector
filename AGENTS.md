@@ -39,3 +39,11 @@
   Hermes adapter behavior, OpenClaw adapter behavior, OS service planning, and
   config mutation rollback.
 - Commit coherent slices with Conventional Commit subjects.
+
+## Release
+
+- When shipping a Connector semver, update the public
+  `personastack/homebrew-tap` formula to the same version before declaring the
+  release complete.
+- Treat `brew install personastack/tap/personastack-connector` as broken for
+  users if the tap formula lags behind the API-recommended Connector semver.
