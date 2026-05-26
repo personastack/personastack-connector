@@ -24,11 +24,11 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test
-        run: go test ./...
+        run: go test -p 8 -parallel 16 -timeout 30m ./...
       - name: Format
         run: git ls-files '*.go' ':!:vendor/*' | xargs gofmt -l | tee /tmp/gofmt.out && test ! -s /tmp/gofmt.out
       - name: Race tests
-        run: go test -race ./internal/bridge ./internal/daemon ./internal/mcp
+        run: go test -race -p 3 -parallel 8 -timeout 30m ./internal/bridge ./internal/daemon ./internal/mcp
       - name: Vet
         run: go vet ./...
       - name: Vulnerability check
