@@ -323,6 +323,18 @@ func TestParseHermesToolsListDedupesAfterBoundingIDs(t *testing.T) {
 	}
 }
 
+func TestHermesMCPServerLoadedMatchesServerSummaryOrToolPrefix(t *testing.T) {
+	if !hermesMCPServerLoaded("MCP servers:\n  personastack_abc  all tools enabled\n", "personastack_abc") {
+		t.Fatal("expected MCP server summary to verify registry load")
+	}
+	if !hermesMCPServerLoaded("✓ enabled  mcp_personastack_abc_persona_list_integrations  PersonaStack integrations\n", "personastack_abc") {
+		t.Fatal("expected MCP tool prefix to verify registry load")
+	}
+	if hermesMCPServerLoaded("MCP servers:\n  personastack_other  all tools enabled\n", "personastack_abc") {
+		t.Fatal("unexpected registry match for another server")
+	}
+}
+
 func TestHermesAdapterDetectRequiresRunLifecycleFeatures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

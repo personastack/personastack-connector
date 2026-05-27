@@ -61,6 +61,7 @@ const (
 const credentialStorageWarning = "credential warning: local MCP auth stays in owner-only connector config"
 
 var errOpenClawCLIMissing = errors.New("openclaw cli missing")
+var verifyHermesRuntimeMCPRegistry = runtime.VerifyHermesMCPServerLoaded
 
 func openClawConfigPath(homeDir string) string {
 	return filepath.Join(homeDir, ".openclaw", "openclaw.json")
@@ -171,7 +172,7 @@ func (installer Installer) installBindingNativeHTTP(homeDir string, binding conf
 			return InstallResult{}, err
 		}
 		path := filepath.Join(homeDir, ".hermes", "config.yaml")
-		if err := upsertHermesNativeHTTPServer(path, server, binding); err != nil {
+		if err := upsertHermesNativeHTTPServer(path, server, binding, installer.preservedNativeServerNames()); err != nil {
 			return InstallResult{}, err
 		}
 		result := InstallResult{
@@ -224,6 +225,23 @@ func installOpenClawServerWithCLI(homeDir string, binding config.Binding, server
 		return InstallResult{}, fmt.Errorf("openclaw mcp set: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: configPath, ServerName: server.Name}, nil
+}
+
+func (installer Installer) preservedNativeServerNames() map[string]bool {
+	out := map[string]bool{}
+	if installer.Store == nil {
+		return out
+	}
+	for _, binding := range installer.Store.ListBindings() {
+		name := strings.TrimSpace(binding.NativeMCPServer)
+		if name == "" {
+			name = "personastack-" + strings.TrimSpace(string(binding.ConnectionID))
+		}
+		if name != "" {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 func (installer Installer) installBindingLoopbackHTTP(homeDir string, binding config.Binding, server stdioServerConfig) (InstallResult, error) {
@@ -345,6 +363,18 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 	if !live.OK {
 		result.Note = live.Note
 		result.DiagnosticCode = live.DiagnosticCode
+		return result
+	}
+	if binding.RuntimeKind == runtime.AdapterKindHermes {
+		hermesLive := verifyHermesRuntimeMCPRegistry(ctx, result.ServerName)
+		if !hermesLive.OK {
+			result.Note = appendNote(result.Note, live.Note, hermesLive.Note)
+			result.DiagnosticCode = "native_mcp_unreachable"
+			return result
+		}
+		result.Note = appendNote(result.Note, live.Note, hermesLive.Note)
+		result.State = runtime.AdapterStateMCPVerified
+		result.DiagnosticCode = ""
 		return result
 	}
 	result.State = runtime.AdapterStateMCPVerified
@@ -561,7 +591,7 @@ func upsertOpenClawLoopbackHTTPServer(path string, server stdioServerConfig, loo
 	return writeOwnerOnlyAtomic(path, output)
 }
 
-func upsertHermesNativeHTTPServer(path string, server nativeHTTPMCPServer, binding config.Binding) error {
+func upsertHermesNativeHTTPServer(path string, server nativeHTTPMCPServer, binding config.Binding, preserveNames map[string]bool) error {
 	root := map[string]any{}
 	raw, err := os.ReadFile(path)
 	if err == nil && len(raw) > 0 {
@@ -575,13 +605,46 @@ func upsertHermesNativeHTTPServer(path string, server nativeHTTPMCPServer, bindi
 			return err
 		}
 	}
+	removeDuplicateHermesPersonaStackServers(servers, server.Name, binding, preserveNames)
 	servers[server.Name] = nativeHTTPServerMap(server)
+	enableHermesAPIServerMCP(root)
 	removeLegacyNestedServer(root, server.Name)
 	output, err := yaml.Marshal(root)
 	if err != nil {
 		return fmt.Errorf("encode Hermes config: %w", err)
 	}
 	return writeOwnerOnlyAtomic(path, output)
+}
+
+func removeDuplicateHermesPersonaStackServers(servers map[string]any, keepName string, binding config.Binding, preserveNames map[string]bool) {
+	for name, value := range servers {
+		if name == keepName || preserveNames[name] || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "personastack") {
+			continue
+		}
+		server, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if hermesServerOwnedByBinding(server, binding) {
+			delete(servers, name)
+		}
+	}
+}
+
+func hermesServerOwnedByBinding(server map[string]any, binding config.Binding) bool {
+	if serverArgsMatchBinding(server["args"], binding.ConnectionID) {
+		return true
+	}
+	transport := normalizedMCPTransport(server)
+	if transport != "streamable-http" && transport != "sse" {
+		return false
+	}
+	rawURL, _ := server["url"].(string)
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || !directMCPURL(parsed, binding) {
+		return false
+	}
+	return bearerAuthorizationHeaderMatches(server, binding.PersonaMCPToken)
 }
 
 func upsertOpenClawNativeHTTPServer(path string, server nativeHTTPMCPServer, binding config.Binding) error {
@@ -638,6 +701,7 @@ func upsertHermesServer(path string, server stdioServerConfig) error {
 		"connect_timeout": 60,
 		"enabled":         true,
 	}
+	enableHermesAPIServerMCP(root)
 	removeLegacyNestedServer(root, server.Name)
 	output, err := yaml.Marshal(root)
 	if err != nil {
@@ -655,11 +719,56 @@ func verifyHermesServer(path string, serverName string, binding config.Binding) 
 	if err := yaml.Unmarshal(raw, &root); err != nil {
 		return runtime.AdapterStateMCPConfigMissing, "parse Hermes config: " + err.Error()
 	}
+	if hermesAPIServerMCPDisabled(root) {
+		return runtime.AdapterStateMCPConfigMissing, "Hermes api_server toolsets disable MCP; repair required"
+	}
 	servers, ok := root["mcp_servers"].(map[string]any)
 	if !ok {
 		return runtime.AdapterStateMCPConfigMissing, "mcp_servers section missing"
 	}
 	return verifyNamedServerMap(servers, serverName, binding)
+}
+
+func enableHermesAPIServerMCP(root map[string]any) {
+	platforms, ok := root["platform_toolsets"].(map[string]any)
+	if !ok {
+		return
+	}
+	rawToolsets, ok := platforms["api_server"]
+	if !ok {
+		return
+	}
+	toolsets, ok := rawToolsets.([]any)
+	if !ok {
+		return
+	}
+	filtered := make([]any, 0, len(toolsets))
+	for _, raw := range toolsets {
+		name, ok := raw.(string)
+		if ok && strings.EqualFold(strings.TrimSpace(name), "no_mcp") {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	platforms["api_server"] = filtered
+}
+
+func hermesAPIServerMCPDisabled(root map[string]any) bool {
+	platforms, ok := root["platform_toolsets"].(map[string]any)
+	if !ok {
+		return false
+	}
+	toolsets, ok := platforms["api_server"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range toolsets {
+		name, ok := raw.(string)
+		if ok && strings.EqualFold(strings.TrimSpace(name), "no_mcp") {
+			return true
+		}
+	}
+	return false
 }
 
 func upsertOpenClawServer(path string, server stdioServerConfig) error {

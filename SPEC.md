@@ -195,6 +195,13 @@ Adapter result states must be concrete typed enums, including:
 - Hermes tools should register as `mcp_<native_mcp_server_name>_<tool_name>`.
 - Heartbeat readiness treats MCP as verified only after the native config is
   present and a live PersonaStack MCP initialize/tools-list check succeeds.
+- Hermes MCP verification additionally requires the active Hermes API server
+  tool registry to report the configured native MCP server from
+  `hermes tools list --platform api_server`; direct PersonaStack MCP endpoint
+  reachability alone is not enough to report `mcp_verified`.
+- Hermes repair must remove `no_mcp` from `platform_toolsets.api_server`;
+  presence of that sentinel is a failed native MCP configuration because Hermes
+  excludes MCP tools from API-server runs even when `mcp_servers` is populated.
 - Connector journals the active PersonaStack run id, assignment id, and native
   runtime run id in binding state while the run is active and clears them on
   terminal cleanup.

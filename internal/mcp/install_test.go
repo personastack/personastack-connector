@@ -75,6 +75,15 @@ func TestInstallerWritesHermesNativeHTTPServer(t *testing.T) {
 	}
 }
 
+func withHermesRegistryCheck(t *testing.T, fn func(context.Context, string) runtime.HermesMCPRegistryCheck) {
+	t.Helper()
+	previous := verifyHermesRuntimeMCPRegistry
+	verifyHermesRuntimeMCPRegistry = fn
+	t.Cleanup(func() {
+		verifyHermesRuntimeMCPRegistry = previous
+	})
+}
+
 func TestInstallerWritesDistinctHermesServersPerBinding(t *testing.T) {
 	homeDir := t.TempDir()
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{
@@ -175,6 +184,9 @@ func TestInstallerWritesDistinctNativeMCPServersForMultipleBindings(t *testing.T
 }
 
 func TestVerifyBindingWithLivePromotesVerifiedState(t *testing.T) {
+	withHermesRegistryCheck(t, func(context.Context, string) runtime.HermesMCPRegistryCheck {
+		return runtime.HermesMCPRegistryCheck{OK: true, Note: "Hermes MCP server loaded in api_server tool registry"}
+	})
 	homeDir := t.TempDir()
 	binding := config.Binding{
 		ConnectionID:       "conn-1",
@@ -203,6 +215,38 @@ func TestVerifyBindingWithLivePromotesVerifiedState(t *testing.T) {
 	verified := VerifyBindingWithLive(context.Background(), homeDir, binding, server.Client())
 	if verified.State != runtime.AdapterStateMCPVerified {
 		t.Fatalf("verified.State = %s note=%s", verified.State, verified.Note)
+	}
+}
+
+func TestVerifyBindingWithLiveRequiresHermesRuntimeRegistry(t *testing.T) {
+	withHermesRegistryCheck(t, func(context.Context, string) runtime.HermesMCPRegistryCheck {
+		return runtime.HermesMCPRegistryCheck{Note: "Hermes MCP server not loaded in api_server tool registry"}
+	})
+	homeDir := t.TempDir()
+	binding := config.Binding{
+		ConnectionID:       "conn-1",
+		PersonaID:          "persona-1",
+		RuntimeKind:        runtime.AdapterKindHermes,
+		NativeMCPServer:    "personastack-conn-1",
+		PersonaMCPToken:    "token-1",
+		HasPersonaMCPToken: true,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"persona_list_integrations"}]}}`))
+	}))
+	defer server.Close()
+	binding.PersonaMCPURL = server.URL
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	if _, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll(); err != nil {
+		t.Fatalf("InstallAll() error = %v", err)
+	}
+	verified := VerifyBindingWithLive(context.Background(), homeDir, binding, server.Client())
+	if verified.State == runtime.AdapterStateMCPVerified {
+		t.Fatalf("VerifyBindingWithLive() unexpectedly verified: %+v", verified)
+	}
+	if verified.DiagnosticCode != "native_mcp_unreachable" {
+		t.Fatalf("DiagnosticCode = %q note=%q", verified.DiagnosticCode, verified.Note)
 	}
 }
 
@@ -310,6 +354,151 @@ func TestHermesInstallPreservesOriginalBackupAcrossMultipleBindings(t *testing.T
 	}
 	if _, ok := servers["personastack-conn-2"]; !ok {
 		t.Fatalf("second server missing: %+v", servers)
+	}
+}
+
+func TestHermesNativeHTTPInstallRemovesDuplicateConnectorOwnedServers(t *testing.T) {
+	homeDir := t.TempDir()
+	path := filepath.Join(homeDir, ".hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	raw := []byte(strings.Join([]string{
+		"mcp_servers:",
+		"  unrelated:",
+		"    command: /opt/other",
+		"    args: [serve]",
+		"  personastack-old-stdio:",
+		"    command: /Users/eg/.local/bin/personastack-connector",
+		"    args: [mcp, stdio, --binding, conn-1]",
+		"  personastack-old-http:",
+		"    transport: streamable-http",
+		"    url: https://mcp.personastack.ai/mcp",
+		"    headers:",
+		"      Authorization: Bearer secret-mcp-token",
+		"",
+	}, "\n"))
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaID:       "persona-1",
+		RuntimeKind:     runtime.AdapterKindHermes,
+		NativeMCPServer: "personastack-new",
+		PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
+		PersonaMCPToken: "secret-mcp-token",
+	}}})
+	if _, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll(); err != nil {
+		t.Fatalf("InstallAll() error = %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var root map[string]any
+	if err := yaml.Unmarshal(after, &root); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	servers := root["mcp_servers"].(map[string]any)
+	for _, removed := range []string{"personastack-old-stdio", "personastack-old-http"} {
+		if _, ok := servers[removed]; ok {
+			t.Fatalf("duplicate server %q remains: %+v", removed, servers)
+		}
+	}
+	if _, ok := servers["personastack-new"]; !ok {
+		t.Fatalf("canonical server missing: %+v", servers)
+	}
+	if _, ok := servers["unrelated"]; !ok {
+		t.Fatalf("unrelated server removed: %+v", servers)
+	}
+}
+
+func TestHermesNativeHTTPInstallRemovesAPIServerNoMCPSentinel(t *testing.T) {
+	homeDir := t.TempDir()
+	path := filepath.Join(homeDir, ".hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	original := []byte(strings.Join([]string{
+		"platform_toolsets:",
+		"  api_server:",
+		"    - browser",
+		"    - no_mcp",
+		"    - terminal",
+		"",
+	}, "\n"))
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	binding := config.Binding{
+		ConnectionID:    "conn-1",
+		PersonaID:       "persona-1",
+		RuntimeKind:     runtime.AdapterKindHermes,
+		NativeMCPServer: "personastack-conn-1",
+		PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
+		PersonaMCPToken: "token-1",
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+
+	if _, err := (Installer{Store: store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll(); err != nil {
+		t.Fatalf("InstallAll() error = %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var root map[string]any
+	if err := yaml.Unmarshal(raw, &root); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	toolsets := root["platform_toolsets"].(map[string]any)["api_server"].([]any)
+	got := make([]string, 0, len(toolsets))
+	for _, raw := range toolsets {
+		got = append(got, raw.(string))
+	}
+	if strings.Join(got, ",") != "browser,terminal" {
+		t.Fatalf("unexpected api_server toolsets: %+v", got)
+	}
+}
+
+func TestVerifyHermesServerRejectsAPIServerNoMCPSentinel(t *testing.T) {
+	homeDir := t.TempDir()
+	path := filepath.Join(homeDir, ".hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	raw := []byte(strings.Join([]string{
+		"platform_toolsets:",
+		"  api_server:",
+		"    - browser",
+		"    - no_mcp",
+		"mcp_servers:",
+		"  personastack-conn-1:",
+		"    transport: streamable-http",
+		"    url: https://mcp.personastack.ai/mcp",
+		"    headers:",
+		"      Authorization: Bearer token-1",
+		"",
+	}, "\n"))
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	binding := config.Binding{
+		ConnectionID:    "conn-1",
+		RuntimeKind:     runtime.AdapterKindHermes,
+		NativeMCPServer: "personastack-conn-1",
+		PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
+		PersonaMCPToken: "token-1",
+	}
+
+	state, note := verifyHermesServer(path, "personastack-conn-1", binding)
+	if state != runtime.AdapterStateMCPConfigMissing {
+		t.Fatalf("state = %s note=%s", state, note)
+	}
+	if !strings.Contains(note, "api_server toolsets disable MCP") {
+		t.Fatalf("unexpected note: %s", note)
 	}
 }
 
@@ -717,6 +906,9 @@ func TestVerifyBindingRejectsStaleDirectBearerToken(t *testing.T) {
 }
 
 func TestVerifyBindingWithLiveChecksLoopbackHTTPProxy(t *testing.T) {
+	withHermesRegistryCheck(t, func(context.Context, string) runtime.HermesMCPRegistryCheck {
+		return runtime.HermesMCPRegistryCheck{OK: true, Note: "Hermes MCP server loaded in api_server tool registry"}
+	})
 	personaMCP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer stable-token" {
 			t.Fatalf("unexpected remote auth: %q", r.Header.Get("Authorization"))

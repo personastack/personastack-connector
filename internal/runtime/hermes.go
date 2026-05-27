@@ -40,6 +40,11 @@ type HermesAdapter struct {
 	Client  *http.Client
 }
 
+type HermesMCPRegistryCheck struct {
+	OK   bool
+	Note string
+}
+
 func NewHermesAdapter(baseURL string, apiKey string) HermesAdapter {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = defaultHermesURL
@@ -972,6 +977,26 @@ func hermesToolListCapabilities(ctx context.Context, nativeMCPServerName string)
 	return capabilities, nil
 }
 
+func VerifyHermesMCPServerLoaded(ctx context.Context, nativeMCPServerName string) HermesMCPRegistryCheck {
+	serverName := strings.TrimSpace(nativeMCPServerName)
+	if serverName == "" {
+		return HermesMCPRegistryCheck{Note: "Hermes MCP server name missing"}
+	}
+	hermesBin, err := resolveHermesBinary()
+	if err != nil {
+		return HermesMCPRegistryCheck{Note: err.Error()}
+	}
+	command := hermesToolsListCommand(ctx, hermesBin, "tools", "list", "--platform", "api_server")
+	raw, err := command.Output()
+	if err != nil {
+		return HermesMCPRegistryCheck{Note: fmt.Sprintf("Hermes tools list: %v", err)}
+	}
+	if hermesMCPServerLoaded(string(raw), serverName) {
+		return HermesMCPRegistryCheck{OK: true, Note: "Hermes MCP server loaded in api_server tool registry"}
+	}
+	return HermesMCPRegistryCheck{Note: "Hermes MCP server not loaded in api_server tool registry"}
+}
+
 func resolveHermesBinary() (string, error) {
 	if explicit := strings.TrimSpace(os.Getenv("HERMES_BIN")); explicit != "" {
 		if executableFile(explicit) {
@@ -1066,6 +1091,35 @@ func parseHermesToolsList(raw string, nativeMCPServerName string) []NativeCapabi
 		}
 	}
 	return out
+}
+
+func hermesMCPServerLoaded(raw string, nativeMCPServerName string) bool {
+	serverName := strings.TrimSpace(nativeMCPServerName)
+	if serverName == "" {
+		return false
+	}
+	toolPrefix := hermesNativeMCPToolPrefix(serverName)
+	inMCPSection := false
+	for _, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.EqualFold(trimmed, "MCP servers:") {
+			inMCPSection = true
+			continue
+		}
+		if strings.Contains(trimmed, toolPrefix) {
+			return true
+		}
+		if inMCPSection {
+			fields := strings.Fields(trimmed)
+			if len(fields) > 0 && fields[0] == serverName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hermesNativeMCPToolPrefix(nativeMCPServerName string) string {

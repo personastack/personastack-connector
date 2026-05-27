@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	hermesPath := filepath.Join(dir, "hermes")
-	if err := os.WriteFile(hermesPath, []byte("#!/bin/sh\nprintf 'enabled computer_use Computer Use\\n'\n"), 0o700); err != nil {
+	if err := os.WriteFile(hermesPath, []byte("#!/bin/sh\nprintf 'enabled computer_use Computer Use\\nMCP servers:\\n  personastack-conn-1  all tools enabled\\n'\n"), 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "write hermes stub: %v\n", err)
 		os.Exit(1)
 	}
