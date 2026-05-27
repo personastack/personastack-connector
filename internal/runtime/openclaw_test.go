@@ -976,6 +976,67 @@ func TestOpenClawAdapterDescribeNativeCapabilitiesRejectsNotOKSkillsStatus(t *te
 	}
 }
 
+func TestOpenClawAdapterDescribeNativeCapabilitiesFallsBackToCatalog(t *testing.T) {
+	var connectionCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		connectionCount++
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		switch connectionCount {
+		case 1:
+			if request.Method != "skills.status" {
+				t.Fatalf("expected skills.status, got %+v", request)
+			}
+			notOK := false
+			_ = conn.WriteJSON(openClawResponse{
+				ID:    request.ID,
+				OK:    &notOK,
+				Error: "unknown method",
+			})
+		case 2:
+			if request.Method != "tools.catalog" {
+				t.Fatalf("expected tools.catalog fallback, got %+v", request)
+			}
+			_ = conn.WriteJSON(openClawResponse{
+				ID: request.ID,
+				Result: json.RawMessage(`{
+  "agentId":"agent-1",
+  "groups":[
+    {"id":"plugin:github","label":"GitHub","source":"plugin","pluginId":"github","tools":[{"id":"issues","label":"Issues"}]},
+    {"id":"plugin:personastack-conn-1","label":"personastack-conn-1","source":"plugin","pluginId":"personastack-conn-1","tools":[{"id":"persona","label":"PersonaStack"}]}
+  ]
+}`),
+			})
+		default:
+			t.Fatalf("unexpected connection count %d", connectionCount)
+		}
+	}))
+	defer server.Close()
+
+	capabilities, err := NewOpenClawAdapterWithAuth("ws"+server.URL[len("http"):], OpenClawAuth{Token: "token-1"}, "agent-1").DescribeNativeCapabilities(context.Background(), "personastack-conn-1")
+	if err != nil {
+		t.Fatalf("DescribeNativeCapabilities() error = %v", err)
+	}
+	if len(capabilities) != 1 {
+		t.Fatalf("expected one fallback capability, got %#v", capabilities)
+	}
+	if capabilities[0].Source != NativeCapabilitySourceOpenClawToolsCatalog || capabilities[0].Kind != NativeCapabilityKindToolGroup {
+		t.Fatalf("unexpected fallback capability source/kind: %#v", capabilities[0])
+	}
+	if capabilities[0].CapabilityID != "github" || capabilities[0].Summary != "GitHub (1 OpenClaw tools)" {
+		t.Fatalf("unexpected fallback capability: %#v", capabilities[0])
+	}
+}
+
 func TestOpenClawSkillsStatusRequiresReadySummary(t *testing.T) {
 	ready := true
 	eligible := true

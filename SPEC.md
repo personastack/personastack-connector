@@ -279,8 +279,12 @@ Adapter result states must be concrete typed enums, including:
   write success alone.
 - OpenClaw CLI fallback is degraded only and must not claim Gateway streaming or
   cancel parity unless the same native run id can be waited and cancelled.
-- OpenClaw capability discovery uses Gateway `skills.status` and reports one
-  prompt-safe capability summary per ready skill.
+- OpenClaw capability discovery uses Gateway `skills.status` when available and
+  reports one prompt-safe capability summary per ready skill. When
+  `skills.status` is unavailable but Gateway `tools.catalog` is available,
+  Connector may complete discovery by reporting prompt-safe tool-group summaries
+  from the exact `openclaw_tools_catalog` source instead of mislabeling them as
+  ready skills.
 
 ## Security
 

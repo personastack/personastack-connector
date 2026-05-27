@@ -206,7 +206,15 @@ func (adapter OpenClawAdapter) VerifyMCPCatalog(ctx context.Context, serverName 
 func (adapter OpenClawAdapter) DescribeNativeCapabilities(ctx context.Context, nativeMCPServerName string) ([]NativeCapability, error) {
 	status, err := adapter.fetchOpenClawSkillsStatus(ctx, "native-capabilities-1")
 	if err != nil {
-		return nil, err
+		catalog, catalogErr := adapter.fetchOpenClawToolsCatalog(ctx, "native-capabilities-catalog-1")
+		if catalogErr != nil {
+			return nil, fmt.Errorf("%w; OpenClaw tools.catalog fallback failed: %v", err, catalogErr)
+		}
+		capabilities := catalog.nativeCapabilitySummaries(nativeMCPServerName)
+		if len(capabilities) == 0 {
+			capabilities = append(capabilities, nativeCapabilitySource(NativeCapabilitySourceOpenClawToolsCatalog))
+		}
+		return capabilities, nil
 	}
 	capabilities := status.nativeCapabilitySummaries(nativeMCPServerName)
 	if len(capabilities) == 0 {
@@ -290,6 +298,9 @@ func (adapter OpenClawAdapter) fetchOpenClawToolsCatalog(ctx context.Context, re
 	}
 	if errText := response.errorString(); errText != "" {
 		return openClawToolsCatalogResult{}, fmt.Errorf("OpenClaw tools.catalog error: %s", errText)
+	}
+	if !response.isResponseOK() {
+		return openClawToolsCatalogResult{}, fmt.Errorf("OpenClaw tools.catalog response not ok")
 	}
 	catalog, err := openClawToolsCatalogFromResult(response.payload())
 	if err != nil {
