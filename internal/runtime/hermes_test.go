@@ -335,6 +335,31 @@ func TestHermesMCPServerLoadedMatchesServerSummaryOrToolPrefix(t *testing.T) {
 	}
 }
 
+func TestVerifyHermesMCPServerLoadedUsesHermesHome(t *testing.T) {
+	binDir := t.TempDir()
+	capturePath := filepath.Join(t.TempDir(), "hermes-home")
+	hermesPath := filepath.Join(binDir, "hermes")
+	script := "#!/bin/sh\nprintf '%s' \"$HERMES_HOME\" > \"$CAPTURE_PATH\"\necho 'MCP servers:'\necho '  personastack-conn-1  all tools enabled'\n"
+	if err := os.WriteFile(hermesPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write hermes stub: %v", err)
+	}
+	t.Setenv("CAPTURE_PATH", capturePath)
+	t.Setenv("HERMES_BIN", hermesPath)
+	hermesHome := filepath.Join(t.TempDir(), ".hermes", "profiles", "homeschool")
+
+	check := VerifyHermesMCPServerLoadedWithHome(context.Background(), "personastack-conn-1", hermesHome)
+	if !check.OK {
+		t.Fatalf("VerifyHermesMCPServerLoadedWithHome() = %+v", check)
+	}
+	raw, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("read captured HERMES_HOME: %v", err)
+	}
+	if string(raw) != hermesHome {
+		t.Fatalf("HERMES_HOME = %q, want %q", string(raw), hermesHome)
+	}
+}
+
 func TestHermesAdapterDetectRequiresRunLifecycleFeatures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

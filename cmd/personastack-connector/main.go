@@ -29,12 +29,12 @@ import (
 )
 
 const usage = `Usage:
-  personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--service-scope user|system] [--openclaw-token <token>|--openclaw-password <password>|--openclaw-device-token <token>] [--openclaw-agent-id <id>]
+  personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--service-scope user|system] [--hermes-home <path>] [--openclaw-token <token>|--openclaw-password <password>|--openclaw-device-token <token>] [--openclaw-agent-id <id>]
   personastack-connector status [--repair] [--service-scope user|system]
   personastack-connector diagnostics
   personastack-connector runtime detect
   personastack-connector runtime repair [--service-scope user|system]
-  personastack-connector runtime hermes configure [--enable-api] [--configure-mcp]
+  personastack-connector runtime hermes configure [--enable-api] [--configure-mcp] [--hermes-home <path>]
   personastack-connector runtime openclaw configure [--gateway ws://127.0.0.1:18789] [--configure-mcp]
   personastack-connector mcp install [--service-scope user|system]
   personastack-connector mcp repair [--service-scope user|system]
@@ -55,12 +55,13 @@ type command struct {
 }
 
 var installService = func(scope service.ServiceScope) (service.InstallResult, error) {
-	return (service.Installer{ServiceScope: scope}).Install()
+	return (service.Installer{ServiceScope: scope, HermesHome: os.Getenv("HERMES_HOME")}).Install()
 }
 
 var newServiceInstaller = func(scope service.ServiceScope) service.Installer {
 	return service.Installer{
 		ServiceScope: scope,
+		HermesHome:   os.Getenv("HERMES_HOME"),
 		GOOS:         currentGOOS,
 		SystemRoot:   os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT"),
 	}
@@ -192,6 +193,7 @@ func (cmd command) runPair(args []string) error {
 	openClawPassword := ""
 	openClawDeviceToken := ""
 	openClawAgentID := ""
+	hermesHome := ""
 	serviceScopeValue := "user"
 	pairingCode := ""
 
@@ -203,6 +205,7 @@ func (cmd command) runPair(args []string) error {
 	parser.String(&openClawPassword, "", "openclaw-password", "OpenClaw operator password")
 	parser.String(&openClawDeviceToken, "", "openclaw-device-token", "OpenClaw operator device token")
 	parser.String(&openClawAgentID, "", "openclaw-agent-id", "OpenClaw agent id")
+	parser.String(&hermesHome, "", "hermes-home", "Hermes profile home")
 	parser.String(&serviceScopeValue, "", "service-scope", "service scope user or system")
 	parser.AddPositionalValue(&pairingCode, "code", 1, true, "pairing code")
 
@@ -269,6 +272,9 @@ func (cmd command) runPair(args []string) error {
 		return err
 	}
 	binding := result.Binding
+	if err := applyHermesPairOptions(&binding, hermesHome); err != nil {
+		return err
+	}
 	if err := applyOpenClawPairOptions(&binding, pairOptions); err != nil {
 		return err
 	}
@@ -278,7 +284,7 @@ func (cmd command) runPair(args []string) error {
 			if err := writable.SaveBinding(binding); err != nil {
 				return err
 			}
-			return chownLinuxSystemScopePaths()
+			return chownLinuxSystemScopePaths(binding.HermesHome)
 		})
 		if err != nil {
 			return err
@@ -435,6 +441,22 @@ func applyOpenClawPairOptions(binding *config.Binding, options openClawPairOptio
 	return nil
 }
 
+func applyHermesPairOptions(binding *config.Binding, explicitHermesHome string) error {
+	if binding == nil || binding.RuntimeKind != runtime.AdapterKindHermes {
+		return nil
+	}
+	selected := firstNonEmpty(explicitHermesHome, binding.HermesHome, os.Getenv("HERMES_HOME"))
+	if selected == "" {
+		return nil
+	}
+	cleaned := filepath.Clean(selected)
+	if !filepath.IsAbs(cleaned) {
+		return fmt.Errorf("Hermes home must be an absolute path: %s", selected)
+	}
+	binding.HermesHome = cleaned
+	return nil
+}
+
 func openClawPairCredentialAvailable(options openClawPairOptions, binding config.Binding) bool {
 	return firstNonEmpty(
 		options.token,
@@ -456,6 +478,39 @@ func firstOpenClawBinding(bindings []config.Binding) config.Binding {
 		}
 	}
 	return config.Binding{}
+}
+
+func firstHermesHome(bindings []config.Binding) string {
+	for _, binding := range bindings {
+		if binding.RuntimeKind != runtime.AdapterKindHermes {
+			continue
+		}
+		if strings.TrimSpace(binding.HermesHome) != "" {
+			return strings.TrimSpace(binding.HermesHome)
+		}
+	}
+	return ""
+}
+
+func (cmd command) persistHermesHome(hermesHome string) error {
+	trimmed := strings.TrimSpace(hermesHome)
+	if trimmed == "" {
+		return nil
+	}
+	writable, ok := cmd.store.(config.WritableStore)
+	if !ok {
+		return nil
+	}
+	for _, binding := range cmd.store.ListBindings() {
+		if binding.RuntimeKind != runtime.AdapterKindHermes {
+			continue
+		}
+		binding.HermesHome = trimmed
+		if err := writable.SaveBinding(binding); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func openClawCredentialRequiredMessage() string {
@@ -607,9 +662,11 @@ func (cmd command) runRuntimeHermes(args []string) error {
 	}
 	enableAPI := true
 	configureMCP := true
+	hermesHome := ""
 	parser := newFlaggyParser("runtime hermes configure")
 	parser.Bool(&enableAPI, "", "enable-api", "enable Hermes API on loopback")
 	parser.Bool(&configureMCP, "", "configure-mcp", "configure native runtime MCP")
+	parser.String(&hermesHome, "", "hermes-home", "Hermes profile home")
 
 	err := parseFlaggyArgs(parser, args[1:])
 	if err != nil {
@@ -620,12 +677,21 @@ func (cmd command) runRuntimeHermes(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve home dir: %w", err)
 	}
+	paths := hermessetup.ResolvePaths(homeDir, hermesHome)
+	if strings.TrimSpace(hermesHome) != "" && !filepath.IsAbs(paths.HermesHome) {
+		return fmt.Errorf("Hermes home must be an absolute path: %s", hermesHome)
+	}
 	if enableAPI {
-		report, err := hermessetup.EnsureAPISetup(homeDir)
+		report, err := hermessetup.EnsureAPISetupForPaths(paths)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(cmd.stdout, "runtime hermes configure state=%s note=%q\n", report.State, report.Note)
+	}
+	if strings.TrimSpace(hermesHome) != "" {
+		if err := cmd.persistHermesHome(paths.HermesHome); err != nil {
+			return err
+		}
 	}
 	if configureMCP {
 		results, err := cmd.installMCPForKind(runtime.AdapterKindHermes)
@@ -874,7 +940,7 @@ func (cmd command) installMCPForServiceScope(scope service.ServiceScope) ([]stri
 	err := withLinuxSystemServiceConfigEnv(func() error {
 		var installErr error
 		results, installErr = cmd.installMCP()
-		if chownErr := chownLinuxSystemScopePaths(); chownErr != nil {
+		if chownErr := chownLinuxSystemScopePaths(firstHermesHome(cmd.store.ListBindings())); chownErr != nil {
 			return chownErr
 		}
 		return installErr
@@ -930,7 +996,11 @@ func (cmd command) runService(args []string) error {
 	if err != nil {
 		return err
 	}
+	cmd.store = cmd.storeForServiceScope(scope)
 	installer := newServiceInstaller(scope)
+	if hermesHome := firstHermesHome(cmd.store.ListBindings()); hermesHome != "" {
+		installer.HermesHome = hermesHome
+	}
 	if args[0] == "plan" {
 		result, err := installer.Plan()
 		if err != nil {
@@ -987,7 +1057,7 @@ func (cmd command) repairSetup(configureMCP bool, scope service.ServiceScope) ([
 		err := withLinuxSystemServiceConfigEnv(func() error {
 			var setupErr error
 			results, setupErr = cmd.repairSetupInCurrentEnv(configureMCP, scope)
-			if chownErr := chownLinuxSystemScopePaths(); chownErr != nil {
+			if chownErr := chownLinuxSystemScopePaths(firstHermesHome(cmd.store.ListBindings())); chownErr != nil {
 				return chownErr
 			}
 			return setupErr
@@ -1009,12 +1079,41 @@ func (cmd command) repairSetupInCurrentEnv(configureMCP bool, scope service.Serv
 		}
 		results = append(results, mcpResults...)
 	}
-	serviceResult, err := installService(scope)
+	serviceResult, err := cmd.installServiceForBindings(scope)
 	if err != nil {
 		return nil, err
 	}
 	results = append(results, fmt.Sprintf("service installed kind=%s scope=%s path=%s", serviceResult.Kind, serviceResult.Scope, serviceResult.Path))
 	return results, nil
+}
+
+func (cmd command) installServiceForBindings(scope service.ServiceScope) (service.InstallResult, error) {
+	hermesHome := firstHermesHome(cmd.store.ListBindings())
+	if hermesHome == "" {
+		return installService(scope)
+	}
+	return withHermesHome(hermesHome, func() (service.InstallResult, error) {
+		return installService(scope)
+	})
+}
+
+func withHermesHome(hermesHome string, fn func() (service.InstallResult, error)) (service.InstallResult, error) {
+	trimmed := strings.TrimSpace(hermesHome)
+	if trimmed == "" {
+		return fn()
+	}
+	oldValue, hadValue := os.LookupEnv("HERMES_HOME")
+	if err := os.Setenv("HERMES_HOME", trimmed); err != nil {
+		return service.InstallResult{}, err
+	}
+	defer func() {
+		if hadValue {
+			_ = os.Setenv("HERMES_HOME", oldValue)
+		} else {
+			_ = os.Unsetenv("HERMES_HOME")
+		}
+	}()
+	return fn()
 }
 
 func (cmd command) installMCP() ([]string, error) {
@@ -1117,7 +1216,7 @@ func (cmd command) runUnpair(args []string) error {
 			if err != nil {
 				return err
 			}
-			if err := chownLinuxSystemScopePaths(); err != nil && !os.IsNotExist(err) {
+			if err := chownLinuxSystemScopePaths(binding.HermesHome); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 		} else {
@@ -1219,7 +1318,7 @@ func withLinuxSystemServiceConfigEnv(fn func() error) error {
 	return fn()
 }
 
-func chownLinuxSystemScopePaths() error {
+func chownLinuxSystemScopePaths(hermesHome string) error {
 	if os.Geteuid() != 0 {
 		return nil
 	}
@@ -1233,15 +1332,18 @@ func chownLinuxSystemScopePaths() error {
 		filepath.Join(target.HomeDir, ".config", "personastack", "connector", "state.json"),
 		filepath.Join(target.HomeDir, ".config", "personastack", "connector", "secrets.enc"),
 		filepath.Join(target.HomeDir, ".config", "personastack", "connector", "secrets.key"),
-		filepath.Join(target.HomeDir, ".hermes"),
-		filepath.Join(target.HomeDir, ".hermes", ".env"),
-		filepath.Join(target.HomeDir, ".hermes", ".env.personastack.bak"),
-		filepath.Join(target.HomeDir, ".hermes", "config.yaml"),
-		filepath.Join(target.HomeDir, ".hermes", "config.yaml.personastack.bak"),
 		filepath.Join(target.HomeDir, ".openclaw"),
 		filepath.Join(target.HomeDir, ".openclaw", "openclaw.json"),
 		filepath.Join(target.HomeDir, ".openclaw", "openclaw.json.personastack.bak"),
 	}
+	hermesPaths := hermessetup.ResolvePaths(target.HomeDir, hermesHome)
+	paths = append(paths,
+		hermesPaths.HermesHome,
+		hermesPaths.EnvPath,
+		hermesPaths.EnvPath+".personastack.bak",
+		hermesPaths.ConfigPath,
+		hermesPaths.ConfigPath+".personastack.bak",
+	)
 	for _, path := range paths {
 		if err := lchownPathNoSymlinkAncestors(path, target.UID, target.GID); err != nil {
 			return fmt.Errorf("chown linux system scope path: %w", err)

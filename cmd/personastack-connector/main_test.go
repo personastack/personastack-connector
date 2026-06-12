@@ -1020,6 +1020,28 @@ func TestApplyOpenClawPairOptionsStoresOperatorCredential(t *testing.T) {
 	}
 }
 
+func TestApplyHermesPairOptionsStoresExplicitHome(t *testing.T) {
+	hermesHome := filepath.Join(t.TempDir(), ".hermes", "profiles", "homeschool")
+	binding := config.Binding{RuntimeKind: runtime.AdapterKindHermes}
+
+	err := applyHermesPairOptions(&binding, hermesHome)
+	if err != nil {
+		t.Fatalf("applyHermesPairOptions() error = %v", err)
+	}
+	if binding.HermesHome != hermesHome {
+		t.Fatalf("HermesHome = %q, want %q", binding.HermesHome, hermesHome)
+	}
+}
+
+func TestApplyHermesPairOptionsRejectsRelativeHome(t *testing.T) {
+	binding := config.Binding{RuntimeKind: runtime.AdapterKindHermes}
+
+	err := applyHermesPairOptions(&binding, "profiles/homeschool")
+	if err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("applyHermesPairOptions() error = %v, want absolute path", err)
+	}
+}
+
 func TestApplyOpenClawPairOptionsStoresEnvironmentCredential(t *testing.T) {
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "token-from-env")
 	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")

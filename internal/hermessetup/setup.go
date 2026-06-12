@@ -32,7 +32,7 @@ var (
 	lookPath     = exec.LookPath
 	startGateway = func(homeDir string, binary string) error {
 		cmd := exec.Command(binary, "gateway")
-		cmd.Env = os.Environ()
+		cmd.Env = append(os.Environ(), "HERMES_HOME="+strings.TrimSpace(homeDir))
 		cmd.Dir = strings.TrimSpace(homeDir)
 		cmd.Stdout = ioDiscard{}
 		cmd.Stderr = ioDiscard{}
@@ -83,18 +83,44 @@ type SetupReport struct {
 	GatewayStarted bool
 }
 
-func EnsureAPISetup(homeDir string) (SetupReport, error) {
-	envPath := filepath.Join(strings.TrimSpace(homeDir), ".hermes", ".env")
-	configPath := filepath.Join(strings.TrimSpace(homeDir), ".hermes", "config.yaml")
+type Paths struct {
+	HomeDir    string
+	HermesHome string
+	EnvPath    string
+	ConfigPath string
+}
 
-	apiKey, err := resolveAPIKey(envPath)
+func ResolvePaths(homeDir string, explicitHermesHome string) Paths {
+	trimmedHome := strings.TrimSpace(homeDir)
+	hermesHome := strings.TrimSpace(explicitHermesHome)
+	if hermesHome == "" {
+		hermesHome = strings.TrimSpace(os.Getenv("HERMES_HOME"))
+	}
+	if hermesHome == "" {
+		hermesHome = filepath.Join(trimmedHome, ".hermes")
+	}
+	hermesHome = filepath.Clean(hermesHome)
+	return Paths{
+		HomeDir:    trimmedHome,
+		HermesHome: hermesHome,
+		EnvPath:    filepath.Join(hermesHome, ".env"),
+		ConfigPath: filepath.Join(hermesHome, "config.yaml"),
+	}
+}
+
+func EnsureAPISetup(homeDir string) (SetupReport, error) {
+	return EnsureAPISetupForPaths(ResolvePaths(homeDir, ""))
+}
+
+func EnsureAPISetupForPaths(paths Paths) (SetupReport, error) {
+	apiKey, err := resolveAPIKey(paths.EnvPath)
 	if err != nil {
 		return SetupReport{}, err
 	}
 	if err := StoreAPIKey(apiKey); err != nil {
 		return SetupReport{}, err
 	}
-	envChanged, err := ensureEnvFile(envPath, map[string]string{
+	envChanged, err := ensureEnvFile(paths.EnvPath, map[string]string{
 		"API_SERVER_ENABLED": "true",
 		"API_SERVER_HOST":    defaultHermesHost,
 		"API_SERVER_PORT":    defaultHermesPort,
@@ -105,8 +131,8 @@ func EnsureAPISetup(homeDir string) (SetupReport, error) {
 	}
 	report := SetupReport{
 		State:      SetupStateReady,
-		EnvPath:    envPath,
-		ConfigPath: configPath,
+		EnvPath:    paths.EnvPath,
+		ConfigPath: paths.ConfigPath,
 		APIKey:     apiKey,
 	}
 	if !envChanged {
@@ -118,15 +144,16 @@ func EnsureAPISetup(homeDir string) (SetupReport, error) {
 }
 
 func Diagnose(homeDir string) SetupReport {
-	envPath := filepath.Join(strings.TrimSpace(homeDir), ".hermes", ".env")
-	configPath := filepath.Join(strings.TrimSpace(homeDir), ".hermes", "config.yaml")
+	return DiagnoseForPaths(ResolvePaths(homeDir, ""))
+}
 
+func DiagnoseForPaths(paths Paths) SetupReport {
 	report := SetupReport{
 		State:      SetupStateNeedsGateway,
-		EnvPath:    envPath,
-		ConfigPath: configPath,
+		EnvPath:    paths.EnvPath,
+		ConfigPath: paths.ConfigPath,
 	}
-	env, err := loadEnvState(envPath)
+	env, err := loadEnvState(paths.EnvPath)
 	if err != nil {
 		report.State = SetupStateNeedsEnv
 		report.Note = err.Error()
@@ -138,7 +165,7 @@ func Diagnose(homeDir string) SetupReport {
 		report.Note = strings.Join(envProblems, "; ")
 		return report
 	}
-	if !hasHermesConfig(configPath) {
+	if !hasHermesConfig(paths.ConfigPath) {
 		report.State = SetupStateNeedsConfig
 		report.Note = "Hermes config missing mcp_servers entry"
 		return report
@@ -194,7 +221,7 @@ func loadAPIKeyFromDefaultEnvFile() string {
 	if err != nil {
 		return ""
 	}
-	state, err := loadEnvState(filepath.Join(homeDir, ".hermes", ".env"))
+	state, err := loadEnvState(ResolvePaths(homeDir, "").EnvPath)
 	if err != nil {
 		return ""
 	}
@@ -202,6 +229,10 @@ func loadAPIKeyFromDefaultEnvFile() string {
 }
 
 func TryStartGateway(homeDir string) (bool, error) {
+	return TryStartGatewayForPaths(ResolvePaths(homeDir, ""))
+}
+
+func TryStartGatewayForPaths(paths Paths) (bool, error) {
 	if os.Getenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START") == "1" {
 		return false, nil
 	}
@@ -212,7 +243,7 @@ func TryStartGateway(homeDir string) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	if err := startGateway(homeDir, binary); err != nil {
+	if err := startGateway(paths.HermesHome, binary); err != nil {
 		return false, fmt.Errorf("start Hermes gateway: %w", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)

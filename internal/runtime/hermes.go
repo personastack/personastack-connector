@@ -978,6 +978,10 @@ func hermesToolListCapabilities(ctx context.Context, nativeMCPServerName string)
 }
 
 func VerifyHermesMCPServerLoaded(ctx context.Context, nativeMCPServerName string) HermesMCPRegistryCheck {
+	return VerifyHermesMCPServerLoadedWithHome(ctx, nativeMCPServerName, "")
+}
+
+func VerifyHermesMCPServerLoadedWithHome(ctx context.Context, nativeMCPServerName string, hermesHome string) HermesMCPRegistryCheck {
 	serverName := strings.TrimSpace(nativeMCPServerName)
 	if serverName == "" {
 		return HermesMCPRegistryCheck{Note: "Hermes MCP server name missing"}
@@ -987,6 +991,9 @@ func VerifyHermesMCPServerLoaded(ctx context.Context, nativeMCPServerName string
 		return HermesMCPRegistryCheck{Note: err.Error()}
 	}
 	command := hermesToolsListCommand(ctx, hermesBin, "tools", "list", "--platform", "api_server")
+	if strings.TrimSpace(hermesHome) != "" {
+		command.Env = append(os.Environ(), "HERMES_HOME="+strings.TrimSpace(hermesHome))
+	}
 	raw, err := command.Output()
 	if err != nil {
 		return HermesMCPRegistryCheck{Note: fmt.Sprintf("Hermes tools list: %v", err)}

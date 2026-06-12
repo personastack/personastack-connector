@@ -64,6 +64,7 @@ func (ExecRunner) Run(name string, args ...string) error {
 
 type Installer struct {
 	HomeDir        string
+	HermesHome     string
 	ExecutablePath string
 	GOOS           string
 	Scope          ServiceScope
@@ -276,13 +277,14 @@ func (installer Installer) installLaunchAgent(homeDir string, executablePath str
     <string>run</string>
     <string>--foreground</string>
   </array>
+%s
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(executablePath), xmlEscape(filepath.Join(homeDir, "Library", "Logs", "personastack-connector.log")), xmlEscape(filepath.Join(homeDir, "Library", "Logs", "personastack-connector.err.log")))
+`, launchdLabel, xmlEscape(executablePath), launchdEnvironmentVariables(installer.HermesHome), xmlEscape(filepath.Join(homeDir, "Library", "Logs", "personastack-connector.log")), xmlEscape(filepath.Join(homeDir, "Library", "Logs", "personastack-connector.err.log")))
 	if err := writeOwnerOnly(path, []byte(plist)); err != nil {
 		return InstallResult{}, err
 	}
@@ -325,6 +327,7 @@ func (installer Installer) installLaunchDaemon(executablePath string) (InstallRe
     <string>--service-scope</string>
     <string>system</string>
   </array>
+%s
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
@@ -333,7 +336,7 @@ func (installer Installer) installLaunchDaemon(executablePath string) (InstallRe
   <key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-`, launchdLabel, xmlEscape(executablePath), xmlEscape(filepath.Join(logDir, "personastack-connector.log")), xmlEscape(filepath.Join(logDir, "personastack-connector.err.log")))
+`, launchdLabel, xmlEscape(executablePath), launchdEnvironmentVariables(installer.HermesHome), xmlEscape(filepath.Join(logDir, "personastack-connector.log")), xmlEscape(filepath.Join(logDir, "personastack-connector.err.log")))
 	err = os.MkdirAll(logDir, 0o755)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("create service log dir: %w", err)
@@ -484,13 +487,14 @@ func (installer Installer) installSystemdUser(homeDir string, executablePath str
 Description=PersonaStack Connector
 
 [Service]
+%s
 ExecStart=%s run --foreground
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=default.target
-`, systemdQuote(executablePath))
+`, systemdEnvironmentLine("HERMES_HOME", installer.HermesHome), systemdQuote(executablePath))
 	if err := writeOwnerOnly(path, []byte(unit)); err != nil {
 		return InstallResult{}, err
 	}
@@ -519,6 +523,7 @@ Wants=network-online.target
 Type=simple
 User=%s
 Environment=%s
+%s
 WorkingDirectory=%s
 ExecStart=%s run --foreground --service-scope %s
 Restart=always
@@ -526,7 +531,7 @@ RestartSec=30
 
 [Install]
 WantedBy=multi-user.target
-`, systemdValue(target.Username), systemdQuote("HOME="+target.HomeDir), systemdQuote(target.HomeDir), systemdQuote(executablePath), ServiceScopeLinuxSystemService)
+`, systemdValue(target.Username), systemdQuote("HOME="+target.HomeDir), systemdEnvironmentLine("HERMES_HOME", installer.HermesHome), systemdQuote(target.HomeDir), systemdQuote(executablePath), ServiceScopeLinuxSystemService)
 	if err := writeSystemServiceFile(path, []byte(unit)); err != nil {
 		return InstallResult{}, err
 	}
@@ -545,9 +550,9 @@ func (installer Installer) installLinuxAutostart(homeDir string, executablePath 
 	entry := fmt.Sprintf(`[Desktop Entry]
 Type=Application
 Name=PersonaStack Connector
-Exec=%s run --foreground
+Exec=%s
 X-GNOME-Autostart-enabled=true
-`, desktopExecQuote(executablePath))
+`, desktopExecCommand(executablePath, installer.HermesHome, "run --foreground"))
 	if err := writeOwnerOnly(path, []byte(entry)); err != nil {
 		return InstallResult{}, err
 	}
@@ -822,6 +827,23 @@ func xmlEscape(value string) string {
 	return html.EscapeString(strings.TrimSpace(value))
 }
 
+func launchdEnvironmentVariables(hermesHome string) string {
+	value := strings.TrimSpace(hermesHome)
+	if value == "" {
+		return ""
+	}
+	return fmt.Sprintf("  <key>EnvironmentVariables</key>\n  <dict>\n    <key>HERMES_HOME</key><string>%s</string>\n  </dict>\n", xmlEscape(value))
+}
+
+func systemdEnvironmentLine(name string, value string) string {
+	trimmedName := strings.TrimSpace(name)
+	trimmedValue := strings.TrimSpace(value)
+	if trimmedName == "" || trimmedValue == "" {
+		return ""
+	}
+	return "Environment=" + systemdQuote(trimmedName+"="+trimmedValue) + "\n"
+}
+
 func systemdQuote(value string) string {
 	escaped := strings.ReplaceAll(strings.TrimSpace(value), `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
@@ -836,6 +858,14 @@ func desktopExecQuote(value string) string {
 	escaped := strings.ReplaceAll(strings.TrimSpace(value), `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	return `"` + escaped + `"`
+}
+
+func desktopExecCommand(executablePath string, hermesHome string, args string) string {
+	trimmedHermesHome := strings.TrimSpace(hermesHome)
+	if trimmedHermesHome == "" {
+		return desktopExecQuote(executablePath) + " " + strings.TrimSpace(args)
+	}
+	return "env HERMES_HOME=" + desktopExecQuote(trimmedHermesHome) + " " + desktopExecQuote(executablePath) + " " + strings.TrimSpace(args)
 }
 
 func shellQuote(value string) string {

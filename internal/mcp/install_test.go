@@ -75,6 +75,36 @@ func TestInstallerWritesHermesNativeHTTPServer(t *testing.T) {
 	}
 }
 
+func TestInstallerWritesHermesNativeHTTPServerToProfileHome(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+	homeDir := t.TempDir()
+	hermesHome := filepath.Join(homeDir, ".hermes", "profiles", "homeschool")
+	nestedHome := filepath.Join(hermesHome, "home")
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:    "conn-1",
+		PersonaID:       "persona-1",
+		RuntimeKind:     runtime.AdapterKindHermes,
+		NativeMCPServer: "personastack-conn-1",
+		HermesHome:      hermesHome,
+		PersonaMCPURL:   "https://mcp.personastack.ai/mcp",
+		PersonaMCPToken: "secret-mcp-token",
+	}}})
+
+	results, err := (Installer{Store: store, HomeDir: nestedHome, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll()
+	if err != nil {
+		t.Fatalf("InstallAll() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Path != filepath.Join(hermesHome, "config.yaml") {
+		t.Fatalf("unexpected results: %+v", results)
+	}
+	if _, err := os.Stat(filepath.Join(hermesHome, "config.yaml")); err != nil {
+		t.Fatalf("Hermes profile config missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(nestedHome, ".hermes", "config.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("nested HOME Hermes config exists or stat failed: %v", err)
+	}
+}
+
 func withHermesRegistryCheck(t *testing.T, fn func(context.Context, string) runtime.HermesMCPRegistryCheck) {
 	t.Helper()
 	previous := verifyHermesRuntimeMCPRegistry

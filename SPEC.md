@@ -67,7 +67,8 @@ external persona.
   prompt upgrades when recommended releases advance.
 - Each binding has one PersonaStack connection id, persona id, external agent
   kind, bridge credential, PersonaStack MCP credential, native MCP server name,
-  local runtime selection, and local readiness state.
+  local runtime selection, optional Hermes profile home, and local readiness
+  state.
 - Local assignment state is persisted until the API has acknowledged a terminal
   run event.
 - Redelivered `run.start` frames for the currently active run id must reuse the
@@ -113,6 +114,7 @@ external persona.
 - `personastack-connector pair <code> --runtime auto`
 - `personastack-connector pair <code> --runtime hermes`
 - `personastack-connector pair <code> --runtime openclaw`
+- `personastack-connector pair <code> --runtime hermes --hermes-home <path>`
 - `personastack-connector pair <code> --service-scope user`
 - `personastack-connector pair <code> --service-scope system`
 - `personastack-connector status`
@@ -120,6 +122,7 @@ external persona.
 - `personastack-connector runtime detect`
 - `personastack-connector runtime repair`
 - `personastack-connector mcp install`
+- `personastack-connector runtime hermes configure --hermes-home <path>`
 - `personastack-connector mcp repair`
 - `personastack-connector mcp stdio --binding <connection_id>`
 - `personastack-connector run --foreground`
@@ -261,6 +264,12 @@ Adapter result states must be concrete typed enums, including:
   per-binding native MCP server name; config edits must be atomic and keep an
   owner-only backup of the prior config.
 - Map Hermes native run events to Connector protocol run events.
+- Hermes named profiles are supported by resolving the active Hermes home as:
+  explicit `--hermes-home`, stored binding `HermesHome`, `HERMES_HOME`, then
+  `$HOME/.hermes`. Connector writes `config.yaml` and `.env`, runs
+  `hermes gateway`, verifies `hermes tools list`, and generates persistent
+  services against that same Hermes home. Connector must not emulate profile
+  selection by rewriting `HOME` into a nested profile home.
 - Treat cancellation as best-effort until Hermes returns terminal state or the
   Connector cancellation timeout expires.
 - Hermes runtime feature discovery uses `/v1/capabilities` and reports verified

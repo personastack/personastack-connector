@@ -44,6 +44,7 @@ type Binding struct {
 	BridgePublicKey         string
 	NativeMCPServer         string
 	NativeMCPNamespace      string
+	HermesHome              string
 	OpenClawAgentID         string
 	OpenClawGatewayToken    string
 	OpenClawPassword        string

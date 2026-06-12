@@ -154,6 +154,28 @@ func TestEnsureAPISetupFallbackDoesNotReadWrongHomeEnv(t *testing.T) {
 	}
 }
 
+func TestEnsureAPISetupUsesResolvedHermesHome(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	homeDir := t.TempDir()
+	hermesHome := filepath.Join(homeDir, ".hermes", "profiles", "homeschool")
+	paths := ResolvePaths(filepath.Join(hermesHome, "home"), hermesHome)
+
+	report, err := EnsureAPISetupForPaths(paths)
+	if err != nil {
+		t.Fatalf("EnsureAPISetupForPaths() error = %v", err)
+	}
+	if report.EnvPath != filepath.Join(hermesHome, ".env") {
+		t.Fatalf("EnvPath = %q", report.EnvPath)
+	}
+	if _, err := os.Stat(filepath.Join(hermesHome, ".env")); err != nil {
+		t.Fatalf("Hermes profile env not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(hermesHome, "home", ".hermes", ".env")); !os.IsNotExist(err) {
+		t.Fatalf("nested HOME Hermes env exists or stat failed: %v", err)
+	}
+}
+
 func TestDiagnoseReportsMissingHermesSetup(t *testing.T) {
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	homeDir := t.TempDir()

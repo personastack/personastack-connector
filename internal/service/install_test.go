@@ -104,6 +104,32 @@ func TestInstallerWritesSystemdSystemUnit(t *testing.T) {
 	}
 }
 
+func TestInstallerWritesHermesHomeToSystemdSystemUnit(t *testing.T) {
+	homeDir := t.TempDir()
+	hermesHome := filepath.Join(homeDir, ".hermes", "profiles", "homeschool")
+	systemRoot := t.TempDir()
+	runner := &recordingRunner{}
+	_, err := (Installer{
+		HomeDir:        homeDir,
+		HermesHome:     hermesHome,
+		ExecutablePath: "/opt/personastack-connector",
+		GOOS:           "linux",
+		ServiceScope:   ServiceScopeLinuxSystemService,
+		SystemRoot:     systemRoot,
+		Runner:         runner,
+	}).Install()
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(systemRoot, "etc", "systemd", "system", "personastack-connector.service"))
+	if err != nil {
+		t.Fatalf("read unit: %v", err)
+	}
+	if !strings.Contains(string(raw), `Environment="HERMES_HOME=`+hermesHome+`"`) {
+		t.Fatalf("unit missing HERMES_HOME:\n%s", string(raw))
+	}
+}
+
 func TestInstallerPlansServiceWithoutWritingFiles(t *testing.T) {
 	tests := []struct {
 		goos     string

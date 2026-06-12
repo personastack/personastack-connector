@@ -100,6 +100,7 @@ func (installer Installer) InstallBinding(binding config.Binding) (InstallResult
 
 func (installer Installer) installBinding(homeDir string, executablePath string, binding config.Binding) (InstallResult, error) {
 	server := stdioServer(binding, executablePath)
+	hermesPaths := hermessetup.ResolvePaths(homeDir, binding.HermesHome)
 	transport := installer.Transport
 	if transport == MCPProxyTransportAuto {
 		return installer.installBindingNativeHTTP(homeDir, binding, server.Name)
@@ -109,19 +110,19 @@ func (installer Installer) installBinding(homeDir string, executablePath string,
 	}
 	switch binding.RuntimeKind {
 	case runtime.AdapterKindHermes:
-		setupReport, err := hermessetup.EnsureAPISetup(homeDir)
+		setupReport, err := hermessetup.EnsureAPISetupForPaths(hermesPaths)
 		if err != nil {
 			return InstallResult{}, err
 		}
-		path := filepath.Join(homeDir, ".hermes", "config.yaml")
+		path := hermesPaths.ConfigPath
 		if err := upsertHermesServer(path, server); err == nil {
 			result := InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name, Note: setupReport.Note}
-			if started, err := hermessetup.TryStartGateway(homeDir); err != nil {
+			if started, err := hermessetup.TryStartGatewayForPaths(hermesPaths); err != nil {
 				return InstallResult{}, err
 			} else if started {
 				result.Note = appendNote(result.Note, "Hermes gateway start attempted")
 			}
-			diagnostic := hermessetup.Diagnose(homeDir)
+			diagnostic := hermessetup.DiagnoseForPaths(hermesPaths)
 			if strings.TrimSpace(diagnostic.Note) != "" {
 				result.Note = appendNote(result.Note, diagnostic.Note)
 			}
@@ -167,11 +168,12 @@ func (installer Installer) installBindingNativeHTTP(homeDir string, binding conf
 	}
 	switch binding.RuntimeKind {
 	case runtime.AdapterKindHermes:
-		setupReport, err := hermessetup.EnsureAPISetup(homeDir)
+		hermesPaths := hermessetup.ResolvePaths(homeDir, binding.HermesHome)
+		setupReport, err := hermessetup.EnsureAPISetupForPaths(hermesPaths)
 		if err != nil {
 			return InstallResult{}, err
 		}
-		path := filepath.Join(homeDir, ".hermes", "config.yaml")
+		path := hermesPaths.ConfigPath
 		if err := upsertHermesNativeHTTPServer(path, server, binding, installer.preservedNativeServerNames()); err != nil {
 			return InstallResult{}, err
 		}
@@ -182,12 +184,12 @@ func (installer Installer) installBindingNativeHTTP(homeDir string, binding conf
 			ServerName:   server.Name,
 			Note:         setupReport.Note,
 		}
-		if started, err := hermessetup.TryStartGateway(homeDir); err != nil {
+		if started, err := hermessetup.TryStartGatewayForPaths(hermesPaths); err != nil {
 			return InstallResult{}, err
 		} else if started {
 			result.Note = appendNote(result.Note, "Hermes gateway start attempted")
 		}
-		diagnostic := hermessetup.Diagnose(homeDir)
+		diagnostic := hermessetup.DiagnoseForPaths(hermesPaths)
 		if strings.TrimSpace(diagnostic.Note) != "" {
 			result.Note = appendNote(result.Note, diagnostic.Note)
 		}
@@ -260,15 +262,15 @@ func (installer Installer) installBindingLoopbackHTTP(homeDir string, binding co
 	}
 	switch binding.RuntimeKind {
 	case runtime.AdapterKindHermes:
-		setupReport, err := hermessetup.EnsureAPISetup(homeDir)
+		hermesPaths := hermessetup.ResolvePaths(homeDir, binding.HermesHome)
+		setupReport, err := hermessetup.EnsureAPISetupForPaths(hermesPaths)
 		if err != nil {
 			return InstallResult{}, err
 		}
-		envPath := filepath.Join(homeDir, ".hermes", ".env")
-		if err := upsertHermesLoopbackHTTPEnv(envPath, loopback.EnvironmentVariable, loopback.Token); err != nil {
+		if err := upsertHermesLoopbackHTTPEnv(hermesPaths.EnvPath, loopback.EnvironmentVariable, loopback.Token); err != nil {
 			return InstallResult{}, err
 		}
-		path := filepath.Join(homeDir, ".hermes", "config.yaml")
+		path := hermesPaths.ConfigPath
 		if err := upsertHermesLoopbackHTTPServer(path, server, loopback); err != nil {
 			return InstallResult{}, err
 		}
@@ -315,7 +317,7 @@ func VerifyBinding(homeDir string, binding config.Binding) VerifyResult {
 	}
 	switch binding.RuntimeKind {
 	case runtime.AdapterKindHermes:
-		result.Path = filepath.Join(homeDir, ".hermes", "config.yaml")
+		result.Path = hermessetup.ResolvePaths(homeDir, binding.HermesHome).ConfigPath
 		result.State, result.Note = verifyHermesServer(result.Path, serverName, binding)
 	case runtime.AdapterKindOpenClaw:
 		result.Path = openClawConfigPath(homeDir)
@@ -366,7 +368,7 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 		return result
 	}
 	if binding.RuntimeKind == runtime.AdapterKindHermes {
-		hermesLive := verifyHermesRuntimeMCPRegistry(ctx, result.ServerName)
+		hermesLive := verifyHermesRuntimeMCPRegistryForHome(ctx, result.ServerName, binding.HermesHome)
 		if !hermesLive.OK {
 			result.Note = appendNote(result.Note, live.Note, hermesLive.Note)
 			result.DiagnosticCode = "native_mcp_unreachable"
@@ -381,6 +383,13 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 	result.Note = result.Note + "; " + live.Note + "; native runtime restart may be required"
 	result.DiagnosticCode = ""
 	return result
+}
+
+func verifyHermesRuntimeMCPRegistryForHome(ctx context.Context, serverName string, hermesHome string) runtime.HermesMCPRegistryCheck {
+	if strings.TrimSpace(hermesHome) == "" {
+		return verifyHermesRuntimeMCPRegistry(ctx, serverName)
+	}
+	return runtime.VerifyHermesMCPServerLoadedWithHome(ctx, serverName, hermesHome)
 }
 
 func isLoopbackHTTPConfig(note string) bool {
