@@ -221,8 +221,12 @@ func (cmd command) runPair(args []string) error {
 	if err != nil {
 		return err
 	}
+	normalizedHermesHome, err := normalizeHermesHome(hermesHome)
+	if err != nil {
+		return err
+	}
 	if kind == runtime.AdapterKindAuto {
-		detectedKind, err := detectSingleReadyRuntimeForHermesHome(hermesHome)
+		detectedKind, err := detectSingleReadyRuntimeForHermesHome(normalizedHermesHome)
 		if err != nil {
 			return err
 		}
@@ -454,15 +458,27 @@ func applyHermesPairOptions(binding *config.Binding, explicitHermesHome string) 
 		return nil
 	}
 	selected := firstNonEmpty(explicitHermesHome, binding.HermesHome, os.Getenv("HERMES_HOME"))
-	if selected == "" {
-		return nil
+	cleaned, err := normalizeHermesHome(selected)
+	if err != nil {
+		return err
 	}
-	cleaned := filepath.Clean(selected)
-	if !filepath.IsAbs(cleaned) {
-		return fmt.Errorf("Hermes home must be an absolute path: %s", selected)
+	if cleaned == "" {
+		return nil
 	}
 	binding.HermesHome = cleaned
 	return nil
+}
+
+func normalizeHermesHome(value string) (string, error) {
+	selected := strings.TrimSpace(value)
+	if selected == "" {
+		return "", nil
+	}
+	cleaned := filepath.Clean(selected)
+	if !filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("Hermes home must be an absolute path: %s", selected)
+	}
+	return cleaned, nil
 }
 
 func openClawPairCredentialAvailable(options openClawPairOptions, binding config.Binding) bool {

@@ -1106,6 +1106,17 @@ func TestDetectSingleReadyRuntimeUsesHermesHome(t *testing.T) {
 	}
 }
 
+func TestRunPairAutoRejectsRelativeHermesHomeBeforeDetect(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Run(context.Background(), []string{"pair", "PAIR-123", "--runtime", "auto", "--hermes-home", "profiles/homeschool"}, strings.NewReader(""), &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("Run() error = %v, want absolute path", err)
+	}
+}
+
 func TestApplyOpenClawPairOptionsStoresEnvironmentCredential(t *testing.T) {
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "token-from-env")
 	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
