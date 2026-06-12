@@ -1085,6 +1085,9 @@ func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding
 }
 
 func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
+	if binding.RuntimeKind == runtime.AdapterKindHermes && strings.TrimSpace(binding.HermesHome) != "" {
+		return runtime.NewHermesAdapterForHome(getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), binding.HermesHome)
+	}
 	if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
 		return runtime.NewAdapter(binding.RuntimeKind)
 	}

@@ -69,6 +69,32 @@ func readFrameOfType(t *testing.T, conn *websocket.Conn, want externalagentproto
 	}
 }
 
+func TestRunnerAdapterForBindingUsesHermesHome(t *testing.T) {
+	homeDir := t.TempDir()
+	hermesHome := filepath.Join(t.TempDir(), "hermes-profile")
+	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
+		t.Fatalf("create Hermes home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hermesHome, ".env"), []byte("API_SERVER_KEY=profile-key\n"), 0o600); err != nil {
+		t.Fatalf("write Hermes env: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	t.Setenv("HERMES_API_SERVER_KEY", "")
+
+	runner := Runner{}
+	adapter, ok := runner.adapterForBinding(config.Binding{
+		RuntimeKind: runtime.AdapterKindHermes,
+		HermesHome:  hermesHome,
+	}).(runtime.HermesAdapter)
+	if !ok {
+		t.Fatalf("adapter type = %T, want runtime.HermesAdapter", adapter)
+	}
+	if adapter.APIKey != "profile-key" {
+		t.Fatalf("APIKey = %q, want profile-key", adapter.APIKey)
+	}
+}
+
 func TestRunnerStaysAliveWhenLoopbackProxyCannotBind(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

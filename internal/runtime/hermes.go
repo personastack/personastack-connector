@@ -55,6 +55,19 @@ func NewHermesAdapter(baseURL string, apiKey string) HermesAdapter {
 	return HermesAdapter{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: strings.TrimSpace(apiKey), Client: defaultHTTPClient()}
 }
 
+func NewHermesAdapterForHome(baseURL string, hermesHome string) HermesAdapter {
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = defaultHermesURL
+	}
+	homeDir, _ := os.UserHomeDir()
+	paths := hermessetup.ResolvePaths(homeDir, hermesHome)
+	return HermesAdapter{
+		BaseURL: strings.TrimRight(baseURL, "/"),
+		APIKey:  strings.TrimSpace(hermessetup.LoadAPIKeyForPaths(paths)),
+		Client:  defaultHTTPClient(),
+	}
+}
+
 func (adapter HermesAdapter) Kind() AdapterKind {
 	return AdapterKindHermes
 }

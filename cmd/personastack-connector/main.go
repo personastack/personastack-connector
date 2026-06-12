@@ -222,7 +222,7 @@ func (cmd command) runPair(args []string) error {
 		return err
 	}
 	if kind == runtime.AdapterKindAuto {
-		detectedKind, err := detectSingleReadyRuntime()
+		detectedKind, err := detectSingleReadyRuntimeForHermesHome(hermesHome)
 		if err != nil {
 			return err
 		}
@@ -338,12 +338,20 @@ type runtimeDetectionReport struct {
 }
 
 func collectRuntimeDetectionReport() runtimeDetectionReport {
+	return collectRuntimeDetectionReportForHermesHome("")
+}
+
+func collectRuntimeDetectionReportForHermesHome(hermesHome string) runtimeDetectionReport {
 	report := runtimeDetectionReport{
 		detections: make([]runtime.Detection, 0, 2),
 		readyKinds: make([]runtime.AdapterKind, 0, 2),
 	}
 	for _, kind := range []runtime.AdapterKind{runtime.AdapterKindHermes, runtime.AdapterKindOpenClaw} {
-		detection := adapterForRuntimeKind(kind).Detect()
+		adapter := adapterForRuntimeKind(kind)
+		if kind == runtime.AdapterKindHermes && strings.TrimSpace(hermesHome) != "" {
+			adapter = runtime.NewHermesAdapterForHome(os.Getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), hermesHome)
+		}
+		detection := adapter.Detect()
 		report.detections = append(report.detections, detection)
 		if detection.State == runtime.AdapterStateReady {
 			report.readyKinds = append(report.readyKinds, kind)
@@ -758,7 +766,11 @@ func (cmd command) runRuntimeOpenClaw(args []string) error {
 }
 
 func detectSingleReadyRuntime() (runtime.AdapterKind, error) {
-	report := collectRuntimeDetectionReport()
+	return detectSingleReadyRuntimeForHermesHome("")
+}
+
+func detectSingleReadyRuntimeForHermesHome(hermesHome string) (runtime.AdapterKind, error) {
+	report := collectRuntimeDetectionReportForHermesHome(hermesHome)
 	switch len(report.readyKinds) {
 	case 1:
 		return report.readyKinds[0], nil
@@ -770,6 +782,9 @@ func detectSingleReadyRuntime() (runtime.AdapterKind, error) {
 }
 
 func adapterForBinding(binding config.Binding) runtime.Adapter {
+	if binding.RuntimeKind == runtime.AdapterKindHermes && strings.TrimSpace(binding.HermesHome) != "" {
+		return runtime.NewHermesAdapterForHome(os.Getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), binding.HermesHome)
+	}
 	if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
 		return runtime.NewAdapter(binding.RuntimeKind)
 	}

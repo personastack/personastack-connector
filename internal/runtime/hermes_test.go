@@ -360,6 +360,25 @@ func TestVerifyHermesMCPServerLoadedUsesHermesHome(t *testing.T) {
 	}
 }
 
+func TestNewHermesAdapterForHomeLoadsProfileEnvKey(t *testing.T) {
+	homeDir := t.TempDir()
+	profileHome := filepath.Join(t.TempDir(), "hermes-profile")
+	if err := os.MkdirAll(profileHome, 0o700); err != nil {
+		t.Fatalf("create profile home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(profileHome, ".env"), []byte("API_SERVER_KEY=profile-key\n"), 0o600); err != nil {
+		t.Fatalf("write profile env: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	t.Setenv("HERMES_API_SERVER_KEY", "")
+
+	adapter := NewHermesAdapterForHome("http://127.0.0.1:8642", profileHome)
+	if adapter.APIKey != "profile-key" {
+		t.Fatalf("APIKey = %q, want profile-key", adapter.APIKey)
+	}
+}
+
 func TestHermesAdapterDetectRequiresRunLifecycleFeatures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

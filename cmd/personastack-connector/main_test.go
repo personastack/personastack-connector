@@ -1042,6 +1042,70 @@ func TestApplyHermesPairOptionsRejectsRelativeHome(t *testing.T) {
 	}
 }
 
+func TestAdapterForBindingUsesHermesHome(t *testing.T) {
+	homeDir := t.TempDir()
+	hermesHome := filepath.Join(t.TempDir(), "hermes-profile")
+	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
+		t.Fatalf("create Hermes home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hermesHome, ".env"), []byte("API_SERVER_KEY=profile-key\n"), 0o600); err != nil {
+		t.Fatalf("write Hermes env: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	t.Setenv("HERMES_API_SERVER_KEY", "")
+
+	adapter, ok := adapterForBinding(config.Binding{
+		RuntimeKind: runtime.AdapterKindHermes,
+		HermesHome:  hermesHome,
+	}).(runtime.HermesAdapter)
+	if !ok {
+		t.Fatalf("adapter type = %T, want runtime.HermesAdapter", adapter)
+	}
+	if adapter.APIKey != "profile-key" {
+		t.Fatalf("APIKey = %q, want profile-key", adapter.APIKey)
+	}
+}
+
+func TestDetectSingleReadyRuntimeUsesHermesHome(t *testing.T) {
+	homeDir := t.TempDir()
+	hermesHome := filepath.Join(t.TempDir(), "hermes-profile")
+	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
+		t.Fatalf("create Hermes home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hermesHome, ".env"), []byte("API_SERVER_KEY=profile-key\n"), 0o600); err != nil {
+		t.Fatalf("write Hermes env: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/health/detailed", "/v1/models":
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/v1/capabilities":
+			if r.Header.Get("Authorization") != "Bearer profile-key" {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			_, _ = w.Write([]byte(`{"features":{"run_submission":true,"run_status":true,"run_events_sse":true,"run_stop":true}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	t.Setenv("HERMES_API_SERVER_KEY", "")
+	t.Setenv("PERSONASTACK_CONNECTOR_HERMES_URL", server.URL)
+	t.Setenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL", "ws://127.0.0.1:1")
+
+	kind, err := detectSingleReadyRuntimeForHermesHome(hermesHome)
+	if err != nil {
+		t.Fatalf("detectSingleReadyRuntimeForHermesHome() error = %v", err)
+	}
+	if kind != runtime.AdapterKindHermes {
+		t.Fatalf("kind = %s, want hermes", kind)
+	}
+}
+
 func TestApplyOpenClawPairOptionsStoresEnvironmentCredential(t *testing.T) {
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "token-from-env")
 	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")

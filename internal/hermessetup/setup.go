@@ -187,6 +187,16 @@ func LoadAPIKey() string {
 	return loadAPIKeyFromDefaultEnvFile()
 }
 
+func LoadAPIKeyForPaths(paths Paths) string {
+	state, err := loadEnvState(paths.EnvPath)
+	if err == nil {
+		if key := strings.TrimSpace(findEnvValue(state, "API_SERVER_KEY")); key != "" {
+			return key
+		}
+	}
+	return loadStoredAPIKey()
+}
+
 func loadStoredAPIKey() string {
 	if shouldUseEnvAPIKeyOnly() {
 		return strings.TrimSpace(os.Getenv("HERMES_API_SERVER_KEY"))
