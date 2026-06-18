@@ -1975,8 +1975,8 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 	close(ackSent)
 	select {
 	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("run binding session: %v", err)
+		if err == nil || !strings.Contains(err.Error(), "read gateway websocket frame") {
+			t.Fatalf("run binding session error = %v, want retryable read failure", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for runner shutdown")
@@ -3206,6 +3206,222 @@ func TestRunnerReconnectsWhenWebsocketReadDeadlineExpires(t *testing.T) {
 	}
 	if firstGeneration != 2 || secondGeneration != 3 {
 		t.Fatalf("unexpected reconnect generations: first=%d second=%d", firstGeneration, secondGeneration)
+	}
+}
+
+func TestRunnerEstablishedWebsocketReadFailuresBackoff(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	connectTimes := make(chan time.Time, 3)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		}); err != nil {
+			t.Fatalf("write connect accepted: %v", err)
+		}
+		var heartbeat externalagentprotocol.Frame
+		if err := conn.ReadJSON(&heartbeat); err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		connectTimes <- time.Now()
+	}))
+	defer gateway.Close()
+
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ConnectionGeneration: 1,
+		GatewayWebsocketURL:  "ws" + gateway.URL[len("http"):],
+		BridgeCredentialID:   "cred-1",
+		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:          runtime.AdapterKindAuto,
+		HasBridgeSecret:      true,
+	}}})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: &store, ReconnectMin: 20 * time.Millisecond, ReconnectMax: 80 * time.Millisecond}).RunForeground(ctx)
+	}()
+
+	times := make([]time.Time, 0, 3)
+	for len(times) < 3 {
+		select {
+		case at := <-connectTimes:
+			times = append(times, at)
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatal("timed out waiting for reconnect attempts")
+		}
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run foreground: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+	firstDelay := times[1].Sub(times[0])
+	secondDelay := times[2].Sub(times[1])
+	if firstDelay < 15*time.Millisecond {
+		t.Fatalf("first reconnect delay = %s, want at least reconnect min", firstDelay)
+	}
+	if secondDelay < 35*time.Millisecond {
+		t.Fatalf("second reconnect delay = %s, want increased backoff", secondDelay)
+	}
+}
+
+func TestRunnerServerDrainingReconnectWaitsBeforeFreshGeneration(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	connectTimes := make(chan time.Time, 2)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV2,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		}); err != nil {
+			t.Fatalf("write connect accepted: %v", err)
+		}
+		var heartbeat externalagentprotocol.Frame
+		if err := conn.ReadJSON(&heartbeat); err != nil {
+			t.Fatalf("read heartbeat: %v", err)
+		}
+		connectTimes <- time.Now()
+		if connectFrame.Connect.ConnectionGeneration == 2 {
+			_ = conn.WriteJSON(externalagentprotocol.Frame{
+				MessageType:  externalagentprotocol.FrameTypeServerDraining,
+				PersonaID:    "persona-1",
+				ConnectionID: "conn-1",
+				SentAt:       time.Now().UTC(),
+				ServerDraining: &externalagentprotocol.ServerDrainingPayload{
+					DeadlineAt: time.Now().UTC().Add(45 * time.Millisecond),
+					Reason:     "test drain",
+				},
+			})
+			return
+		}
+		cancel()
+	}))
+	defer gateway.Close()
+
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ConnectionGeneration: 1,
+		GatewayWebsocketURL:  "ws" + gateway.URL[len("http"):],
+		BridgeCredentialID:   "cred-1",
+		BridgePrivateKey:     base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:      base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:          runtime.AdapterKindAuto,
+		HasBridgeSecret:      true,
+	}}})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: &store, ReconnectMin: 20 * time.Millisecond, ReconnectMax: 100 * time.Millisecond}).RunForeground(ctx)
+	}()
+
+	times := make([]time.Time, 0, 2)
+	for len(times) < 2 {
+		select {
+		case at := <-connectTimes:
+			times = append(times, at)
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatal("timed out waiting for drain reconnect")
+		}
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run foreground: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+	if delay := times[1].Sub(times[0]); delay < 35*time.Millisecond {
+		t.Fatalf("drain reconnect delay = %s, want drain deadline wait", delay)
+	}
+}
+
+func TestRunnerStartupFailureBackoffSkipsForegroundTicks(t *testing.T) {
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ConnectionGeneration: 1,
+		GatewayWebsocketURL:  "ws://127.0.0.1:1",
+		BridgeCredentialID:   "cred-1",
+		BridgePrivateKey:     "not-base64",
+		BridgePublicKey:      "not-base64",
+		RuntimeKind:          runtime.AdapterKindAuto,
+	}}})
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{Store: &store, ReconnectMin: 20 * time.Millisecond, ReconnectMax: 80 * time.Millisecond}).RunForeground(ctx)
+	}()
+
+	time.Sleep(55 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run foreground: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+	binding, ok := store.Binding("conn-1")
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	if binding.ConnectionGeneration > 3 {
+		t.Fatalf("connection generation = %d, want startup failure backoff to skip foreground ticks", binding.ConnectionGeneration)
 	}
 }
 

@@ -31,6 +31,7 @@ type Runner struct {
 	ReadTimeout  time.Duration
 }
 
+var errConnectorBindingRemoved = errors.New("connector binding removed")
 var errConnectorDraining = errors.New("connector draining")
 
 const websocketReadTimeout = 60 * time.Second
@@ -45,6 +46,28 @@ type bindingRunResult struct {
 	connectionID config.ConnectionID
 	token        int
 	err          error
+}
+
+type bindingStartBackoff struct {
+	nextAttemptAt time.Time
+	backoff       time.Duration
+}
+
+type connectorDrainingError struct {
+	deadlineAt time.Time
+	reason     string
+}
+
+func (err connectorDrainingError) Error() string {
+	reason := strings.TrimSpace(err.reason)
+	if reason == "" {
+		return errConnectorDraining.Error()
+	}
+	return errConnectorDraining.Error() + ": " + reason
+}
+
+func (err connectorDrainingError) Is(target error) bool {
+	return target == errConnectorDraining
 }
 
 type observedRunCancel struct {
@@ -105,11 +128,30 @@ func (r Runner) RunForeground(ctx context.Context) error {
 	errs := make(chan bindingRunResult, 16)
 	var wg sync.WaitGroup
 	active := map[int]bindingRun{}
+	startBackoffs := map[config.ConnectionID]bindingStartBackoff{}
 	nextToken := 0
 	sendResult := func(result bindingRunResult) {
 		select {
 		case errs <- result:
 		case <-runCtx.Done():
+		}
+	}
+	canStartBinding := func(binding config.Binding) bool {
+		state, ok := startBackoffs[binding.ConnectionID]
+		if !ok || state.nextAttemptAt.IsZero() {
+			return true
+		}
+		return !r.now().Before(state.nextAttemptAt)
+	}
+	recordStartFailure := func(binding config.Binding) {
+		state := startBackoffs[binding.ConnectionID]
+		backoff := state.backoff
+		if backoff <= 0 {
+			backoff = r.reconnectMin()
+		}
+		startBackoffs[binding.ConnectionID] = bindingStartBackoff{
+			nextAttemptAt: r.now().Add(jitterDuration(backoff)),
+			backoff:       minDuration(backoff*2, r.reconnectMax()),
 		}
 	}
 	hasActiveBinding := func(connectionID config.ConnectionID) bool {
@@ -122,6 +164,9 @@ func (r Runner) RunForeground(ctx context.Context) error {
 	}
 	startBinding := func(binding config.Binding) error {
 		if hasActiveBinding(binding.ConnectionID) {
+			return nil
+		}
+		if !canStartBinding(binding) {
 			return nil
 		}
 		nextToken++
@@ -153,6 +198,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 			})
 		}()
 		active[token] = bindingRun{cancel: logCancel, connectionID: binding.ConnectionID, token: token}
+		delete(startBackoffs, binding.ConnectionID)
 		return nil
 	}
 	cancelMissingBindings := func(bindings []config.Binding) {
@@ -167,12 +213,19 @@ func (r Runner) RunForeground(ctx context.Context) error {
 			run.cancel()
 			delete(active, token)
 		}
+		for connectionID := range startBackoffs {
+			if _, ok := present[connectionID]; ok {
+				continue
+			}
+			delete(startBackoffs, connectionID)
+		}
 	}
 
 	bindings := r.Store.ListBindings()
 	for _, binding := range bindings {
 		if err := startBinding(binding); err != nil {
 			log.Printf("connector binding start failed connection_id=%s err=%v", binding.ConnectionID, err)
+			recordStartFailure(binding)
 		}
 	}
 
@@ -195,6 +248,9 @@ func (r Runner) RunForeground(ctx context.Context) error {
 			}
 			if ok && result.err != nil {
 				log.Printf("connector binding stopped connection_id=%s err=%v", result.connectionID, result.err)
+				if binding, exists := r.Store.Binding(result.connectionID); exists {
+					recordStartFailure(binding)
+				}
 			}
 		case <-ticker.C:
 			if len(active) > 0 && !supportsExternalBindingReload(r.Store) {
@@ -205,6 +261,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 			for _, binding := range bindings {
 				if err := startBinding(binding); err != nil {
 					log.Printf("connector binding start failed connection_id=%s err=%v", binding.ConnectionID, err)
+					recordStartFailure(binding)
 				}
 			}
 		}
@@ -223,6 +280,22 @@ func (r Runner) runBinding(ctx context.Context, binding config.Binding) error {
 func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) error {
 	connectionID := binding.ConnectionID
 	backoff := r.reconnectMin()
+	waitForBackoff := func() bool {
+		delay := jitterDuration(backoff)
+		if delay <= 0 {
+			backoff = minDuration(backoff*2, r.reconnectMax())
+			return true
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		backoff = minDuration(backoff*2, r.reconnectMax())
+		return true
+	}
 	for {
 		latest, ok := r.Store.Binding(connectionID)
 		if !ok {
@@ -235,40 +308,71 @@ func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) erro
 		}
 		writable, ok := r.Store.(config.WritableStore)
 		if !ok {
-			return fmt.Errorf("writable connector store required")
+			if !waitForBackoff() {
+				return nil
+			}
+			continue
 		}
 		if err := writable.SaveBinding(current); err != nil {
-			return err
+			if !waitForBackoff() {
+				return nil
+			}
+			continue
 		}
 		credential, err := bridge.CredentialFromBinding(current)
 		if err != nil {
-			return err
+			if !waitForBackoff() {
+				return nil
+			}
+			continue
 		}
 		session, err := bridge.NewSession(current, credential)
 		if err != nil {
-			return err
+			if !waitForBackoff() {
+				return nil
+			}
+			continue
 		}
 		session.ServiceScope = r.serviceScope()
 		err = r.runBindingSession(ctx, current, session)
 		if ctx.Err() != nil {
 			return nil
 		}
+		if errors.Is(err, errConnectorBindingRemoved) {
+			return nil
+		}
 		if errors.Is(err, errConnectorDraining) {
-			backoff = r.reconnectMin()
+			delay := r.drainReconnectDelay(err)
+			if delay > 0 {
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil
+				case <-timer.C:
+				}
+			}
 			continue
 		}
 		if err == nil {
 			backoff = r.reconnectMin()
 		}
-		timer := time.NewTimer(jitterDuration(backoff))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !waitForBackoff() {
 			return nil
-		case <-timer.C:
 		}
-		backoff = minDuration(backoff*2, r.reconnectMax())
 	}
+}
+
+func (r Runner) drainReconnectDelay(err error) time.Duration {
+	minDelay := jitterDuration(r.reconnectMin())
+	var drainErr connectorDrainingError
+	if errors.As(err, &drainErr) && !drainErr.deadlineAt.IsZero() {
+		untilDeadline := drainErr.deadlineAt.Sub(r.now())
+		if untilDeadline > minDelay {
+			minDelay = untilDeadline
+		}
+	}
+	return minDuration(minDelay, r.reconnectMax())
 }
 
 func (r Runner) serviceScope() externalagentprotocol.ServiceScope {
@@ -419,7 +523,10 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	for {
 		var frame externalagentprotocol.Frame
 		if err := conn.ReadJSON(&frame); err != nil {
-			return nil
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("read gateway websocket frame: %w", err)
 		}
 		_ = extendReadDeadline()
 		switch frame.MessageType {
@@ -427,7 +534,10 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.ServerDraining == nil {
 				continue
 			}
-			return errConnectorDraining
+			return connectorDrainingError{
+				deadlineAt: frame.ServerDraining.DeadlineAt,
+				reason:     frame.ServerDraining.Reason,
+			}
 		case externalagentprotocol.FrameTypeWakeProbe:
 			if frame.WakeProbe == nil {
 				continue
@@ -640,7 +750,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := r.revokeBinding(binding, adapter, frame.TokenRevoked.Reason); err != nil {
 				return err
 			}
-			return nil
+			return errConnectorBindingRemoved
 		}
 	}
 }

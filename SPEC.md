@@ -13,7 +13,7 @@ external persona.
 - Negotiate a bounded Connector websocket protocol version with `agent-gateway`
   and reject connect responses that advertise an unsupported version.
 - Report runtime health, MCP configuration state, Connector version, local host
-  name, connection generation, native MCP server/tool naming metadata, prompt-safe
+  name, host OS, host architecture, connection generation, native MCP server/tool naming metadata, prompt-safe
   external runtime capability summaries, and wake probe results.
 - Receive API-composed run assignments from `agent-gateway`.
 - Dispatch fully composed prompts into the selected local runtime.
@@ -62,9 +62,10 @@ external persona.
   remains in the user's config directory.
 - Pairing, connect, and heartbeat payloads include the local machine hostname as
   bounded non-secret operator-facing metadata.
-- Initial connect and heartbeat payloads include the compiled Connector version
-  so API-owned external persona state can display the installed Connector and
-  prompt upgrades when recommended releases advance.
+- Initial connect and heartbeat payloads include the compiled Connector version,
+  host OS, and host architecture so API-owned external persona state can display
+  the installed Connector and browser surfaces can choose the correct upgrade
+  command when recommended releases advance.
 - Each binding has one PersonaStack connection id, persona id, external agent
   kind, bridge credential, PersonaStack MCP credential, native MCP server name,
   local runtime selection, optional Hermes profile home, and local readiness
@@ -94,6 +95,15 @@ external persona.
 - A draining `server.draining` hint must close the current websocket session and
   reconnect through the same binding loop with a fresh connection generation.
   The Connector must not run overlapping websocket sessions for one binding.
+- Draining reconnects must not hot-loop. The Connector waits at least its
+  reconnect minimum before reconnecting, may honor a later gateway drain
+  deadline, and caps that wait by the reconnect maximum.
+- Unexpected established websocket read failures, including read-deadline
+  expiration, are retryable session failures and must participate in reconnect
+  backoff instead of being treated as clean success.
+- Binding startup failures that happen before the websocket binding loop starts,
+  including local MCP proxy startup and credential/session construction errors,
+  must use per-binding backoff rather than retrying every foreground scan tick.
 - Local state mutations are owned by the current websocket generation. Stale
   generations must not record heartbeat or wake-probe timestamps, activate or
   clear runs, cancel native runs, refresh MCP config, revoke bindings, or update
@@ -113,16 +123,16 @@ external persona.
 
 - `personastack-connector pair <code> --runtime auto`
 - `personastack-connector pair <code> --runtime hermes`
-- `personastack-connector pair <code> --runtime openclaw`
 - `personastack-connector pair <code> --runtime hermes --hermes-home <path>`
+- `personastack-connector pair <code> --runtime openclaw`
 - `personastack-connector pair <code> --service-scope user`
 - `personastack-connector pair <code> --service-scope system`
 - `personastack-connector status`
 - `personastack-connector status --repair`
 - `personastack-connector runtime detect`
 - `personastack-connector runtime repair`
-- `personastack-connector mcp install`
 - `personastack-connector runtime hermes configure --hermes-home <path>`
+- `personastack-connector mcp install`
 - `personastack-connector mcp repair`
 - `personastack-connector mcp stdio --binding <connection_id>`
 - `personastack-connector run --foreground`
@@ -214,6 +224,12 @@ Adapter result states must be concrete typed enums, including:
 - Native runtime config intentionally contains a direct PersonaStack bearer
   header for the external persona's durable MCP credential so users can call
   PersonaStack MCP from Hermes/OpenClaw outside PersonaStack-dispatched runs.
+  That durable credential must not authorize website persona-chat media byte
+  transfer. Connector-backed external personas may use normal text chat
+  completion behavior, but media upload/download transfer tools must remain
+  unavailable until a future Connector/Hermes/OpenClaw contract supplies
+  API-verifiable active website-chat turn authority, bounded byte transfer,
+  40 MiB local enforcement, retention, and ownership checks.
 - `mcp install` and `mcp repair` must preserve unrelated native runtime config,
   write an owner-only first backup, use atomic replacement, and refuse to
   overwrite an unrecognized same-name MCP server by reporting a conflict state.
@@ -263,13 +279,13 @@ Adapter result states must be concrete typed enums, including:
 - Configure Hermes MCP through the top-level `mcp_servers` map with the
   per-binding native MCP server name; config edits must be atomic and keep an
   owner-only backup of the prior config.
-- Map Hermes native run events to Connector protocol run events.
 - Hermes named profiles are supported by resolving the active Hermes home as:
   explicit `--hermes-home`, stored binding `HermesHome`, `HERMES_HOME`, then
   `$HOME/.hermes`. Connector writes `config.yaml` and `.env`, runs
   `hermes gateway`, verifies `hermes tools list`, and generates persistent
   services against that same Hermes home. Connector must not emulate profile
   selection by rewriting `HOME` into a nested profile home.
+- Map Hermes native run events to Connector protocol run events.
 - Treat cancellation as best-effort until Hermes returns terminal state or the
   Connector cancellation timeout expires.
 - Hermes runtime feature discovery uses `/v1/capabilities` and reports verified

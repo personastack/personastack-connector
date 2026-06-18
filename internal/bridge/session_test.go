@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	stdruntime "runtime"
 	"testing"
 	"time"
 
@@ -42,6 +43,9 @@ func TestConnectFrameSignsAPIVerifiableMessage(t *testing.T) {
 	}
 	if frame.Connect.ConnectorVersion != buildinfo.VersionString() {
 		t.Fatalf("connector version: got=%s want=%s", frame.Connect.ConnectorVersion, buildinfo.VersionString())
+	}
+	if frame.Connect.OS != stdruntime.GOOS || frame.Connect.Arch != stdruntime.GOARCH {
+		t.Fatalf("connect platform metadata: got=%s/%s want=%s/%s", frame.Connect.OS, frame.Connect.Arch, stdruntime.GOOS, stdruntime.GOARCH)
 	}
 }
 
@@ -124,6 +128,9 @@ func TestHeartbeatFrameReportsBuildMetadata(t *testing.T) {
 	}
 	if frame.Heartbeat.OS == "" || frame.Heartbeat.Arch == "" {
 		t.Fatalf("expected os/arch metadata: %+v", frame.Heartbeat)
+	}
+	if frame.Heartbeat.OS != stdruntime.GOOS || frame.Heartbeat.Arch != stdruntime.GOARCH {
+		t.Fatalf("heartbeat platform metadata: got=%s/%s want=%s/%s", frame.Heartbeat.OS, frame.Heartbeat.Arch, stdruntime.GOOS, stdruntime.GOARCH)
 	}
 }
 

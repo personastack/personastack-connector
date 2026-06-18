@@ -80,6 +80,8 @@ func (s Session) ConnectFrame(nonce string) (externalagentprotocol.Frame, error)
 		RuntimeKind:               runtimeKindForAdapter(s.Binding.RuntimeKind),
 		ConnectionGeneration:      s.Binding.ConnectionGeneration,
 		Hostname:                  localHostname(),
+		OS:                        stdruntime.GOOS,
+		Arch:                      stdruntime.GOARCH,
 		DevicePublicKey:           base64.StdEncoding.EncodeToString(s.Credential.PublicKey),
 		CredentialID:              strings.TrimSpace(s.Credential.ID),
 		CredentialProofNonce:      strings.TrimSpace(nonce),

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -79,14 +80,10 @@ func (adapter OpenClawAdapter) connectOperatorWithRetry(ctx context.Context) (*w
 }
 
 func errorsAsOpenClawRetryable(err error, target *openClawRetryableError) bool {
-	if err == nil {
+	if err == nil || target == nil {
 		return false
 	}
-	if retryErr, ok := err.(openClawRetryableError); ok {
-		*target = retryErr
-		return true
-	}
-	return false
+	return errors.As(err, target)
 }
 
 func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error) {

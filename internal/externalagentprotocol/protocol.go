@@ -291,6 +291,8 @@ type ConnectPayload struct {
 	RuntimeKind               RuntimeKind `json:"runtime_kind"`
 	ConnectionGeneration      int64       `json:"connection_generation"`
 	Hostname                  string      `json:"hostname,omitempty"`
+	OS                        string      `json:"os,omitempty"`
+	Arch                      string      `json:"arch,omitempty"`
 	DevicePublicKey           string      `json:"device_public_key"`
 	CredentialID              string      `json:"credential_id"`
 	CredentialProof           string      `json:"credential_proof"`

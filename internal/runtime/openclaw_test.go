@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -579,6 +580,60 @@ func TestOpenClawAdapterStreamOrPollRunRetriesStartupSidecars(t *testing.T) {
 	}
 	if !events[0].StartedAt.Equal(parsedStartedAt) {
 		t.Fatalf("startedAt = %s want %s", events[0].StartedAt, parsedStartedAt)
+	}
+}
+
+func TestErrorsAsOpenClawRetryableUnwrapsStartupSidecars(t *testing.T) {
+	wrapped := fmt.Errorf("wrapped: %w", openClawRetryableError{info: openClawErrorInfo{
+		Code:       "UNAVAILABLE",
+		Reason:     "startup-sidecars",
+		RetryAfter: 25 * time.Millisecond,
+	}})
+	var retryErr openClawRetryableError
+	if !errorsAsOpenClawRetryable(wrapped, &retryErr) {
+		t.Fatal("wrapped OpenClaw retryable error was not detected")
+	}
+	if retryErr.RetryAfter() != 25*time.Millisecond {
+		t.Fatalf("retry after = %s, want wrapped retry delay", retryErr.RetryAfter())
+	}
+}
+
+func TestOpenClawAdapterStreamOrPollRunStopsStartupSidecarsAtContextDeadline(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read agent.wait: %v", err)
+		}
+		if request.Method != "agent.wait" {
+			t.Fatalf("expected agent.wait, got %+v", request)
+		}
+		atomic.AddInt32(&attempts, 1)
+		_ = conn.WriteJSON(openClawResponse{
+			Type:   "res",
+			ID:     request.ID,
+			OK:     boolRef(false),
+			Error:  map[string]any{"details": map[string]any{"code": "UNAVAILABLE", "reason": "startup-sidecars", "retryAfterMs": 1000}},
+			Result: nil,
+		})
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StreamOrPollRun(ctx, "run-1", nil)
+	if err == nil {
+		t.Fatal("expected startup-sidecars retry to stop at context deadline")
+	}
+	if atomic.LoadInt32(&attempts) != 1 {
+		t.Fatalf("attempts = %d, want no retry past deadline", attempts)
 	}
 }
 
