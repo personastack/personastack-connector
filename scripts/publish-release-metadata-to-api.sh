@@ -32,6 +32,7 @@ payload="$(jq -cn \
 
 curl -fsS \
   -H "Authorization: Bearer ${admin_token}" \
+  -H "Cookie: personastack_token=${admin_token}" \
   -H "Content-Type: application/json" \
   -X POST \
   --data "${payload}" \
