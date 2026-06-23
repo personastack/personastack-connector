@@ -748,6 +748,60 @@ func TestHermesAdapterStreamOrPollRunEnrichesBlankSuccessfulSSETerminal(t *testi
 }
 
 func TestHermesAdapterStreamOrPollRunEmitsStateToolEventsAfterSSETerminal(t *testing.T) {
+	installHermesStateToolEventsFixture(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"run.completed\",\"output\":\"done\"}\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	events := []RunEvent{}
+	result, err := NewHermesAdapter(server.URL, "key-1").StreamOrPollRun(context.Background(), "hermes-run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	assertHermesTerminalToolEvents(t, events)
+}
+
+func TestHermesAdapterStreamOrPollRunBackfillsStateToolEventsAfterSSEToolEvent(t *testing.T) {
+	installHermesStateToolEventsFixture(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"tool.event\",\"tool\":\"terminal\",\"phase\":\"started\",\"summary\":\"streamed\"}\n\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"run.completed\",\"output\":\"done\"}\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	events := []RunEvent{}
+	result, err := NewHermesAdapter(server.URL, "key-1").StreamOrPollRun(context.Background(), "hermes-run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	assertHermesTerminalToolEvents(t, events)
+}
+
+func installHermesStateToolEventsFixture(t *testing.T) {
+	t.Helper()
 	homeDir := t.TempDir()
 	t.Setenv("HERMES_HOME", homeDir)
 	if err := os.WriteFile(filepath.Join(homeDir, "state.db"), []byte("placeholder"), 0o600); err != nil {
@@ -792,41 +846,36 @@ func TestHermesAdapterStreamOrPollRunEmitsStateToolEventsAfterSSETerminal(t *tes
 		hermesSQLiteCommand = originalSQLiteCommand
 		hermesSQLitePathValue = originalSQLitePathValue
 	})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/runs/hermes-run-1/events":
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("data: {\"type\":\"run.completed\",\"output\":\"done\"}\n\n"))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	events := []RunEvent{}
-	result, err := NewHermesAdapter(server.URL, "key-1").StreamOrPollRun(context.Background(), "hermes-run-1", func(event RunEvent) error {
-		events = append(events, event)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("StreamOrPollRun() error = %v", err)
-	}
-	if result.Status != RunStatusSucceeded || result.Output != "done" {
-		t.Fatalf("unexpected result: %+v", result)
-	}
+}
+
+func assertHermesTerminalToolEvents(t *testing.T, events []RunEvent) {
+	t.Helper()
 	toolEvents := []RunEvent{}
 	for _, event := range events {
 		if event.Kind == RunEventToolEvent {
 			toolEvents = append(toolEvents, event)
 		}
 	}
-	if len(toolEvents) != 2 {
+	if len(toolEvents) < 2 {
 		t.Fatalf("unexpected tool events: %+v", toolEvents)
 	}
-	if toolEvents[0].ToolName != "terminal" || toolEvents[0].ToolPhase != "started" || !strings.Contains(toolEvents[0].Summary, `"command":true`) {
-		t.Fatalf("tool call event = %+v", toolEvents[0])
+	stateToolEvents := []RunEvent{}
+	for _, event := range toolEvents {
+		if event.ToolName == "terminal" && strings.Contains(event.Summary, `"command":true`) {
+			stateToolEvents = append(stateToolEvents, event)
+		}
+		if event.ToolName == "terminal" && strings.Contains(event.Summary, `"exit_code":true`) {
+			stateToolEvents = append(stateToolEvents, event)
+		}
 	}
-	if toolEvents[1].ToolName != "terminal" || toolEvents[1].ToolPhase != "completed" || strings.Contains(toolEvents[1].Summary, "secret") || !strings.Contains(toolEvents[1].Summary, `"exit_code":true`) {
-		t.Fatalf("tool result event = %+v", toolEvents[1])
+	if len(stateToolEvents) != 2 {
+		t.Fatalf("missing state tool events: %+v", toolEvents)
+	}
+	if stateToolEvents[0].ToolPhase != "started" {
+		t.Fatalf("tool call event = %+v", stateToolEvents[0])
+	}
+	if stateToolEvents[1].ToolPhase != "completed" || strings.Contains(stateToolEvents[1].Summary, "secret") {
+		t.Fatalf("tool result event = %+v", stateToolEvents[1])
 	}
 }
 

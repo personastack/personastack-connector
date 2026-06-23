@@ -208,13 +208,13 @@ func (adapter HermesAdapter) StreamOrPollRun(ctx context.Context, nativeRunID st
 	}
 	defer hermesForgetNativeRunSessionID(trimmedRunID)
 	state := &runEventState{}
-	observedToolEvents := false
+	observedToolEventKeys := map[string]struct{}{}
 	observer := func(event RunEvent) error {
 		if event.Kind == RunEventStarted {
 			return state.emitStarted(handle, event.StartedAt)
 		}
 		if event.Kind == RunEventToolEvent {
-			observedToolEvents = true
+			observedToolEventKeys[hermesStateToolEventKey(event)] = struct{}{}
 		}
 		if handle == nil {
 			return nil
@@ -226,9 +226,9 @@ func (adapter HermesAdapter) StreamOrPollRun(ctx context.Context, nativeRunID st
 			return RunResult{}, err
 		}
 	} else if terminal {
-		return adapter.terminalHermesRun(ctx, trimmedRunID, result, handle, state, observedToolEvents)
+		return adapter.terminalHermesRun(ctx, trimmedRunID, result, handle, state, observedToolEventKeys)
 	}
-	return adapter.pollRunStatus(ctx, trimmedRunID, handle, state, observedToolEvents)
+	return adapter.pollRunStatus(ctx, trimmedRunID, handle, state, observedToolEventKeys)
 }
 
 func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
@@ -358,7 +358,7 @@ func (adapter HermesAdapter) streamRunEvents(ctx context.Context, nativeRunID st
 	return result, terminal, nil
 }
 
-func (adapter HermesAdapter) pollRunStatus(ctx context.Context, nativeRunID string, handle RunEventHandler, state *runEventState, observedToolEvents bool) (RunResult, error) {
+func (adapter HermesAdapter) pollRunStatus(ctx context.Context, nativeRunID string, handle RunEventHandler, state *runEventState, observedToolEventKeys map[string]struct{}) (RunResult, error) {
 	result, err := adapter.waitHermesRunStatus(ctx, nativeRunID)
 	if err != nil {
 		return RunResult{}, err
@@ -368,37 +368,34 @@ func (adapter HermesAdapter) pollRunStatus(ctx context.Context, nativeRunID stri
 			return RunResult{}, err
 		}
 	}
-	if !observedToolEvents {
-		if err := adapter.emitHermesStateToolEvents(ctx, nativeRunID, handle, state); err != nil {
-			return RunResult{}, err
-		}
+	if err := adapter.emitHermesStateToolEvents(ctx, nativeRunID, handle, state, observedToolEventKeys); err != nil {
+		return RunResult{}, err
 	}
 	return result, nil
 }
 
-func (adapter HermesAdapter) terminalHermesRun(ctx context.Context, nativeRunID string, result RunResult, handle RunEventHandler, state *runEventState, observedToolEvents bool) (RunResult, error) {
+func (adapter HermesAdapter) terminalHermesRun(ctx context.Context, nativeRunID string, result RunResult, handle RunEventHandler, state *runEventState, observedToolEventKeys map[string]struct{}) (RunResult, error) {
 	if result.Status == RunStatusSucceeded && strings.TrimSpace(result.Output) == "" {
 		enriched, enrichedTerminal, err := adapter.runStatus(ctx, nativeRunID)
 		if err == nil && enrichedTerminal && strings.TrimSpace(enriched.Output) != "" {
-			if !observedToolEvents {
-				if err := adapter.emitHermesStateToolEvents(ctx, nativeRunID, handle, state); err != nil {
-					return RunResult{}, err
-				}
+			if err := adapter.emitHermesStateToolEvents(ctx, nativeRunID, handle, state, observedToolEventKeys); err != nil {
+				return RunResult{}, err
 			}
 			return enriched, nil
 		}
 	}
-	if !observedToolEvents {
-		if err := adapter.emitHermesStateToolEvents(ctx, nativeRunID, handle, state); err != nil {
-			return RunResult{}, err
-		}
+	if err := adapter.emitHermesStateToolEvents(ctx, nativeRunID, handle, state, observedToolEventKeys); err != nil {
+		return RunResult{}, err
 	}
 	return result, nil
 }
 
-func (adapter HermesAdapter) emitHermesStateToolEvents(ctx context.Context, nativeRunID string, handle RunEventHandler, state *runEventState) error {
+func (adapter HermesAdapter) emitHermesStateToolEvents(ctx context.Context, nativeRunID string, handle RunEventHandler, state *runEventState, seen map[string]struct{}) error {
 	if handle == nil || strings.TrimSpace(nativeRunID) == "" {
 		return nil
+	}
+	if seen == nil {
+		seen = map[string]struct{}{}
 	}
 	events, err := adapter.hermesStateToolEvents(ctx, nativeRunID)
 	if err != nil || len(events) == 0 {
@@ -411,6 +408,11 @@ func (adapter HermesAdapter) emitHermesStateToolEvents(ctx context.Context, nati
 		return err
 	}
 	for _, event := range events {
+		key := hermesStateToolEventKey(event)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 		if err := handle(event); err != nil {
 			return err
 		}
