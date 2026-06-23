@@ -1,6 +1,9 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -432,6 +435,70 @@ func TestFileStoreKeyringSecretWinsOverExistingFallbackWhenFallbackNotForced(t *
 	}
 	if loaded.PersonaMCPToken != "keyring-token" {
 		t.Fatalf("expected keyring secret after fallback disabled, got %+v", loaded)
+	}
+}
+
+func TestFileStoreUsesFallbackBridgeSecretWhenKeyringPrivateKeyMismatchesPublicKey(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	t.Setenv("HOME", t.TempDir())
+
+	secrets := map[string]string{}
+	originalGet := keyringGet
+	originalSet := keyringSet
+	originalDelete := keyringDelete
+	keyringGet = func(service string, user string) (string, error) {
+		value, ok := secrets[service+":"+user]
+		if !ok {
+			return "", os.ErrNotExist
+		}
+		return value, nil
+	}
+	keyringSet = func(service string, user string, password string) error {
+		secrets[service+":"+user] = password
+		return nil
+	}
+	keyringDelete = func(service string, user string) error {
+		delete(secrets, service+":"+user)
+		return nil
+	}
+	t.Cleanup(func() {
+		keyringGet = originalGet
+		keyringSet = originalSet
+		keyringDelete = originalDelete
+	})
+
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate bridge key: %v", err)
+	}
+	_, stalePrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate stale bridge key: %v", err)
+	}
+	expectedPrivateKey := base64.StdEncoding.EncodeToString(privateKey)
+	stalePrivateKeyText := base64.StdEncoding.EncodeToString(stalePrivateKey)
+
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewFileStore(path)
+	binding := Binding{
+		ConnectionID:     "conn-1",
+		PersonaID:        "persona-1",
+		BridgePrivateKey: expectedPrivateKey,
+		BridgePublicKey:  base64.StdEncoding.EncodeToString(publicKey),
+		HasBridgeSecret:  true,
+	}
+	if err := store.SaveBinding(binding); err != nil {
+		t.Fatalf("save binding: %v", err)
+	}
+	secrets[keyringService+":conn-1:bridge-private-key"] = stalePrivateKeyText
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "0")
+
+	loaded, ok := store.Binding("conn-1")
+	if !ok {
+		t.Fatalf("expected binding")
+	}
+	if loaded.BridgePrivateKey != expectedPrivateKey {
+		t.Fatalf("expected fallback bridge private key when keyring mismatches public key")
 	}
 }
 

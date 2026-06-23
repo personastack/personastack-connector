@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
@@ -74,7 +77,10 @@ func loadBindingSecrets(binding Binding) Binding {
 		return binding
 	}
 	if binding.HasBridgeSecret && strings.TrimSpace(binding.BridgePrivateKey) == "" {
-		binding.BridgePrivateKey = loadSecret(bindingSecretKey(connectionID, "bridge-private-key"))
+		binding.BridgePrivateKey = loadBridgePrivateKeySecret(
+			bindingSecretKey(connectionID, "bridge-private-key"),
+			binding.BridgePublicKey,
+		)
 	}
 	if binding.HasPersonaMCPToken && strings.TrimSpace(binding.PersonaMCPToken) == "" {
 		binding.PersonaMCPToken = loadSecret(bindingSecretKey(connectionID, "persona-mcp-token"))
@@ -92,6 +98,47 @@ func loadBindingSecrets(binding Binding) Binding {
 		binding.OpenClawDeviceToken = loadSecret(bindingSecretKey(connectionID, "openclaw-device-token"))
 	}
 	return binding
+}
+
+func loadBridgePrivateKeySecret(secretKey string, publicKey string) string {
+	if shouldForceFallbackSecretStore() {
+		secret, err := fallbackSecretGet(secretKey)
+		if err == nil && bridgePrivateKeyMatchesPublicKey(secret, publicKey) {
+			return strings.TrimSpace(secret)
+		}
+		return ""
+	}
+	secret, err := lockedKeyringGet(secretKey)
+	if err == nil && bridgePrivateKeyMatchesPublicKey(secret, publicKey) {
+		return strings.TrimSpace(secret)
+	}
+	secret, err = fallbackSecretGet(secretKey)
+	if err == nil && bridgePrivateKeyMatchesPublicKey(secret, publicKey) {
+		return strings.TrimSpace(secret)
+	}
+	return ""
+}
+
+func bridgePrivateKeyMatchesPublicKey(privateKey string, publicKey string) bool {
+	if strings.TrimSpace(publicKey) == "" {
+		return strings.TrimSpace(privateKey) != ""
+	}
+	privateKeyRaw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(privateKey))
+	if err != nil {
+		return false
+	}
+	if len(privateKeyRaw) != ed25519.PrivateKeySize {
+		return false
+	}
+	publicKeyRaw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(publicKey))
+	if err != nil {
+		return false
+	}
+	if len(publicKeyRaw) != ed25519.PublicKeySize {
+		return false
+	}
+	derivedPublicKey := ed25519.PrivateKey(privateKeyRaw).Public().(ed25519.PublicKey)
+	return bytes.Equal(derivedPublicKey, publicKeyRaw)
 }
 
 func deleteBindingSecrets(binding Binding) {
