@@ -6,11 +6,13 @@ import (
 )
 
 const (
-	// ProtocolVersionV2 identifies the second Connector websocket protocol version.
+	// ProtocolVersionV2 identifies the legacy Connector websocket protocol version.
 	ProtocolVersionV2 = "external-agent-v2"
+	// ProtocolVersionV3 identifies the Connector websocket protocol version that carries run-frame connection generation.
+	ProtocolVersionV3 = "external-agent-v3"
 )
 
-var supportedProtocolVersions = []string{ProtocolVersionV2}
+var supportedProtocolVersions = []string{ProtocolVersionV3}
 
 // SupportedProtocolVersions returns the protocol versions this binary can speak, in preference order.
 func SupportedProtocolVersions() []string {
@@ -260,8 +262,10 @@ type Frame struct {
 	ConnectionID string    `json:"connection_id"`
 	RunID        string    `json:"run_id,omitempty"`
 	AssignmentID string    `json:"assignment_id,omitempty"`
-	Sequence     int64     `json:"sequence,omitempty"`
-	SentAt       time.Time `json:"sent_at"`
+	// ConnectionGeneration binds run callbacks to the Connector session that emitted them.
+	ConnectionGeneration int64     `json:"connection_generation,omitempty"`
+	Sequence             int64     `json:"sequence,omitempty"`
+	SentAt               time.Time `json:"sent_at"`
 
 	Connect           *ConnectPayload           `json:"connect,omitempty"`
 	ConnectAccepted   *ConnectAcceptedPayload   `json:"connect_accepted,omitempty"`

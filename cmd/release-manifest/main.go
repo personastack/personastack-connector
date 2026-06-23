@@ -128,7 +128,7 @@ func buildManifest(distDir string, version string, commit string, generatedAt ti
 		Assets:          assets,
 		Commit:          commit,
 		GeneratedAt:     generatedAt.Format(time.RFC3339),
-		MinimumProtocol: externalagentprotocol.ProtocolVersionV2,
+		MinimumProtocol: externalagentprotocol.ProtocolVersionV3,
 		Project:         "personastack-connector",
 		RuntimeKinds:    []string{"hermes", "openclaw"},
 		Version:         version,

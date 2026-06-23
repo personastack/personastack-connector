@@ -33,7 +33,7 @@ func TestBuildManifestScansReleaseAssets(t *testing.T) {
 	if manifest.Project != "personastack-connector" || manifest.Version != "0.2.0" {
 		t.Fatalf("unexpected manifest identity: %+v", manifest)
 	}
-	if manifest.MinimumProtocol != "external-agent-v2" {
+	if manifest.MinimumProtocol != "external-agent-v3" {
 		t.Fatalf("minimum protocol = %q", manifest.MinimumProtocol)
 	}
 	if len(manifest.Assets) != 5 {

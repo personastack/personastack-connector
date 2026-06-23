@@ -12,8 +12,9 @@
 
 - `personastack-api` owns durable persona, pairing, prompt, run, readiness,
   orbit, catalog, and install metadata state.
-- `agent-gateway` owns Connector websocket transport and the versioned Connector
-  protocol package.
+- `agent-gateway` owns Connector websocket transport and protocol behavior
+  compatibility; this repo owns its local Connector protocol DTO package for
+  reproducible standalone builds.
 - `mcp` owns PersonaStack MCP tool execution and authorization.
 - This repository owns local runtime adapters, local MCP proxying, OS service
   registration, local credential storage, and local diagnostics.
@@ -30,8 +31,9 @@
 - Bind any local HTTP helper only to loopback.
 - Redact tokens, prompts, local paths, and runtime secrets from diagnostics by
   default.
-- Import PersonaStack shared protocol/client packages through GitHub module
-  paths; do not copy DTOs from sibling repositories.
+- Import PersonaStack shared client packages through GitHub module paths. Keep
+  Connector protocol DTOs in this repo aligned with the API/gateway contract; do
+  not copy unrelated DTOs from sibling repositories.
 
 ## Validation
 

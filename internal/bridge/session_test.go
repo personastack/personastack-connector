@@ -35,10 +35,10 @@ func TestConnectFrameSignsAPIVerifiableMessage(t *testing.T) {
 	if !ed25519.Verify(publicKey, []byte(CredentialProofMessage(frame)), signature) {
 		t.Fatal("signature did not verify")
 	}
-	if frame.Connect.ProtocolVersion != externalagentprotocol.ProtocolVersionV2 {
+	if frame.Connect.ProtocolVersion != externalagentprotocol.ProtocolVersionV3 {
 		t.Fatalf("protocol version: got=%s", frame.Connect.ProtocolVersion)
 	}
-	if len(frame.Connect.SupportedProtocolVersions) != 1 || frame.Connect.SupportedProtocolVersions[0] != externalagentprotocol.ProtocolVersionV2 {
+	if len(frame.Connect.SupportedProtocolVersions) != 1 || frame.Connect.SupportedProtocolVersions[0] != externalagentprotocol.ProtocolVersionV3 {
 		t.Fatalf("supported protocol versions: %+v", frame.Connect.SupportedProtocolVersions)
 	}
 	if frame.Connect.ConnectorVersion != buildinfo.VersionString() {
@@ -62,7 +62,7 @@ func TestRunAcceptedFrameCorrelatesRequestMessageID(t *testing.T) {
 	}
 
 	frame := session.RunAcceptedFrame(request, "native-1")
-	if frame.MessageID != "request-1" || frame.RunAccepted.NativeRunID != "native-1" {
+	if frame.MessageID != "request-1" || frame.ConnectionGeneration != 5 || frame.RunAccepted.NativeRunID != "native-1" {
 		t.Fatalf("unexpected frame: %+v", frame)
 	}
 }
@@ -81,7 +81,7 @@ func TestRunFrameBuildersCarryEventPayloads(t *testing.T) {
 
 	startedAt := time.Unix(123, 0).UTC()
 	started := session.RunStartedFrame(request, "native-1", startedAt)
-	if started.RunStarted == nil || !started.RunStarted.StartedAt.Equal(startedAt) || started.RunStarted.NativeRunID != "native-1" {
+	if started.ConnectionGeneration != 5 || started.RunStarted == nil || !started.RunStarted.StartedAt.Equal(startedAt) || started.RunStarted.NativeRunID != "native-1" {
 		t.Fatalf("unexpected started frame: %+v", started)
 	}
 
@@ -91,13 +91,18 @@ func TestRunFrameBuildersCarryEventPayloads(t *testing.T) {
 	}
 
 	delta := session.RunOutputDeltaFrame(request, " chunk ")
-	if delta.RunOutputDelta == nil || delta.RunOutputDelta.Delta != "chunk" {
+	if delta.ConnectionGeneration != 5 || delta.RunOutputDelta == nil || delta.RunOutputDelta.Delta != "chunk" {
 		t.Fatalf("unexpected delta frame: %+v", delta)
 	}
 
 	tool := session.RunToolEventFrame(request, " browser ", " started ", " opening ")
-	if tool.RunToolEvent == nil || tool.RunToolEvent.ToolName != "browser" || tool.RunToolEvent.Phase != "started" || tool.RunToolEvent.Summary != "opening" {
+	if tool.ConnectionGeneration != 5 || tool.RunToolEvent == nil || tool.RunToolEvent.ToolName != "browser" || tool.RunToolEvent.Phase != "started" || tool.RunToolEvent.Summary != "opening" {
 		t.Fatalf("unexpected tool event frame: %+v", tool)
+	}
+
+	terminal := session.RunTerminalFrame(request, externalagentprotocol.RunStatusCompleted, externalagentprotocol.TerminalReasonSucceeded, " done ")
+	if terminal.ConnectionGeneration != 5 || terminal.RunTerminal == nil || terminal.RunTerminal.FinalMessage != "done" {
+		t.Fatalf("unexpected terminal frame: %+v", terminal)
 	}
 }
 

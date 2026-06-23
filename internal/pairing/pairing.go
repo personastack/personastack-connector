@@ -77,7 +77,7 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 		Code:                      code,
 		RuntimeKind:               runtimeKind,
 		ConnectorVersion:          buildinfo.VersionString(),
-		ProtocolVersion:           externalagentprotocol.ProtocolVersionV2,
+		ProtocolVersion:           externalagentprotocol.ProtocolVersionV3,
 		SupportedProtocolVersions: externalagentprotocol.SupportedProtocolVersions(),
 		OS:                        goruntime.GOOS,
 		Arch:                      goruntime.GOARCH,

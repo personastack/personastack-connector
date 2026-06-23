@@ -75,6 +75,10 @@ external persona.
 - Redelivered `run.start` frames for the currently active run id must reuse the
   journaled native run id and resend accepted/started frames instead of starting
   a second local runtime run.
+- Connector websocket sessions advertise `external-agent-v3`. Connector-emitted
+  run lifecycle and terminal frames must include the active
+  binding `connection_generation` so the API can reject stale Connector session
+  callbacks.
 - A `run.start` for a different run id while local state still has an active
   assignment must clear the stale local assignment and continue. The API owns run
   admission and a gateway-dispatched new run is proof that the previous local
@@ -324,9 +328,10 @@ Adapter result states must be concrete typed enums, including:
   `agent-gateway`.
 - Pairing exchange must use Connector proof-of-possession before bridge and MCP
   credentials are issued.
-- Pairing exchange must send Connector protocol version support. If the pairing
-  exchange returns `unsupported_connector_version`, Connector must surface the
-  finite failure state and exact update command to the user.
+- Pairing exchange must send Connector protocol version support with
+  `external-agent-v3`. If the pairing exchange returns
+  `unsupported_connector_version`, Connector must surface the finite failure
+  state and exact update command to the user.
 - Bridge credentials cannot call PersonaStack MCP tools.
 - Persona MCP credentials cannot open Connector websocket sessions.
 - Diagnostics must redact prompts, bearer tokens, runtime secrets, account ids

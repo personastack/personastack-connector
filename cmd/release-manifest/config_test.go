@@ -403,7 +403,7 @@ func TestPublishReleaseMetadataToAPI(t *testing.T) {
     {"name":"personastack-connector_0.2.0_checksums.txt","package_kind":"checksum","path":"personastack-connector_0.2.0_checksums.txt"}
   ],
   "commit":"commit-1",
-  "minimum_protocol":"external-agent-v2",
+  "minimum_protocol":"external-agent-v3",
   "project":"personastack-connector",
   "runtime_kinds":["hermes","openclaw"],
   "version":"0.2.0"
@@ -440,7 +440,7 @@ func TestPublishReleaseMetadataToAPI(t *testing.T) {
 		"https://api.personastack.test/v1/admin/external-agent-connector/releases",
 		`"version":"v0.2.0"`,
 		`"git_commit":"commit-1"`,
-		`"minimum_protocol":"external-agent-v2"`,
+		`"minimum_protocol":"external-agent-v3"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("curl payload missing %q:\n%s", want, got)

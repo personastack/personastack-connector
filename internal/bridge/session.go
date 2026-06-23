@@ -251,11 +251,12 @@ func CredentialProofMessage(frame externalagentprotocol.Frame) string {
 
 func (s Session) baseFrame(kind externalagentprotocol.FrameType, now time.Time) externalagentprotocol.Frame {
 	return externalagentprotocol.Frame{
-		MessageID:    uuid.NewString(),
-		MessageType:  kind,
-		PersonaID:    string(s.Binding.PersonaID),
-		ConnectionID: string(s.Binding.ConnectionID),
-		SentAt:       now.UTC(),
+		MessageID:            uuid.NewString(),
+		MessageType:          kind,
+		PersonaID:            string(s.Binding.PersonaID),
+		ConnectionID:         string(s.Binding.ConnectionID),
+		ConnectionGeneration: s.Binding.ConnectionGeneration,
+		SentAt:               now.UTC(),
 	}
 }
 
