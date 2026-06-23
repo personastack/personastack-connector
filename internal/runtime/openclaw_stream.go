@@ -129,6 +129,9 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 		response, err := session.call(ctx, request)
 		if err != nil {
 			if openClawErrorIsTimeout(err.Error()) && strings.TrimSpace(session.output()) != "" {
+				if err := adapter.emitOpenClawTrajectoryToolEvents(ctx, nativeRunID, handle, session); err != nil {
+					return RunResult{}, err
+				}
 				return RunResult{Status: RunStatusSucceeded, Output: session.output()}, nil
 			}
 			if openClawErrorIsTimeout(err.Error()) && ctx.Err() == nil {
@@ -153,6 +156,9 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 		}
 		if errText := response.errorString(); errText != "" {
 			if openClawErrorIsTimeout(errText) && strings.TrimSpace(session.output()) != "" {
+				if err := adapter.emitOpenClawTrajectoryToolEvents(ctx, nativeRunID, handle, session); err != nil {
+					return RunResult{}, err
+				}
 				return RunResult{Status: RunStatusSucceeded, Output: session.output()}, nil
 			}
 			if openClawErrorIsTimeout(errText) && ctx.Err() == nil {
@@ -184,6 +190,9 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 		if !terminal {
 			if output := strings.TrimSpace(session.output()); output != "" {
 				if err := session.emitStarted(handle, openClawRunStartedAtOrNow(response.payload())); err != nil {
+					return RunResult{}, err
+				}
+				if err := adapter.emitOpenClawTrajectoryToolEvents(ctx, nativeRunID, handle, session); err != nil {
 					return RunResult{}, err
 				}
 				return RunResult{Status: RunStatusSucceeded, Output: output}, nil
@@ -230,6 +239,7 @@ type openClawRPCSession struct {
 	outputBuilder strings.Builder
 	toolMu        sync.Mutex
 	toolEvents    int
+	toolEventKeys map[string]struct{}
 }
 
 func newOpenClawRPCSession(conn *websocket.Conn, handle RunEventHandler) *openClawRPCSession {
@@ -377,7 +387,9 @@ func (session *openClawRPCSession) handleBroadcast(response openClawResponse) er
 			session.appendOutput(event.Delta)
 		}
 		if event.Kind == RunEventToolEvent {
-			session.markToolEvent()
+			if !session.markToolEvent(event) {
+				continue
+			}
 		}
 		if err := handle(event); err != nil {
 			return err
@@ -401,10 +413,19 @@ func (session *openClawRPCSession) output() string {
 	return strings.TrimSpace(session.outputBuilder.String())
 }
 
-func (session *openClawRPCSession) markToolEvent() {
+func (session *openClawRPCSession) markToolEvent(event RunEvent) bool {
 	session.toolMu.Lock()
+	defer session.toolMu.Unlock()
+	key := openClawToolEventKey(event)
+	if session.toolEventKeys == nil {
+		session.toolEventKeys = map[string]struct{}{}
+	}
+	if _, ok := session.toolEventKeys[key]; ok {
+		return false
+	}
+	session.toolEventKeys[key] = struct{}{}
 	session.toolEvents++
-	session.toolMu.Unlock()
+	return true
 }
 
 func (session *openClawRPCSession) hasToolEvents() bool {
@@ -445,10 +466,11 @@ func openClawRunEventsForBroadcast(response openClawResponse) (time.Time, []RunE
 		}
 		if toolName := openClawJSONString(payload, "toolName", "tool", "name"); toolName != "" {
 			events = append(events, RunEvent{
-				Kind:      RunEventToolEvent,
-				ToolName:  toolName,
-				ToolPhase: openClawJSONString(payload, "phase", "status"),
-				Summary:   openClawJSONString(payload, "summary", "message", "text"),
+				Kind:       RunEventToolEvent,
+				ToolName:   toolName,
+				ToolPhase:  openClawJSONString(payload, "phase", "status"),
+				ToolCallID: openClawJSONString(payload, "toolCallId", "tool_call_id"),
+				Summary:    openClawJSONString(payload, "summary", "message", "text"),
 			})
 		}
 		if eventName == "agent" || len(events) > 0 || hasStartedAt {
@@ -459,7 +481,7 @@ func openClawRunEventsForBroadcast(response openClawResponse) (time.Time, []RunE
 }
 
 func (adapter OpenClawAdapter) emitOpenClawTrajectoryToolEvents(ctx context.Context, nativeRunID string, handle RunEventHandler, session *openClawRPCSession) error {
-	if handle == nil || strings.TrimSpace(nativeRunID) == "" || session == nil || session.hasToolEvents() {
+	if handle == nil || strings.TrimSpace(nativeRunID) == "" || session == nil {
 		return nil
 	}
 	events, err := adapter.openClawTrajectoryToolEvents(ctx, nativeRunID)
@@ -470,7 +492,9 @@ func (adapter OpenClawAdapter) emitOpenClawTrajectoryToolEvents(ctx context.Cont
 		return err
 	}
 	for _, event := range events {
-		session.markToolEvent()
+		if !session.markToolEvent(event) {
+			continue
+		}
 		if err := handle(event); err != nil {
 			return err
 		}
@@ -494,7 +518,7 @@ func (adapter OpenClawAdapter) openClawTrajectoryToolEvents(ctx context.Context,
 			continue
 		}
 		for _, event := range fileEvents {
-			key := strings.Join([]string{event.ToolName, event.ToolPhase, event.Summary}, "\x00")
+			key := openClawToolEventKey(event)
 			if _, ok := seen[key]; ok {
 				continue
 			}
@@ -644,13 +668,15 @@ func openClawTrajectoryToolEvent(raw []byte, nativeRunID string) (RunEvent, bool
 		Type  string `json:"type"`
 		RunID string `json:"runId"`
 		Data  struct {
-			Name      string          `json:"name"`
-			Arguments json.RawMessage `json:"arguments"`
-			Status    string          `json:"status"`
-			IsError   bool            `json:"isError"`
-			Result    json.RawMessage `json:"result"`
-			Output    string          `json:"output"`
-			Error     string          `json:"error"`
+			Name            string          `json:"name"`
+			ToolCallID      string          `json:"toolCallId"`
+			ToolCallIDSnake string          `json:"tool_call_id"`
+			Arguments       json.RawMessage `json:"arguments"`
+			Status          string          `json:"status"`
+			IsError         bool            `json:"isError"`
+			Result          json.RawMessage `json:"result"`
+			Output          string          `json:"output"`
+			Error           string          `json:"error"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &event); err != nil {
@@ -663,13 +689,15 @@ func openClawTrajectoryToolEvent(raw []byte, nativeRunID string) (RunEvent, bool
 	if toolName == "" {
 		return RunEvent{}, false
 	}
+	toolCallID := strings.TrimSpace(firstNonEmpty(event.Data.ToolCallID, event.Data.ToolCallIDSnake))
 	switch strings.ToLower(strings.TrimSpace(event.Type)) {
 	case "tool.call":
 		return RunEvent{
-			Kind:      RunEventToolEvent,
-			ToolName:  toolName,
-			ToolPhase: "started",
-			Summary:   openClawTrajectoryJSONKeysSummary(event.Data.Arguments),
+			Kind:       RunEventToolEvent,
+			ToolName:   toolName,
+			ToolPhase:  "started",
+			ToolCallID: toolCallID,
+			Summary:    openClawTrajectoryJSONKeysSummary(event.Data.Arguments),
 		}, true
 	case "tool.result":
 		phase := "completed"
@@ -684,14 +712,22 @@ func openClawTrajectoryToolEvent(raw []byte, nativeRunID string) (RunEvent, bool
 			summary = "error"
 		}
 		return RunEvent{
-			Kind:      RunEventToolEvent,
-			ToolName:  toolName,
-			ToolPhase: phase,
-			Summary:   summary,
+			Kind:       RunEventToolEvent,
+			ToolName:   toolName,
+			ToolPhase:  phase,
+			ToolCallID: toolCallID,
+			Summary:    summary,
 		}, true
 	default:
 		return RunEvent{}, false
 	}
+}
+
+func openClawToolEventKey(event RunEvent) string {
+	if toolCallID := strings.TrimSpace(event.ToolCallID); toolCallID != "" {
+		return strings.Join([]string{"id", toolCallID, event.ToolPhase}, "\x00")
+	}
+	return strings.Join([]string{"summary", event.ToolName, event.ToolPhase, event.Summary}, "\x00")
 }
 
 func openClawTrajectoryJSONKeysSummary(raw json.RawMessage) string {

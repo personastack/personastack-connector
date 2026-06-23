@@ -527,8 +527,8 @@ func TestOpenClawAdapterStreamOrPollRunForwardsTrajectoryToolEvents(t *testing.T
 		t.Fatalf("mkdir session dir: %v", err)
 	}
 	trajectory := strings.Join([]string{
-		`{"type":"tool.call","runId":"run-1","data":{"name":"bash","arguments":{"command":"pwd","cwd":"/tmp"}}}`,
-		`{"type":"tool.result","runId":"run-1","data":{"name":"bash","status":"completed","isError":false,"output":"ok"}}`,
+		`{"type":"tool.call","runId":"run-1","data":{"name":"bash","toolCallId":"call-1","arguments":{"command":"pwd","cwd":"/tmp"}}}`,
+		`{"type":"tool.result","runId":"run-1","data":{"name":"bash","toolCallId":"call-1","status":"completed","isError":false,"output":"ok"}}`,
 		`{"type":"tool.call","runId":"other-run","data":{"name":"bash","arguments":{"command":"ignored"}}}`,
 	}, "\n")
 	if err := os.WriteFile(filepath.Join(sessionDir, "session.trajectory.jsonl"), []byte(trajectory), 0o600); err != nil {
@@ -576,6 +576,176 @@ func TestOpenClawAdapterStreamOrPollRunForwardsTrajectoryToolEvents(t *testing.T
 	}
 	if events[2].Kind != RunEventToolEvent || events[2].ToolName != "bash" || events[2].ToolPhase != "completed" || events[2].Summary != "output" {
 		t.Fatalf("tool result event = %+v", events[2])
+	}
+}
+
+func TestOpenClawAdapterStreamOrPollRunForwardsTrajectoryToolEventsAfterOutputTimeout(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	sessionDir := filepath.Join(homeDir, ".openclaw", "agents", "main", "sessions")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	trajectory := strings.Join([]string{
+		`{"type":"tool.call","runId":"run-1","data":{"name":"bash","toolCallId":"call-1","arguments":{"command":"printf ok","cwd":"/tmp"}}}`,
+		`{"type":"tool.result","runId":"run-1","data":{"name":"bash","toolCallId":"call-1","status":"completed","isError":false,"result":{"status":"completed","exitCode":0}}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(sessionDir, "session.trajectory.jsonl"), []byte(trajectory), 0o600); err != nil {
+		t.Fatalf("write trajectory: %v", err)
+	}
+	events := []RunEvent{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read agent.wait: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{Type: "event", Event: "agent", Result: json.RawMessage(`{"deltaText":"done"}`)})
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, OK: boolRef(false), Error: "timeout"})
+	}))
+	defer server.Close()
+
+	result, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StreamOrPollRun(context.Background(), "run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(events) != 4 {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	if events[0].Kind != RunEventStarted || events[1].Kind != RunEventOutputDelta || events[1].Delta != "done" {
+		t.Fatalf("unexpected output events: %+v", events)
+	}
+	if events[2].Kind != RunEventToolEvent || events[2].ToolName != "bash" || events[2].ToolPhase != "started" {
+		t.Fatalf("tool call event = %+v", events[2])
+	}
+	if events[3].Kind != RunEventToolEvent || events[3].ToolName != "bash" || events[3].ToolPhase != "completed" {
+		t.Fatalf("tool result event = %+v", events[3])
+	}
+}
+
+func TestOpenClawAdapterStreamOrPollRunMergesTrajectoryWithPartialLiveToolEvents(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	sessionDir := filepath.Join(homeDir, ".openclaw", "agents", "main", "sessions")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	trajectory := strings.Join([]string{
+		`{"type":"tool.call","runId":"run-1","data":{"name":"bash","toolCallId":"call-1","arguments":{"command":"printf ok","cwd":"/tmp"}}}`,
+		`{"type":"tool.result","runId":"run-1","data":{"name":"bash","toolCallId":"call-1","status":"completed","isError":false,"result":{"status":"completed","exitCode":0}}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(sessionDir, "session.trajectory.jsonl"), []byte(trajectory), 0o600); err != nil {
+		t.Fatalf("write trajectory: %v", err)
+	}
+	events := []RunEvent{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read agent.wait: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{Type: "event", Event: "session.tool", Result: json.RawMessage(`{"toolName":"bash","toolCallId":"call-1","phase":"started","summary":"live started"}`)})
+		_ = conn.WriteJSON(openClawResponse{Type: "event", Event: "agent", Result: json.RawMessage(`{"deltaText":"done"}`)})
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, OK: boolRef(false), Error: "timeout"})
+	}))
+	defer server.Close()
+
+	result, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StreamOrPollRun(context.Background(), "run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	toolEvents := []RunEvent{}
+	for _, event := range events {
+		if event.Kind == RunEventToolEvent {
+			toolEvents = append(toolEvents, event)
+		}
+	}
+	if len(toolEvents) != 2 {
+		t.Fatalf("unexpected tool events: %+v", toolEvents)
+	}
+	if toolEvents[0].ToolName != "bash" || toolEvents[0].ToolPhase != "started" {
+		t.Fatalf("tool call event = %+v", toolEvents[0])
+	}
+	if toolEvents[1].ToolName != "bash" || toolEvents[1].ToolPhase != "completed" {
+		t.Fatalf("tool result event = %+v", toolEvents[1])
+	}
+}
+
+func TestOpenClawAdapterStreamOrPollRunKeepsDistinctIdenticalToolCalls(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	sessionDir := filepath.Join(homeDir, ".openclaw", "agents", "main", "sessions")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	trajectory := strings.Join([]string{
+		`{"type":"tool.call","runId":"run-1","data":{"name":"bash","tool_call_id":"call-1","arguments":{"command":"pwd","cwd":"/tmp"}}}`,
+		`{"type":"tool.result","runId":"run-1","data":{"name":"bash","tool_call_id":"call-1","status":"completed","isError":false,"result":{"status":"completed","exitCode":0}}}`,
+		`{"type":"tool.call","runId":"run-1","data":{"name":"bash","tool_call_id":"call-2","arguments":{"command":"pwd","cwd":"/tmp"}}}`,
+		`{"type":"tool.result","runId":"run-1","data":{"name":"bash","tool_call_id":"call-2","status":"completed","isError":false,"result":{"status":"completed","exitCode":0}}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(sessionDir, "session.trajectory.jsonl"), []byte(trajectory), 0o600); err != nil {
+		t.Fatalf("write trajectory: %v", err)
+	}
+	events := []RunEvent{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read agent.wait: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"status":"completed","output":"done"}`)})
+	}))
+	defer server.Close()
+
+	_, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StreamOrPollRun(context.Background(), "run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	toolEvents := []RunEvent{}
+	for _, event := range events {
+		if event.Kind == RunEventToolEvent {
+			toolEvents = append(toolEvents, event)
+		}
+	}
+	if len(toolEvents) != 4 {
+		t.Fatalf("unexpected tool events: %+v", toolEvents)
+	}
+	if toolEvents[0].ToolCallID != "call-1" || toolEvents[2].ToolCallID != "call-2" {
+		t.Fatalf("distinct tool calls collapsed: %+v", toolEvents)
 	}
 }
 

@@ -165,12 +165,13 @@ func (kind RunEventKind) String() string {
 }
 
 type RunEvent struct {
-	Kind      RunEventKind
-	StartedAt time.Time
-	Delta     string
-	ToolName  string
-	ToolPhase string
-	Summary   string
+	Kind       RunEventKind
+	StartedAt  time.Time
+	Delta      string
+	ToolName   string
+	ToolPhase  string
+	ToolCallID string
+	Summary    string
 }
 
 type RunEventHandler func(RunEvent) error
