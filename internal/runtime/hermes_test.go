@@ -716,6 +716,154 @@ func TestHermesAdapterStreamOrPollRunDoesNotDuplicateTerminalOutput(t *testing.T
 	}
 }
 
+func TestHermesAdapterStreamOrPollRunEnrichesBlankSuccessfulSSETerminal(t *testing.T) {
+	statusCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"run.completed\"}\n\n"))
+		case "/v1/runs/hermes-run-1":
+			statusCalls++
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "completed",
+				"output": "done from status",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewHermesAdapter(server.URL, "key-1").StreamOrPollRun(context.Background(), "hermes-run-1", nil)
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done from status" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if statusCalls != 1 {
+		t.Fatalf("status calls = %d, want 1", statusCalls)
+	}
+}
+
+func TestHermesAdapterStreamOrPollRunEmitsStateToolEventsAfterSSETerminal(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HERMES_HOME", homeDir)
+	if err := os.WriteFile(filepath.Join(homeDir, "state.db"), []byte("placeholder"), 0o600); err != nil {
+		t.Fatalf("write state db placeholder: %v", err)
+	}
+	sqliteJSON := filepath.Join(homeDir, "sqlite-output.json")
+	rows := []hermesStateMessageRow{
+		{
+			Role:      "assistant",
+			ToolCalls: `[{"id":"call-1","function":{"name":"terminal","arguments":"{\"command\":\"pwd\",\"cwd\":\"/tmp\"}"}}]`,
+		},
+		{
+			Role:       "tool",
+			ToolCallID: "call-1",
+			ToolName:   "terminal",
+			Content:    `{"output":"secret output not forwarded","exit_code":0,"error":null}`,
+		},
+	}
+	encodedRows, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("marshal rows: %v", err)
+	}
+	if err := os.WriteFile(sqliteJSON, encodedRows, 0o600); err != nil {
+		t.Fatalf("write sqlite output: %v", err)
+	}
+	script := filepath.Join(homeDir, "sqlite3")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat \"$HERMES_SQLITE_JSON\"\n"), 0o700); err != nil {
+		t.Fatalf("write sqlite script: %v", err)
+	}
+	originalSQLiteCommand := hermesSQLiteCommand
+	originalSQLitePathValue := hermesSQLitePathValue
+	hermesSQLitePathValue = script
+	hermesSQLiteCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		if name != script {
+			t.Fatalf("sqlite command path = %q, want %q", name, script)
+		}
+		command := exec.CommandContext(ctx, script)
+		command.Env = append(os.Environ(), "HERMES_SQLITE_JSON="+sqliteJSON)
+		return command
+	}
+	t.Cleanup(func() {
+		hermesSQLiteCommand = originalSQLiteCommand
+		hermesSQLitePathValue = originalSQLitePathValue
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runs/hermes-run-1/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"run.completed\",\"output\":\"done\"}\n\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	events := []RunEvent{}
+	result, err := NewHermesAdapter(server.URL, "key-1").StreamOrPollRun(context.Background(), "hermes-run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	toolEvents := []RunEvent{}
+	for _, event := range events {
+		if event.Kind == RunEventToolEvent {
+			toolEvents = append(toolEvents, event)
+		}
+	}
+	if len(toolEvents) != 2 {
+		t.Fatalf("unexpected tool events: %+v", toolEvents)
+	}
+	if toolEvents[0].ToolName != "terminal" || toolEvents[0].ToolPhase != "started" || !strings.Contains(toolEvents[0].Summary, `"command":true`) {
+		t.Fatalf("tool call event = %+v", toolEvents[0])
+	}
+	if toolEvents[1].ToolName != "terminal" || toolEvents[1].ToolPhase != "completed" || strings.Contains(toolEvents[1].Summary, "secret") || !strings.Contains(toolEvents[1].Summary, `"exit_code":true`) {
+		t.Fatalf("tool result event = %+v", toolEvents[1])
+	}
+}
+
+func TestHermesStateSessionIDCandidatesIncludesRememberedRunID(t *testing.T) {
+	nativeRunID := "native-run-1"
+	hermesNativeRunSessionIDs.Delete(nativeRunID)
+	t.Cleanup(func() {
+		hermesNativeRunSessionIDs.Delete(nativeRunID)
+	})
+	hermesRememberNativeRunSessionID(nativeRunID, RunRequest{RunID: "persona-run-1", AssignmentID: "assignment-1"})
+	candidates := hermesStateSessionIDCandidates(nativeRunID)
+	if !slices.Equal(candidates, []string{"native-run-1", "persona-run-1"}) {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+	queryList := hermesStateSQLStringList([]string{"native-run-1", "persona-run-'1"})
+	if queryList != "'native-run-1','persona-run-''1'" {
+		t.Fatalf("query list = %q", queryList)
+	}
+}
+
+func TestHermesStateToolEventsFromRowsPreservesDistinctIdenticalCalls(t *testing.T) {
+	events := hermesStateToolEventsFromRows([]hermesStateMessageRow{
+		{
+			Role:      "assistant",
+			ToolCalls: `[{"id":"call-1","function":{"name":"terminal","arguments":"{\"command\":\"pwd\"}"}},{"id":"call-2","function":{"name":"terminal","arguments":"{\"command\":\"pwd\"}"}}]`,
+		},
+		{Role: "tool", ToolCallID: "call-1", ToolName: "terminal", Content: `{"output":"one","exit_code":0}`},
+		{Role: "tool", ToolCallID: "call-2", ToolName: "terminal", Content: `{"output":"two","exit_code":0}`},
+	})
+	if len(events) != 4 {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	if events[0].ToolCallID != "call-1" || events[1].ToolCallID != "call-2" || events[2].ToolCallID != "call-1" || events[3].ToolCallID != "call-2" {
+		t.Fatalf("distinct identical calls collapsed: %+v", events)
+	}
+}
+
 func TestHermesAdapterStreamOrPollRunAllowsSlowSSETerminalEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

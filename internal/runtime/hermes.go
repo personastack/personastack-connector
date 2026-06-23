@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -29,10 +30,14 @@ const hermesRequiredRunSubmissionFeature = "run_submission"
 const hermesRequiredRunStatusFeature = "run_status"
 const hermesDegradedRunEventsSSEFeature = "run_events_sse"
 const hermesDegradedRunStopFeature = "run_stop"
+const hermesSQLitePath = "/usr/bin/sqlite3"
 
 var errHermesRunEventsUnavailable = errors.New("Hermes run events unavailable")
 var hermesToolsListCommand = exec.CommandContext
+var hermesSQLiteCommand = exec.CommandContext
+var hermesSQLitePathValue = hermesSQLitePath
 var hermesLookPath = exec.LookPath
+var hermesNativeRunSessionIDs sync.Map
 
 type HermesAdapter struct {
 	BaseURL string
@@ -201,10 +206,15 @@ func (adapter HermesAdapter) StreamOrPollRun(ctx context.Context, nativeRunID st
 	if fallbackRunID, ok := hermesResponsesRunTarget(trimmedRunID); ok {
 		return adapter.waitHermesResponse(ctx, fallbackRunID, handle)
 	}
+	defer hermesForgetNativeRunSessionID(trimmedRunID)
 	state := &runEventState{}
+	observedToolEvents := false
 	observer := func(event RunEvent) error {
 		if event.Kind == RunEventStarted {
 			return state.emitStarted(handle, event.StartedAt)
+		}
+		if event.Kind == RunEventToolEvent {
+			observedToolEvents = true
 		}
 		if handle == nil {
 			return nil
@@ -216,9 +226,9 @@ func (adapter HermesAdapter) StreamOrPollRun(ctx context.Context, nativeRunID st
 			return RunResult{}, err
 		}
 	} else if terminal {
-		return result, nil
+		return adapter.terminalHermesRun(ctx, trimmedRunID, result, handle, state, observedToolEvents)
 	}
-	return adapter.pollRunStatus(ctx, trimmedRunID, handle, state)
+	return adapter.pollRunStatus(ctx, trimmedRunID, handle, state, observedToolEvents)
 }
 
 func (adapter HermesAdapter) WaitRun(ctx context.Context, nativeRunID string) (RunResult, error) {
@@ -230,6 +240,7 @@ func (adapter HermesAdapter) StartRun(request RunRequest) (string, error) {
 		return "", err
 	}
 	if nativeRunID, err := adapter.startHermesRun(request); err == nil {
+		hermesRememberNativeRunSessionID(nativeRunID, request)
 		return nativeRunID, nil
 	} else if !hermesRunFallbackAllowed(err) {
 		return "", err
@@ -347,7 +358,7 @@ func (adapter HermesAdapter) streamRunEvents(ctx context.Context, nativeRunID st
 	return result, terminal, nil
 }
 
-func (adapter HermesAdapter) pollRunStatus(ctx context.Context, nativeRunID string, handle RunEventHandler, state *runEventState) (RunResult, error) {
+func (adapter HermesAdapter) pollRunStatus(ctx context.Context, nativeRunID string, handle RunEventHandler, state *runEventState, observedToolEvents bool) (RunResult, error) {
 	result, err := adapter.waitHermesRunStatus(ctx, nativeRunID)
 	if err != nil {
 		return RunResult{}, err
@@ -357,7 +368,293 @@ func (adapter HermesAdapter) pollRunStatus(ctx context.Context, nativeRunID stri
 			return RunResult{}, err
 		}
 	}
+	if !observedToolEvents {
+		if err := adapter.emitHermesStateToolEvents(ctx, nativeRunID, handle, state); err != nil {
+			return RunResult{}, err
+		}
+	}
 	return result, nil
+}
+
+func (adapter HermesAdapter) terminalHermesRun(ctx context.Context, nativeRunID string, result RunResult, handle RunEventHandler, state *runEventState, observedToolEvents bool) (RunResult, error) {
+	if result.Status == RunStatusSucceeded && strings.TrimSpace(result.Output) == "" {
+		enriched, enrichedTerminal, err := adapter.runStatus(ctx, nativeRunID)
+		if err == nil && enrichedTerminal && strings.TrimSpace(enriched.Output) != "" {
+			if !observedToolEvents {
+				if err := adapter.emitHermesStateToolEvents(ctx, nativeRunID, handle, state); err != nil {
+					return RunResult{}, err
+				}
+			}
+			return enriched, nil
+		}
+	}
+	if !observedToolEvents {
+		if err := adapter.emitHermesStateToolEvents(ctx, nativeRunID, handle, state); err != nil {
+			return RunResult{}, err
+		}
+	}
+	return result, nil
+}
+
+func (adapter HermesAdapter) emitHermesStateToolEvents(ctx context.Context, nativeRunID string, handle RunEventHandler, state *runEventState) error {
+	if handle == nil || strings.TrimSpace(nativeRunID) == "" {
+		return nil
+	}
+	events, err := adapter.hermesStateToolEvents(ctx, nativeRunID)
+	if err != nil || len(events) == 0 {
+		return nil
+	}
+	if state == nil {
+		state = &runEventState{}
+	}
+	if err := state.emitStarted(handle, time.Time{}); err != nil {
+		return err
+	}
+	for _, event := range events {
+		if err := handle(event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (adapter HermesAdapter) hermesStateToolEvents(ctx context.Context, nativeRunID string) ([]RunEvent, error) {
+	stateDB := hermesStateDBPath()
+	if stateDB == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(stateDB); err != nil {
+		return nil, nil
+	}
+	if _, err := os.Stat(hermesSQLitePathValue); err != nil {
+		return nil, nil
+	}
+	sessionIDs := hermesStateSessionIDCandidates(nativeRunID)
+	if len(sessionIDs) == 0 {
+		return nil, nil
+	}
+	query := fmt.Sprintf(`SELECT role, COALESCE(tool_call_id, '') AS tool_call_id, COALESCE(tool_name, '') AS tool_name, COALESCE(tool_calls, '') AS tool_calls, COALESCE(content, '') AS content FROM messages WHERE session_id IN (%s) AND role IN ('assistant', 'tool') ORDER BY id ASC`, hermesStateSQLStringList(sessionIDs))
+	command := hermesSQLiteCommand(ctx, hermesSQLitePathValue, "-json", stateDB, query)
+	out, err := command.Output()
+	if err != nil {
+		return nil, err
+	}
+	var rows []hermesStateMessageRow
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, err
+	}
+	return hermesStateToolEventsFromRows(rows), nil
+}
+
+func hermesStateDBPath() string {
+	if hermesHome := strings.TrimSpace(os.Getenv("HERMES_HOME")); hermesHome != "" {
+		return filepath.Join(hermesHome, "state.db")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(homeDir) == "" {
+		return ""
+	}
+	return filepath.Join(homeDir, ".hermes", "state.db")
+}
+
+func hermesRememberNativeRunSessionID(nativeRunID string, request RunRequest) {
+	nativeRunID = strings.TrimSpace(nativeRunID)
+	sessionID := strings.TrimSpace(firstNonEmpty(request.RunID, request.AssignmentID))
+	if nativeRunID == "" || sessionID == "" || nativeRunID == sessionID {
+		return
+	}
+	hermesNativeRunSessionIDs.Store(nativeRunID, sessionID)
+}
+
+func hermesForgetNativeRunSessionID(nativeRunID string) {
+	hermesNativeRunSessionIDs.Delete(strings.TrimSpace(nativeRunID))
+}
+
+func hermesStateSessionIDCandidates(nativeRunID string) []string {
+	trimmedRunID := strings.TrimSpace(nativeRunID)
+	if trimmedRunID == "" {
+		return nil
+	}
+	candidates := []string{trimmedRunID}
+	if mapped, ok := hermesNativeRunSessionIDs.Load(trimmedRunID); ok {
+		if sessionID := strings.TrimSpace(fmt.Sprint(mapped)); sessionID != "" && sessionID != trimmedRunID {
+			candidates = append(candidates, sessionID)
+		}
+	}
+	return candidates
+}
+
+func hermesStateSQLStringList(values []string) string {
+	quoted := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		quoted = append(quoted, "'"+strings.ReplaceAll(value, "'", "''")+"'")
+	}
+	return strings.Join(quoted, ",")
+}
+
+type hermesStateMessageRow struct {
+	Role       string `json:"role"`
+	ToolCallID string `json:"tool_call_id"`
+	ToolName   string `json:"tool_name"`
+	ToolCalls  string `json:"tool_calls"`
+	Content    string `json:"content"`
+}
+
+func hermesStateToolEventsFromRows(rows []hermesStateMessageRow) []RunEvent {
+	events := []RunEvent{}
+	seen := map[string]struct{}{}
+	for _, row := range rows {
+		switch strings.TrimSpace(row.Role) {
+		case "assistant":
+			for _, event := range hermesStateToolCallEvents(row.ToolCalls) {
+				key := hermesStateToolEventKey(event)
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				events = append(events, event)
+			}
+		case "tool":
+			event, ok := hermesStateToolResultEvent(row)
+			if !ok {
+				continue
+			}
+			key := hermesStateToolEventKey(event)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func hermesStateToolCallEvents(raw string) []RunEvent {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var calls []map[string]any
+	if err := json.Unmarshal([]byte(raw), &calls); err != nil {
+		return nil
+	}
+	events := []RunEvent{}
+	for _, call := range calls {
+		toolCallID := strings.TrimSpace(firstNonEmpty(hermesStateMapString(call, "call_id"), hermesStateMapString(call, "id"), hermesStateMapString(call, "tool_call_id")))
+		toolName := strings.TrimSpace(firstNonEmpty(hermesStateMapString(call, "name"), hermesStateMapString(call, "tool_name")))
+		if nested, ok := call["function"].(map[string]any); ok {
+			toolName = firstNonEmpty(toolName, hermesStateMapString(nested, "name"))
+		}
+		if toolName == "" {
+			continue
+		}
+		events = append(events, RunEvent{
+			Kind:       RunEventToolEvent,
+			ToolName:   toolName,
+			ToolPhase:  "started",
+			ToolCallID: toolCallID,
+			Summary:    hermesStateToolCallSummary(call),
+		})
+	}
+	return events
+}
+
+func hermesStateToolCallSummary(call map[string]any) string {
+	if nested, ok := call["function"].(map[string]any); ok {
+		if summary := hermesStateJSONKeysSummary(hermesStateMapString(nested, "arguments")); summary != "" {
+			return summary
+		}
+	}
+	return hermesStateJSONKeysSummary(hermesStateMapString(call, "arguments"))
+}
+
+func hermesStateToolResultEvent(row hermesStateMessageRow) (RunEvent, bool) {
+	toolName := strings.TrimSpace(row.ToolName)
+	if toolName == "" {
+		toolName = "tool"
+	}
+	event := RunEvent{
+		Kind:       RunEventToolEvent,
+		ToolName:   toolName,
+		ToolPhase:  "completed",
+		ToolCallID: strings.TrimSpace(row.ToolCallID),
+		Summary:    hermesStateToolResultSummary(row.Content),
+	}
+	if event.ToolCallID == "" && strings.TrimSpace(row.Content) == "" {
+		return RunEvent{}, false
+	}
+	return event, true
+}
+
+func hermesStateToolResultSummary(content string) string {
+	if summary := hermesStateLeadingJSONKeysSummary(content); summary != "" {
+		return summary
+	}
+	if strings.TrimSpace(content) != "" {
+		return "output"
+	}
+	return ""
+}
+
+func hermesStateLeadingJSONKeysSummary(content string) string {
+	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(content)))
+	var value map[string]json.RawMessage
+	if err := decoder.Decode(&value); err != nil {
+		return ""
+	}
+	return hermesStateRawJSONKeysSummary(value)
+}
+
+func hermesStateJSONKeysSummary(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return ""
+	}
+	return hermesStateRawJSONKeysSummary(value)
+}
+
+func hermesStateRawJSONKeysSummary(value map[string]json.RawMessage) string {
+	if len(value) == 0 {
+		return ""
+	}
+	summary := make(map[string]bool, len(value))
+	for key := range value {
+		summary[key] = true
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func hermesStateMapString(value map[string]any, key string) string {
+	raw, ok := value[key]
+	if !ok {
+		return ""
+	}
+	switch typed := raw.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func hermesStateToolEventKey(event RunEvent) string {
+	if toolCallID := strings.TrimSpace(event.ToolCallID); toolCallID != "" {
+		return strings.Join([]string{toolCallID, event.ToolPhase}, "\x00")
+	}
+	return strings.Join([]string{event.ToolName, event.ToolPhase, event.Summary}, "\x00")
 }
 
 func (adapter HermesAdapter) waitHermesRunStatus(ctx context.Context, nativeRunID string) (RunResult, error) {
