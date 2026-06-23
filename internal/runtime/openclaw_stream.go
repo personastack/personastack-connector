@@ -1,10 +1,14 @@
 package runtime
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +17,7 @@ import (
 )
 
 const openClawSetupRetryBudget = 30 * time.Second
+const maxOpenClawTrajectoryToolSummaryRunes = 8192
 
 type openClawRetryableError struct {
 	info openClawErrorInfo
@@ -193,12 +198,18 @@ func (adapter OpenClawAdapter) openClawStreamOrPollRun(ctx context.Context, nati
 		}
 		switch strings.ToLower(strings.TrimSpace(result.Status)) {
 		case "failed", "error":
+			if err := adapter.emitOpenClawTrajectoryToolEvents(ctx, nativeRunID, handle, session); err != nil {
+				return RunResult{}, err
+			}
 			return RunResult{Status: RunStatusFailed, Output: strings.TrimSpace(firstNonEmpty(result.Error, result.Output))}, nil
 		case "cancelled", "canceled", "aborted":
 			return RunResult{Status: RunStatusCancelled}, nil
 		case "timeout":
 			continue
 		default:
+			if err := adapter.emitOpenClawTrajectoryToolEvents(ctx, nativeRunID, handle, session); err != nil {
+				return RunResult{}, err
+			}
 			return RunResult{Status: RunStatusSucceeded, Output: strings.TrimSpace(result.Output)}, nil
 		}
 	}
@@ -217,6 +228,8 @@ type openClawRPCSession struct {
 	started       bool
 	outputMu      sync.Mutex
 	outputBuilder strings.Builder
+	toolMu        sync.Mutex
+	toolEvents    int
 }
 
 func newOpenClawRPCSession(conn *websocket.Conn, handle RunEventHandler) *openClawRPCSession {
@@ -363,6 +376,9 @@ func (session *openClawRPCSession) handleBroadcast(response openClawResponse) er
 		if event.Kind == RunEventOutputDelta && strings.TrimSpace(event.Delta) != "" {
 			session.appendOutput(event.Delta)
 		}
+		if event.Kind == RunEventToolEvent {
+			session.markToolEvent()
+		}
 		if err := handle(event); err != nil {
 			return err
 		}
@@ -383,6 +399,18 @@ func (session *openClawRPCSession) output() string {
 	session.outputMu.Lock()
 	defer session.outputMu.Unlock()
 	return strings.TrimSpace(session.outputBuilder.String())
+}
+
+func (session *openClawRPCSession) markToolEvent() {
+	session.toolMu.Lock()
+	session.toolEvents++
+	session.toolMu.Unlock()
+}
+
+func (session *openClawRPCSession) hasToolEvents() bool {
+	session.toolMu.Lock()
+	defer session.toolMu.Unlock()
+	return session.toolEvents > 0
 }
 
 func (session *openClawRPCSession) emitStarted(handle RunEventHandler, startedAt time.Time) error {
@@ -428,6 +456,269 @@ func openClawRunEventsForBroadcast(response openClawResponse) (time.Time, []RunE
 		}
 	}
 	return time.Time{}, nil, false
+}
+
+func (adapter OpenClawAdapter) emitOpenClawTrajectoryToolEvents(ctx context.Context, nativeRunID string, handle RunEventHandler, session *openClawRPCSession) error {
+	if handle == nil || strings.TrimSpace(nativeRunID) == "" || session == nil || session.hasToolEvents() {
+		return nil
+	}
+	events, err := adapter.openClawTrajectoryToolEvents(ctx, nativeRunID)
+	if err != nil || len(events) == 0 {
+		return nil
+	}
+	if err := session.emitStarted(handle, time.Now().UTC()); err != nil {
+		return err
+	}
+	for _, event := range events {
+		session.markToolEvent()
+		if err := handle(event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (adapter OpenClawAdapter) openClawTrajectoryToolEvents(ctx context.Context, nativeRunID string) ([]RunEvent, error) {
+	paths, err := adapter.openClawTrajectoryFiles()
+	if err != nil || len(paths) == 0 {
+		return nil, err
+	}
+	events := []RunEvent{}
+	seen := map[string]struct{}{}
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		fileEvents, err := openClawTrajectoryToolEventsFromFile(path, nativeRunID)
+		if err != nil {
+			continue
+		}
+		for _, event := range fileEvents {
+			key := strings.Join([]string{event.ToolName, event.ToolPhase, event.Summary}, "\x00")
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			events = append(events, event)
+		}
+	}
+	return events, nil
+}
+
+func (adapter OpenClawAdapter) openClawTrajectoryFiles() ([]string, error) {
+	agentID := strings.TrimSpace(adapter.AgentID)
+	if agentID == "" {
+		agentID = "main"
+	}
+	dirs := []string{}
+	if value := strings.TrimSpace(os.Getenv("OPENCLAW_TRAJECTORY_DIR")); value != "" {
+		dirs = append(dirs, value)
+	}
+	sessionDir := filepath.Join(openClawStateDir(), "agents", agentID, "sessions")
+	dirs = append(dirs, sessionDir)
+	filesByPath := map[string]trajectoryFile{}
+	for _, dir := range dirs {
+		files, err := openClawTrajectoryFilesInDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		for _, file := range files {
+			filesByPath[file.path] = file
+		}
+	}
+	pointerFiles, err := filepath.Glob(filepath.Join(sessionDir, "*.trajectory-path.json"))
+	if err != nil {
+		return nil, err
+	}
+	for _, pointerFile := range pointerFiles {
+		path := openClawTrajectoryPathFromPointer(pointerFile)
+		if path == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		filesByPath[path] = trajectoryFile{path: path, modTime: info.ModTime()}
+	}
+	files := []trajectoryFile{}
+	for _, file := range filesByPath {
+		files = append(files, file)
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.After(files[j].modTime)
+	})
+	if len(files) > 16 {
+		files = files[:16]
+	}
+	out := make([]string, 0, len(files))
+	for _, file := range files {
+		out = append(out, file.path)
+	}
+	return out, nil
+}
+
+type trajectoryFile struct {
+	path    string
+	modTime time.Time
+}
+
+func openClawTrajectoryFilesInDir(dir string) ([]trajectoryFile, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	files := []trajectoryFile{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".trajectory.jsonl") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, trajectoryFile{path: filepath.Join(dir, entry.Name()), modTime: info.ModTime()})
+	}
+	return files, nil
+}
+
+func openClawTrajectoryPathFromPointer(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var pointer map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &pointer); err != nil {
+		return ""
+	}
+	for _, key := range []string{"path", "trajectoryPath", "trajectory_path", "file", "jsonl"} {
+		value, ok := pointer[key]
+		if !ok {
+			continue
+		}
+		var text string
+		if err := json.Unmarshal(value, &text); err == nil && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
+func openClawStateDir() string {
+	if value := strings.TrimSpace(os.Getenv("OPENCLAW_HOME")); value != "" {
+		return filepath.Join(value, ".openclaw")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(homeDir) == "" {
+		return ".openclaw"
+	}
+	return filepath.Join(homeDir, ".openclaw")
+}
+
+func openClawTrajectoryToolEventsFromFile(path string, nativeRunID string) ([]RunEvent, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	events := []RunEvent{}
+	for scanner.Scan() {
+		event, ok := openClawTrajectoryToolEvent(scanner.Bytes(), nativeRunID)
+		if ok {
+			events = append(events, event)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func openClawTrajectoryToolEvent(raw []byte, nativeRunID string) (RunEvent, bool) {
+	var event struct {
+		Type  string `json:"type"`
+		RunID string `json:"runId"`
+		Data  struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+			Status    string          `json:"status"`
+			IsError   bool            `json:"isError"`
+			Result    json.RawMessage `json:"result"`
+			Output    string          `json:"output"`
+			Error     string          `json:"error"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return RunEvent{}, false
+	}
+	if strings.TrimSpace(event.RunID) != strings.TrimSpace(nativeRunID) {
+		return RunEvent{}, false
+	}
+	toolName := strings.TrimSpace(event.Data.Name)
+	if toolName == "" {
+		return RunEvent{}, false
+	}
+	switch strings.ToLower(strings.TrimSpace(event.Type)) {
+	case "tool.call":
+		return RunEvent{
+			Kind:      RunEventToolEvent,
+			ToolName:  toolName,
+			ToolPhase: "started",
+			Summary:   openClawTrajectoryJSONKeysSummary(event.Data.Arguments),
+		}, true
+	case "tool.result":
+		phase := "completed"
+		if event.Data.IsError || strings.EqualFold(strings.TrimSpace(event.Data.Status), "failed") || strings.EqualFold(strings.TrimSpace(event.Data.Status), "error") {
+			phase = "failed"
+		}
+		summary := openClawTrajectoryJSONKeysSummary(event.Data.Result)
+		if summary == "" && event.Data.Output != "" {
+			summary = "output"
+		}
+		if summary == "" && event.Data.Error != "" {
+			summary = "error"
+		}
+		return RunEvent{
+			Kind:      RunEventToolEvent,
+			ToolName:  toolName,
+			ToolPhase: phase,
+			Summary:   summary,
+		}, true
+	default:
+		return RunEvent{}, false
+	}
+}
+
+func openClawTrajectoryJSONKeysSummary(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || len(object) == 0 {
+		return ""
+	}
+	summary := make(map[string]bool, len(object))
+	for key := range object {
+		summary[key] = true
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		return ""
+	}
+	return boundedOpenClawTrajectoryToolSummary(string(encoded))
+}
+
+func boundedOpenClawTrajectoryToolSummary(value string) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= maxOpenClawTrajectoryToolSummaryRunes {
+		return string(runes)
+	}
+	return string(runes[:maxOpenClawTrajectoryToolSummaryRunes]) + "..."
 }
 
 func openClawJSONString(raw json.RawMessage, names ...string) string {

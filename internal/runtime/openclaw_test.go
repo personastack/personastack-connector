@@ -519,6 +519,66 @@ func TestOpenClawAdapterStreamOrPollRunForwardsBroadcastEvents(t *testing.T) {
 	}
 }
 
+func TestOpenClawAdapterStreamOrPollRunForwardsTrajectoryToolEvents(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	sessionDir := filepath.Join(homeDir, ".openclaw", "agents", "main", "sessions")
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	trajectory := strings.Join([]string{
+		`{"type":"tool.call","runId":"run-1","data":{"name":"bash","arguments":{"command":"pwd","cwd":"/tmp"}}}`,
+		`{"type":"tool.result","runId":"run-1","data":{"name":"bash","status":"completed","isError":false,"output":"ok"}}`,
+		`{"type":"tool.call","runId":"other-run","data":{"name":"bash","arguments":{"command":"ignored"}}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(sessionDir, "session.trajectory.jsonl"), []byte(trajectory), 0o600); err != nil {
+		t.Fatalf("write trajectory: %v", err)
+	}
+	pointerPath := filepath.Join(sessionDir, "relocated.trajectory-path.json")
+	if err := os.WriteFile(pointerPath, []byte(`{"trajectoryPath":"`+filepath.Join(sessionDir, "session.trajectory.jsonl")+`"}`), 0o600); err != nil {
+		t.Fatalf("write trajectory pointer: %v", err)
+	}
+	events := []RunEvent{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		openClawTestAcceptOperator(t, conn, "token-1", `["health","status","agents.list","agent","agent.wait","sessions.abort"]`)
+		var request openClawRequest
+		if err := conn.ReadJSON(&request); err != nil {
+			t.Fatalf("read agent.wait: %v", err)
+		}
+		_ = conn.WriteJSON(openClawResponse{ID: request.ID, Result: []byte(`{"status":"completed","output":"done"}`)})
+	}))
+	defer server.Close()
+
+	result, err := NewOpenClawAdapter("ws"+server.URL[len("http"):], "token-1").StreamOrPollRun(context.Background(), "run-1", func(event RunEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("StreamOrPollRun() error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded || result.Output != "done" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if len(events) != 3 {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	if events[0].Kind != RunEventStarted {
+		t.Fatalf("first event = %+v", events[0])
+	}
+	if events[1].Kind != RunEventToolEvent || events[1].ToolName != "bash" || events[1].ToolPhase != "started" || !strings.Contains(events[1].Summary, `"command":true`) || !strings.Contains(events[1].Summary, `"cwd":true`) {
+		t.Fatalf("tool call event = %+v", events[1])
+	}
+	if events[2].Kind != RunEventToolEvent || events[2].ToolName != "bash" || events[2].ToolPhase != "completed" || events[2].Summary != "output" {
+		t.Fatalf("tool result event = %+v", events[2])
+	}
+}
+
 func TestOpenClawAdapterStreamOrPollRunRetriesStartupSidecars(t *testing.T) {
 	var attempts int32
 	startedAt := "2026-05-14T19:31:05Z"
