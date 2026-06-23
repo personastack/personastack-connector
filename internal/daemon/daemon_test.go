@@ -2802,6 +2802,59 @@ func TestRunnerReplaysActiveRunOnReconnect(t *testing.T) {
 	}
 }
 
+func TestRunnerClearsExpiredActiveRunBeforeReplay(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	now := time.Date(2026, 6, 23, 2, 40, 0, 0, time.UTC)
+	session, err := bridge.NewSession(config.Binding{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		RuntimeKind:          runtime.AdapterKindHermes,
+		NativeMCPServer:      "personastack-conn-1",
+		NativeMCPNamespace:   "personastack",
+		ConnectionGeneration: 2,
+	}, bridge.Credential{
+		ID:         "cred-1",
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+	})
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:         "conn-1",
+		PersonaID:            "persona-1",
+		ActiveRunID:          "run-1",
+		ActiveAssignmentID:   "assignment-1",
+		ActiveNativeRunID:    "native-1",
+		ActiveRunDeadlineAt:  now.Add(-time.Minute),
+		ConnectionGeneration: 2,
+	}}})
+	adapter := sessionCancelReplayAdapter{cancelStarted: make(chan struct{}, 1)}
+	runner := Runner{Store: &store, Now: func() time.Time { return now }}
+	frames := make([]externalagentprotocol.Frame, 0, 2)
+	if err := runner.replayActiveRun(context.Background(), config.Binding{ConnectionID: "conn-1", ConnectionGeneration: 2}, session, adapter, newRunObservationRegistry(), func(frame externalagentprotocol.Frame) error {
+		frames = append(frames, frame)
+		return nil
+	}); err != nil {
+		t.Fatalf("replay active run: %v", err)
+	}
+	if len(frames) != 0 {
+		t.Fatalf("expired active run replayed frames: %+v", frames)
+	}
+	cleared, ok := store.Binding("conn-1")
+	if !ok || cleared.ActiveRunID != "" || cleared.ActiveAssignmentID != "" || cleared.ActiveNativeRunID != "" || !cleared.ActiveRunDeadlineAt.IsZero() {
+		t.Fatalf("expired active run was not cleared: %+v", cleared)
+	}
+	select {
+	case <-adapter.cancelStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for expired native run cancellation")
+	}
+}
+
 func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

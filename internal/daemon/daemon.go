@@ -939,6 +939,15 @@ func (r Runner) replayActiveRun(ctx context.Context, binding config.Binding, ses
 	if strings.TrimSpace(latest.ActiveRunID) == "" || strings.TrimSpace(latest.ActiveAssignmentID) == "" || strings.TrimSpace(latest.ActiveNativeRunID) == "" {
 		return nil
 	}
+	if activeRunDeadlineExpired(latest.ActiveRunDeadlineAt, r.now()) {
+		nativeRunID := strings.TrimSpace(latest.ActiveNativeRunID)
+		if adapter != nil && nativeRunID != "" {
+			go func() {
+				_ = adapter.CancelRun(nativeRunID)
+			}()
+		}
+		return r.clearRunState(binding, latest.ActiveRunID)
+	}
 	accepted := session.RunAcceptedFrame(externalagentprotocol.Frame{
 		MessageID:    uuid.NewString(),
 		RunID:        latest.ActiveRunID,
@@ -962,6 +971,10 @@ func (r Runner) replayActiveRun(ctx context.Context, binding config.Binding, ses
 	}
 	go r.observeActiveRun(ctx, binding, session, adapter, replayRequest, latest.ActiveNativeRunID, latest.ActiveRunDeadlineAt, runObservations, writeFrame)
 	return nil
+}
+
+func activeRunDeadlineExpired(deadline time.Time, now time.Time) bool {
+	return !deadline.IsZero() && !now.Before(deadline.UTC())
 }
 
 func (r Runner) observeReplayedActiveRun(ctx context.Context, binding config.Binding, session bridge.Session, adapter runtime.Adapter, frame externalagentprotocol.Frame, nativeRunID string, deadline time.Time, writeFrame func(externalagentprotocol.Frame) error) {
