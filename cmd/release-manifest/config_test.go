@@ -457,6 +457,110 @@ func TestPublishReleaseMetadataToAPI(t *testing.T) {
 	}
 }
 
+func TestCheckAPIReleaseMetadata(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+
+	temp := t.TempDir()
+	tapFormula := filepath.Join(temp, "personastack-connector.rb")
+	if err := os.WriteFile(tapFormula, []byte(strings.Join([]string{
+		`class PersonastackConnector < Formula`,
+		`  version "0.6.0"`,
+		`  on_macos do`,
+		`    if Hardware::CPU.arm?`,
+		`      url "https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_darwin_arm64.tar.gz"`,
+		`      sha256 "1111111111111111111111111111111111111111111111111111111111111111"`,
+		`    else`,
+		`      url "https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_darwin_amd64.tar.gz"`,
+		`      sha256 "2222222222222222222222222222222222222222222222222222222222222222"`,
+		`    end`,
+		`  end`,
+		`  on_linux do`,
+		`    if Hardware::CPU.arm?`,
+		`      url "https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_arm64.tar.gz"`,
+		`      sha256 "3333333333333333333333333333333333333333333333333333333333333333"`,
+		`    else`,
+		`      url "https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_amd64.tar.gz"`,
+		`      sha256 "4444444444444444444444444444444444444444444444444444444444444444"`,
+		`    end`,
+		`  end`,
+		`end`,
+		``,
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write tap formula: %v", err)
+	}
+
+	metadataJSON := filepath.Join(temp, "metadata.json")
+	if err := os.WriteFile(metadataJSON, []byte(`{"releases":[
+{"version":"v0.6.0","os":"darwin","arch":"amd64","package_kind":"homebrew","asset_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_darwin_amd64.tar.gz","checksum_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_checksums.txt","manifest_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_release_manifest.json","install_command":"brew install personastack/tap/personastack-connector","recommended":true},
+{"version":"v0.6.0","os":"darwin","arch":"arm64","package_kind":"homebrew","asset_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_darwin_arm64.tar.gz","checksum_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_checksums.txt","manifest_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_release_manifest.json","install_command":"brew install personastack/tap/personastack-connector","recommended":true},
+{"version":"v0.6.0","os":"linux","arch":"amd64","package_kind":"deb","asset_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_amd64.deb","checksum_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_checksums.txt","manifest_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_release_manifest.json","install_command":"curl -fsSLO https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_amd64.deb && sudo apt install ./personastack-connector_0.6.0_linux_amd64.deb","recommended":true},
+{"version":"v0.6.0","os":"linux","arch":"arm64","package_kind":"deb","asset_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_arm64.deb","checksum_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_checksums.txt","manifest_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_release_manifest.json","install_command":"curl -fsSLO https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_arm64.deb && sudo apt install ./personastack-connector_0.6.0_linux_arm64.deb","recommended":true},
+{"version":"v0.6.0","os":"linux","arch":"amd64","package_kind":"rpm","asset_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_amd64.rpm","checksum_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_checksums.txt","manifest_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_release_manifest.json","install_command":"curl -fsSLO https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_amd64.rpm && sudo dnf install ./personastack-connector_0.6.0_linux_amd64.rpm","recommended":true},
+{"version":"v0.6.0","os":"linux","arch":"arm64","package_kind":"rpm","asset_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_arm64.rpm","checksum_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_checksums.txt","manifest_url":"https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_release_manifest.json","install_command":"curl -fsSLO https://github.com/personastack/personastack-connector/releases/download/v0.6.0/personastack-connector_0.6.0_linux_arm64.rpm && sudo dnf install ./personastack-connector_0.6.0_linux_arm64.rpm","recommended":true}
+]}`), 0o600); err != nil {
+		t.Fatalf("write metadata json: %v", err)
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(temp, "curl.log")
+	curlPath := filepath.Join(binDir, "curl")
+	curlScript := "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$PERSONASTACK_CURL_LOG\"\ncat \"$PERSONASTACK_METADATA_JSON\"\n"
+	if err := os.WriteFile(curlPath, []byte(curlScript), 0o755); err != nil {
+		t.Fatalf("write fake curl: %v", err)
+	}
+
+	cmd := exec.Command("../../scripts/check-api-release-metadata.sh", tapFormula)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PERSONASTACK_CURL_LOG="+logPath,
+		"PERSONASTACK_METADATA_JSON="+metadataJSON,
+		"PERSONASTACK_API_URL=https://api.personastack.test/",
+		"PERSONASTACK_ADMIN_BEARER_TOKEN=admin-token",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("check api release metadata: %v output=%s", err, string(out))
+	}
+	if !strings.Contains(string(out), "api connector release metadata matches tap formula version=0.6.0") {
+		t.Fatalf("unexpected output: %s", string(out))
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read curl log: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		"Authorization: Bearer admin-token",
+		"Accept: application/json",
+		"https://api.personastack.test/v1/admin/external-agent-connector/releases",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("curl call missing %q:\n%s", want, got)
+		}
+	}
+
+	if err := os.WriteFile(metadataJSON, []byte(`{"releases":[]}`), 0o600); err != nil {
+		t.Fatalf("write empty metadata json: %v", err)
+	}
+	cmd = exec.Command("../../scripts/check-api-release-metadata.sh", tapFormula)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PERSONASTACK_CURL_LOG="+logPath,
+		"PERSONASTACK_METADATA_JSON="+metadataJSON,
+		"PERSONASTACK_API_URL=https://api.personastack.test/",
+		"PERSONASTACK_ADMIN_BEARER_TOKEN=admin-token",
+	)
+	out, err = cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("check api release metadata succeeded with empty metadata: %s", string(out))
+	}
+	if !strings.Contains(string(out), "expected exactly one recommended release for darwin/amd64/homebrew, got 0") {
+		t.Fatalf("missing empty metadata failure: %s", string(out))
+	}
+}
+
 func containsAll(values []string, want ...string) bool {
 	have := make(map[string]struct{}, len(values))
 	for _, value := range values {

@@ -65,6 +65,15 @@ func (cmd command) bindingStatusLine(ctx context.Context, homeDir string, bindin
 		fmt.Sprintf("active_assignment=%s", emptyOrDash(binding.ActiveAssignmentID)),
 		fmt.Sprintf("active_native_run=%s", emptyOrDash(binding.ActiveNativeRunID)),
 	)
+	if strings.TrimSpace(binding.LastUpdateState) != "" || !binding.LastUpdateAt.IsZero() {
+		parts = append(parts,
+			fmt.Sprintf("last_update_state=%s", emptyOrDash(binding.LastUpdateState)),
+			fmt.Sprintf("last_update_at=%s", formatConnectorTime(binding.LastUpdateAt)),
+			fmt.Sprintf("last_update_target=%s", emptyOrDash(binding.LastUpdateTargetVersion)),
+			fmt.Sprintf("last_update_reason=%s", emptyOrDash(binding.LastUpdateReason)),
+			fmt.Sprintf("last_update_summary=%q", strings.TrimSpace(binding.LastUpdateSummary)),
+		)
+	}
 	if includeRepairActions {
 		parts = append(parts, fmt.Sprintf("repair_actions=%s", strings.Join(connectorRepairActions(detection.State, verify.State), ",")))
 	}

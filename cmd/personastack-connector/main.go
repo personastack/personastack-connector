@@ -20,10 +20,12 @@ import (
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/hermessetup"
 	"github.com/personastack/personastack-connector/internal/mcp"
+	"github.com/personastack/personastack-connector/internal/menubar"
 	"github.com/personastack/personastack-connector/internal/openclawauth"
 	"github.com/personastack/personastack-connector/internal/pairing"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/service"
+	"github.com/personastack/personastack-connector/internal/updater"
 	"github.com/zalando/go-keyring"
 	"golang.org/x/sys/unix"
 )
@@ -32,6 +34,7 @@ const usage = `Usage:
   personastack-connector pair <code> [--runtime auto|hermes|openclaw] [--service-scope user|system] [--hermes-home <path>] [--openclaw-token <token>|--openclaw-password <password>|--openclaw-device-token <token>] [--openclaw-agent-id <id>]
   personastack-connector status [--repair] [--service-scope user|system]
   personastack-connector diagnostics
+  personastack-connector update status|check|install [--service-scope user|system]
   personastack-connector runtime detect
   personastack-connector runtime repair [--service-scope user|system]
   personastack-connector runtime hermes configure [--enable-api] [--configure-mcp] [--hermes-home <path>]
@@ -68,6 +71,7 @@ var newServiceInstaller = func(scope service.ServiceScope) service.Installer {
 }
 
 var currentGOOS = stdruntime.GOOS
+var updateCommandRunner updater.CommandRunner = updater.ExecRunner{}
 
 func parseCommandServiceScope(value string) (service.ServiceScope, error) {
 	if strings.TrimSpace(value) == "system" {
@@ -127,6 +131,8 @@ func (cmd command) Run(ctx context.Context, args []string) error {
 		return cmd.runStatus(ctx, args[1:])
 	case "diagnostics":
 		return cmd.runDiagnostics(args[1:])
+	case "update":
+		return cmd.runUpdate(args[1:])
 	case "runtime":
 		return cmd.runRuntime(args[1:])
 	case "mcp":
@@ -619,6 +625,70 @@ func (cmd command) runVersion(args []string) error {
 	}
 	fmt.Fprintf(cmd.stdout, "personastack-connector version=%s commit=%s channel=%s\n", buildinfo.VersionString(), buildinfo.GitCommitString(), buildinfo.ReleaseChannelString())
 	return nil
+}
+
+func (cmd command) runUpdate(args []string) error {
+	if len(args) == 0 {
+		return errors.New("update requires status, check, or install")
+	}
+	subcommand := strings.TrimSpace(args[0])
+	if subcommand != "status" && subcommand != "check" && subcommand != "install" {
+		return fmt.Errorf("unknown update subcommand %q", args[0])
+	}
+	scopeValue := "user"
+	parser := newFlaggyParser("update " + subcommand)
+	parser.String(&scopeValue, "", "service-scope", "service scope user or system")
+	if err := parseFlaggyArgs(parser, args[1:]); err != nil {
+		return err
+	}
+	scope, err := parseCommandServiceScope(scopeValue)
+	if err != nil {
+		return err
+	}
+	metadata := updater.Detect(updater.DetectionOptions{
+		GOOS:         currentGOOS,
+		ServiceScope: externalagentprotocol.ServiceScope(scope),
+	})
+	fmt.Fprintf(cmd.stdout, "update status channel=%s capability=%s state=%s reason=%s summary=%q\n", metadata.InstallChannel, metadata.UpdateCapability, metadata.UpdateState, metadata.UpdateReason, metadata.LastUpdateSummary)
+	if subcommand == "status" || subcommand == "check" {
+		return nil
+	}
+	plan, failure := updater.DerivePlan(updater.PlanOptions{
+		GOOS:         currentGOOS,
+		ServiceScope: externalagentprotocol.ServiceScope(scope),
+		UID:          os.Getuid(),
+		Metadata:     metadata,
+		Request: externalagentprotocol.UpdateRequestPayload{
+			RequestID:      "local-cli-update",
+			TargetVersion:  "latest",
+			InstallChannel: metadata.InstallChannel,
+			PackageKind:    updatePackageKind(metadata.InstallChannel),
+		},
+	})
+	if failure != nil {
+		return failure
+	}
+	if err := updater.RunPlan(updateCommandRunner, plan); err != nil {
+		return fmt.Errorf("run update: %w", err)
+	}
+	if err := updater.RestartFromPlan(updateCommandRunner, plan); err != nil {
+		return fmt.Errorf("restart connector: %w", err)
+	}
+	fmt.Fprintln(cmd.stdout, "update install completed")
+	return nil
+}
+
+func updatePackageKind(channel externalagentprotocol.InstallChannel) string {
+	switch channel {
+	case externalagentprotocol.InstallChannelHomebrew:
+		return "homebrew"
+	case externalagentprotocol.InstallChannelDeb:
+		return "deb"
+	case externalagentprotocol.InstallChannelRPM:
+		return "rpm"
+	default:
+		return ""
+	}
 }
 
 func (cmd command) runRuntime(args []string) error {
@@ -1187,7 +1257,10 @@ func (cmd command) runDaemon(ctx context.Context, args []string) error {
 		return err
 	}
 
-	if err := (daemon.Runner{Store: store, ServiceScope: protocolServiceScope(scope)}).RunForeground(ctx); err != nil {
+	err = menubar.RunWithController(ctx, menubar.Options{GOOS: currentGOOS, ServiceScope: protocolServiceScope(scope)}, func(runCtx context.Context, menu menubar.Controller) error {
+		return (daemon.Runner{Store: store, ServiceScope: protocolServiceScope(scope), MenuBar: menu}).RunForeground(runCtx)
+	})
+	if err != nil {
 		return err
 	}
 	fmt.Fprintln(cmd.stdout, "connector daemon stopped")

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/mcp"
+	"github.com/personastack/personastack-connector/internal/menubar"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/zalando/go-keyring"
 )
@@ -67,6 +69,84 @@ func readFrameOfType(t *testing.T, conn *websocket.Conn, want externalagentproto
 		}
 		t.Fatalf("expected %s frame, got %+v", want, frame)
 	}
+}
+
+type recordingUpdateRunner struct {
+	mu       sync.Mutex
+	commands []string
+}
+
+func (runner *recordingUpdateRunner) Run(name string, args ...string) error {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	runner.commands = append(runner.commands, name+" "+strings.Join(args, " "))
+	return nil
+}
+
+func (runner *recordingUpdateRunner) snapshot() []string {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	return append([]string(nil), runner.commands...)
+}
+
+type failingUpdateRunner struct {
+	err error
+}
+
+func (runner failingUpdateRunner) Run(string, ...string) error {
+	return runner.err
+}
+
+type blockingUpdateRunner struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingUpdateRunner() *blockingUpdateRunner {
+	return &blockingUpdateRunner{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (runner *blockingUpdateRunner) Run(string, ...string) error {
+	runner.once.Do(func() {
+		close(runner.started)
+	})
+	<-runner.release
+	return nil
+}
+
+type recordingMenuBar struct {
+	mu     sync.Mutex
+	states []menubar.State
+}
+
+func (menu *recordingMenuBar) Stop() {}
+
+func (menu *recordingMenuBar) Update(state menubar.State) {
+	menu.mu.Lock()
+	defer menu.mu.Unlock()
+	menu.states = append(menu.states, state)
+}
+
+func (menu *recordingMenuBar) hasState(state externalagentprotocol.UpdateState, latestVersion string, manualCommand string) bool {
+	menu.mu.Lock()
+	defer menu.mu.Unlock()
+	for _, observed := range menu.states {
+		if observed.UpdateState != state {
+			continue
+		}
+		if latestVersion != "" && observed.LatestVersion != latestVersion {
+			continue
+		}
+		if manualCommand != "" && observed.ManualUpdateCommand != manualCommand {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func TestRunnerAdapterForBindingUsesHermesHome(t *testing.T) {
@@ -253,6 +333,420 @@ func TestRunnerStartsBindingSavedAfterIdle(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for runner shutdown")
+	}
+}
+
+func TestRunnerHandlesHomebrewUpdateRequest(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	updateCompleted := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		if connectFrame.Connect == nil || connectFrame.Connect.UpdateCapability != externalagentprotocol.UpdateCapabilityOneClickAvailable {
+			t.Fatalf("connect missing one-click metadata: %+v", connectFrame.Connect)
+		}
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		}); err != nil {
+			t.Fatalf("write connect accepted: %v", err)
+		}
+		heartbeat := readFrameOfType(t, conn, externalagentprotocol.FrameTypeHeartbeat)
+		if heartbeat.Heartbeat == nil || heartbeat.Heartbeat.InstallChannel != externalagentprotocol.InstallChannelHomebrew {
+			t.Fatalf("heartbeat missing Homebrew metadata: %+v", heartbeat)
+		}
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "update-message-1",
+			MessageType:  externalagentprotocol.FrameTypeUpdateRequest,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			UpdateRequest: &externalagentprotocol.UpdateRequestPayload{
+				RequestID:      "update-1",
+				TargetVersion:  "v1.2.4",
+				InstallChannel: externalagentprotocol.InstallChannelHomebrew,
+				PackageKind:    "homebrew",
+				RequestedAt:    time.Now().UTC(),
+			},
+		}); err != nil {
+			t.Fatalf("write update request: %v", err)
+		}
+		accepted := readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateAccepted)
+		if accepted.UpdateAccepted == nil || accepted.UpdateAccepted.RequestID != "update-1" {
+			t.Fatalf("unexpected update accepted: %+v", accepted)
+		}
+		running := readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateProgress)
+		if running.UpdateProgress == nil || running.UpdateProgress.State != externalagentprotocol.UpdateStateRunning {
+			t.Fatalf("unexpected update running: %+v", running)
+		}
+		succeeded := readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateProgress)
+		if succeeded.UpdateProgress == nil || succeeded.UpdateProgress.State != externalagentprotocol.UpdateStateSucceeded {
+			t.Fatalf("unexpected update succeeded: %+v", succeeded)
+		}
+		restarting := readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateRestarting)
+		if restarting.UpdateRestarting == nil || restarting.UpdateRestarting.RequestID != "update-1" {
+			t.Fatalf("unexpected update restarting: %+v", restarting)
+		}
+		updateCompleted <- struct{}{}
+		cancel()
+	}))
+	defer server.Close()
+
+	runner := &recordingUpdateRunner{}
+	menu := &recordingMenuBar{}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:        "conn-1",
+		PersonaID:           "persona-1",
+		GatewayWebsocketURL: "ws" + server.URL[len("http"):],
+		BridgeCredentialID:  "cred-1",
+		BridgePrivateKey:    base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:         runtime.AdapterKindHermes,
+	}}})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{
+			Store:        &store,
+			ServiceScope: externalagentprotocol.ServiceScopeUserLaunchAgent,
+			UpdateMetadata: bridge.UpdateMetadata{
+				InstallChannel:      externalagentprotocol.InstallChannelHomebrew,
+				ExecutablePathClass: externalagentprotocol.ExecutablePathClassHomebrewOpt,
+				UpdateCapability:    externalagentprotocol.UpdateCapabilityOneClickAvailable,
+				UpdateState:         externalagentprotocol.UpdateStateIdle,
+			},
+			UpdateRunner: runner,
+			MenuBar:      menu,
+			GOOS:         "darwin",
+			ReconnectMin: 5 * time.Millisecond,
+			ReconnectMax: 5 * time.Millisecond,
+		}).RunForeground(ctx)
+	}()
+	select {
+	case <-updateCompleted:
+	case err := <-errCh:
+		t.Fatalf("RunForeground() returned before update completion: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for update completion")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunForeground() after update: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+	want := []string{
+		"brew update",
+		"brew upgrade personastack/tap/personastack-connector",
+		"launchctl kickstart -k gui/" + fmt.Sprint(os.Getuid()) + "/ai.personastack.connector",
+	}
+	if got := runner.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %+v, want %+v", got, want)
+	}
+	if !menu.hasState(externalagentprotocol.UpdateStateRunning, "v1.2.4", "brew update && brew upgrade personastack/tap/personastack-connector") {
+		t.Fatalf("menu did not record running update state with latest version and manual command: %+v", menu.states)
+	}
+	if !menu.hasState(externalagentprotocol.UpdateStateRestarting, "v1.2.4", "brew update && brew upgrade personastack/tap/personastack-connector") {
+		t.Fatalf("menu did not record restarting update state with latest version and manual command: %+v", menu.states)
+	}
+	binding, ok := store.Binding("conn-1")
+	if !ok {
+		t.Fatal("binding missing after update")
+	}
+	if binding.LastUpdateState != string(externalagentprotocol.UpdateStateRestarting) ||
+		binding.LastUpdateTargetVersion != "v1.2.4" ||
+		binding.LastUpdateRequestID != "update-1" ||
+		binding.LastUpdateSummary != "restarting connector" ||
+		binding.LastUpdateAt.IsZero() {
+		t.Fatalf("binding update diagnostics not persisted: %+v", binding)
+	}
+}
+
+func TestUpdateMetadataForBindingPreservesSavedRequestID(t *testing.T) {
+	metadata := (Runner{
+		UpdateMetadata: bridge.UpdateMetadata{
+			InstallChannel:      externalagentprotocol.InstallChannelHomebrew,
+			ExecutablePathClass: externalagentprotocol.ExecutablePathClassHomebrewOpt,
+			UpdateCapability:    externalagentprotocol.UpdateCapabilityOneClickAvailable,
+			UpdateState:         externalagentprotocol.UpdateStateIdle,
+		},
+	}).updateMetadataForBinding(config.Binding{
+		LastUpdateState:     string(externalagentprotocol.UpdateStateFailed),
+		LastUpdateReason:    string(externalagentprotocol.UpdateReasonReleaseMetadataUnavailable),
+		LastUpdateRequestID: "update-1",
+		LastUpdateSummary:   "update failed",
+	})
+	if metadata.InstallChannel != externalagentprotocol.InstallChannelHomebrew ||
+		metadata.UpdateCapability != externalagentprotocol.UpdateCapabilityOneClickAvailable ||
+		metadata.UpdateState != externalagentprotocol.UpdateStateFailed ||
+		metadata.UpdateReason != externalagentprotocol.UpdateReasonReleaseMetadataUnavailable ||
+		metadata.LastUpdateRequestID != "update-1" ||
+		metadata.LastUpdateSummary != "update failed" {
+		t.Fatalf("unexpected update metadata: %+v", metadata)
+	}
+}
+
+func TestRunnerRejectsConcurrentUpdateRequest(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	runner := newBlockingUpdateRunner()
+	updateRejected := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		}); err != nil {
+			t.Fatalf("write connect accepted: %v", err)
+		}
+		_ = readFrameOfType(t, conn, externalagentprotocol.FrameTypeHeartbeat)
+		first := externalagentprotocol.Frame{
+			MessageID:    "update-message-1",
+			MessageType:  externalagentprotocol.FrameTypeUpdateRequest,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			UpdateRequest: &externalagentprotocol.UpdateRequestPayload{
+				RequestID:      "update-1",
+				TargetVersion:  "v1.2.4",
+				InstallChannel: externalagentprotocol.InstallChannelHomebrew,
+				PackageKind:    "homebrew",
+				RequestedAt:    time.Now().UTC(),
+			},
+		}
+		if err := conn.WriteJSON(first); err != nil {
+			t.Fatalf("write first update request: %v", err)
+		}
+		_ = readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateAccepted)
+		_ = readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateProgress)
+		select {
+		case <-runner.started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for blocking update runner")
+		}
+		second := first
+		second.MessageID = "update-message-2"
+		second.UpdateRequest = &externalagentprotocol.UpdateRequestPayload{
+			RequestID:      "update-2",
+			TargetVersion:  "v1.2.4",
+			InstallChannel: externalagentprotocol.InstallChannelHomebrew,
+			PackageKind:    "homebrew",
+			RequestedAt:    time.Now().UTC(),
+		}
+		if err := conn.WriteJSON(second); err != nil {
+			t.Fatalf("write second update request: %v", err)
+		}
+		failed := readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateFailed)
+		if failed.UpdateFailed == nil || failed.UpdateFailed.RequestID != "update-2" || failed.UpdateFailed.Message != "update already running" {
+			t.Fatalf("unexpected concurrent update failure: %+v", failed)
+		}
+		close(runner.release)
+		updateRejected <- struct{}{}
+		cancel()
+	}))
+	defer server.Close()
+
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:        "conn-1",
+		PersonaID:           "persona-1",
+		GatewayWebsocketURL: "ws" + server.URL[len("http"):],
+		BridgeCredentialID:  "cred-1",
+		BridgePrivateKey:    base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:         runtime.AdapterKindHermes,
+	}}})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{
+			Store:        &store,
+			ServiceScope: externalagentprotocol.ServiceScopeUserLaunchAgent,
+			UpdateMetadata: bridge.UpdateMetadata{
+				InstallChannel:      externalagentprotocol.InstallChannelHomebrew,
+				ExecutablePathClass: externalagentprotocol.ExecutablePathClassHomebrewOpt,
+				UpdateCapability:    externalagentprotocol.UpdateCapabilityOneClickAvailable,
+				UpdateState:         externalagentprotocol.UpdateStateIdle,
+			},
+			UpdateRunner: runner,
+			GOOS:         "darwin",
+			ReconnectMin: 5 * time.Millisecond,
+			ReconnectMax: 5 * time.Millisecond,
+		}).RunForeground(ctx)
+	}()
+	select {
+	case <-updateRejected:
+	case err := <-errCh:
+		t.Fatalf("RunForeground() returned before concurrent update rejection: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for concurrent update rejection")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunForeground() after concurrent update test: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+}
+
+func TestRunnerRedactsUpdateCommandFailure(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	updateFailed := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		var connectFrame externalagentprotocol.Frame
+		if err := conn.ReadJSON(&connectFrame); err != nil {
+			t.Fatalf("read connect: %v", err)
+		}
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageType:  externalagentprotocol.FrameTypeConnectAccepted,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
+				HeartbeatSeconds:     15,
+			},
+		}); err != nil {
+			t.Fatalf("write connect accepted: %v", err)
+		}
+		_ = readFrameOfType(t, conn, externalagentprotocol.FrameTypeHeartbeat)
+		if err := conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "update-message-1",
+			MessageType:  externalagentprotocol.FrameTypeUpdateRequest,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			UpdateRequest: &externalagentprotocol.UpdateRequestPayload{
+				RequestID:      "update-1",
+				TargetVersion:  "v1.2.4",
+				InstallChannel: externalagentprotocol.InstallChannelHomebrew,
+				PackageKind:    "homebrew",
+				RequestedAt:    time.Now().UTC(),
+			},
+		}); err != nil {
+			t.Fatalf("write update request: %v", err)
+		}
+		_ = readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateAccepted)
+		_ = readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateProgress)
+		failed := readFrameOfType(t, conn, externalagentprotocol.FrameTypeUpdateFailed)
+		if failed.UpdateFailed == nil || failed.UpdateFailed.Message != "update command failed" || strings.Contains(failed.UpdateFailed.Message, "secret-token") {
+			t.Fatalf("unexpected redacted failure: %+v", failed)
+		}
+		updateFailed <- struct{}{}
+		cancel()
+	}))
+	defer server.Close()
+
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID:        "conn-1",
+		PersonaID:           "persona-1",
+		GatewayWebsocketURL: "ws" + server.URL[len("http"):],
+		BridgeCredentialID:  "cred-1",
+		BridgePrivateKey:    base64.StdEncoding.EncodeToString(privateKey),
+		BridgePublicKey:     base64.StdEncoding.EncodeToString(publicKey),
+		RuntimeKind:         runtime.AdapterKindHermes,
+	}}})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (Runner{
+			Store:        &store,
+			ServiceScope: externalagentprotocol.ServiceScopeUserLaunchAgent,
+			UpdateMetadata: bridge.UpdateMetadata{
+				InstallChannel:      externalagentprotocol.InstallChannelHomebrew,
+				ExecutablePathClass: externalagentprotocol.ExecutablePathClassHomebrewOpt,
+				UpdateCapability:    externalagentprotocol.UpdateCapabilityOneClickAvailable,
+				UpdateState:         externalagentprotocol.UpdateStateIdle,
+			},
+			UpdateRunner: failingUpdateRunner{err: errors.New("brew failed with secret-token output")},
+			GOOS:         "darwin",
+			ReconnectMin: 5 * time.Millisecond,
+			ReconnectMax: 5 * time.Millisecond,
+		}).RunForeground(ctx)
+	}()
+	select {
+	case <-updateFailed:
+	case err := <-errCh:
+		t.Fatalf("RunForeground() returned before redacted update failure: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for redacted update failure")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunForeground() after redacted update failure: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner shutdown")
+	}
+	binding, ok := store.Binding("conn-1")
+	if !ok {
+		t.Fatal("binding missing after update failure")
+	}
+	if binding.BridgeCredentialID != "cred-1" ||
+		binding.BridgePrivateKey == "" ||
+		binding.LastUpdateState != string(externalagentprotocol.UpdateStateFailed) ||
+		binding.LastUpdateSummary != "update command failed" ||
+		strings.Contains(binding.LastUpdateSummary, "secret-token") {
+		t.Fatalf("update failure did not preserve safe binding state: %+v", binding)
 	}
 }
 

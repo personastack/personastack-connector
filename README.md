@@ -83,8 +83,14 @@ cancel support.
   upgrade notes, and a rollback command.
 - V1 binary distribution stays GitHub Releases only; mirrored binary hosts are
   a later decision, not part of the initial public install path.
-- Update prompts stay package-manager/manual only until signed auto-update
-  launch scope is explicitly decided and shipped.
+- Auto-update stays package-manager-only. Homebrew auto-update depends on the
+  public `personastack/homebrew-tap` formula matching the API-recommended
+  Connector semver before release activation.
+- Release acceptance can verify that match with
+  `scripts/check-api-release-metadata.sh`. The check reads the public tap
+  formula and the PersonaStack API admin connector-release endpoint, then
+  fails unless all recommended OS/arch/package rows match the tap semver and
+  canonical GitHub Release asset URLs.
 - The tagged release workflow declares the protected `release` environment and
   fails closed unless GitHub CLI metadata shows active `v*` tag rules and at
   least one required reviewer on that environment.

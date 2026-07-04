@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/personastack/personastack-connector/internal/config"
+	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/openclawauth"
 	"github.com/personastack/personastack-connector/internal/runtime"
@@ -33,7 +34,7 @@ func TestRunHelp(t *testing.T) {
 	}
 
 	output := stdout.String()
-	for _, want := range []string{"pair <code>", "status [--repair]", "diagnostics", "runtime detect", "mcp stdio --binding", "service plan", "service uninstall", "run --foreground", "version"} {
+	for _, want := range []string{"pair <code>", "status [--repair]", "diagnostics", "update status|check|install", "runtime detect", "mcp stdio --binding", "service plan", "service uninstall", "run --foreground", "version"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("help output missing %q: %s", want, output)
 		}
@@ -57,6 +58,33 @@ func TestRunVersion(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "personastack-connector version=") {
 		t.Fatalf("unexpected version output: %s", stdout.String())
+	}
+}
+
+func TestRunUpdateStatus(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := Run(context.Background(), []string{"update", "status"}, strings.NewReader(""), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run(update status) error = %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "update status channel=") ||
+		!strings.Contains(stdout.String(), "capability=") {
+		t.Fatalf("unexpected update status output: %s", stdout.String())
+	}
+}
+
+func TestUpdatePackageKind(t *testing.T) {
+	tests := map[externalagentprotocol.InstallChannel]string{
+		externalagentprotocol.InstallChannelHomebrew: "homebrew",
+		externalagentprotocol.InstallChannelDeb:      "deb",
+		externalagentprotocol.InstallChannelRPM:      "rpm",
+		externalagentprotocol.InstallChannelArchive:  "",
+	}
+	for channel, want := range tests {
+		if got := updatePackageKind(channel); got != want {
+			t.Fatalf("updatePackageKind(%q) = %q, want %q", channel, got, want)
+		}
 	}
 }
 
@@ -851,11 +879,16 @@ func TestRunDiagnosticsRedactsPathsAndListsRepairActions(t *testing.T) {
 		store: config.NewMemoryStore(config.State{
 			Bindings: []config.Binding{
 				{
-					ConnectionID:       "connection-1",
-					PersonaID:          "persona-1",
-					RuntimeKind:        runtime.AdapterKindAuto,
-					BridgeCredentialID: "cred-1",
-					HasBridgeSecret:    true,
+					ConnectionID:            "connection-1",
+					PersonaID:               "persona-1",
+					RuntimeKind:             runtime.AdapterKindAuto,
+					BridgeCredentialID:      "cred-1",
+					HasBridgeSecret:         true,
+					LastUpdateAt:            time.Date(2026, 7, 3, 20, 0, 0, 0, time.UTC),
+					LastUpdateState:         "failed",
+					LastUpdateReason:        "release_metadata_unavailable",
+					LastUpdateSummary:       "target version is not newer than current version",
+					LastUpdateTargetVersion: "v1.2.3",
 				},
 			},
 		}),
@@ -865,7 +898,7 @@ func TestRunDiagnosticsRedactsPathsAndListsRepairActions(t *testing.T) {
 		t.Fatalf("runDiagnostics() error = %v", err)
 	}
 	output := stdout.String()
-	for _, want := range []string{"[LOCAL_PATH]", "repair_actions=runtime_detect,mcp_install,reconnect,rotate_local_token,export_diagnostics"} {
+	for _, want := range []string{"[LOCAL_PATH]", "last_update_state=failed", "last_update_at=2026-07-03T20:00:00Z", "last_update_target=v1.2.3", "last_update_reason=release_metadata_unavailable", "last_update_summary=\"target version is not newer than current version\"", "repair_actions=runtime_detect,mcp_install,reconnect,rotate_local_token,export_diagnostics"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("diagnostics output missing %q: %s", want, output)
 		}

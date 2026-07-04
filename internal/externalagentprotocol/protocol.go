@@ -107,6 +107,11 @@ const (
 	FrameTypeRunCancelled       FrameType = "run.cancelled"
 	FrameTypeRunTerminalAck     FrameType = "run.terminal_ack"
 	FrameTypeRunCancel          FrameType = "run.cancel"
+	FrameTypeUpdateRequest      FrameType = "update.request"
+	FrameTypeUpdateAccepted     FrameType = "update.accepted"
+	FrameTypeUpdateProgress     FrameType = "update.progress"
+	FrameTypeUpdateFailed       FrameType = "update.failed"
+	FrameTypeUpdateRestarting   FrameType = "update.restarting"
 	FrameTypeConfigRefresh      FrameType = "config.refresh"
 	FrameTypeTokenRevoked       FrameType = "token.revoked"
 	FrameTypeServerDraining     FrameType = "server.draining"
@@ -147,6 +152,57 @@ const (
 	ServiceScopeUserLaunchAgent    ServiceScope = "user_launch_agent"
 	ServiceScopeSystemLaunchDaemon ServiceScope = "system_launch_daemon"
 	ServiceScopeLinuxSystemService ServiceScope = "linux_system_service"
+)
+
+type InstallChannel string
+
+const (
+	InstallChannelHomebrew InstallChannel = "homebrew"
+	InstallChannelDeb      InstallChannel = "deb"
+	InstallChannelRPM      InstallChannel = "rpm"
+	InstallChannelArchive  InstallChannel = "archive"
+	InstallChannelUnknown  InstallChannel = "unknown"
+)
+
+type ExecutablePathClass string
+
+const (
+	ExecutablePathClassHomebrewOpt    ExecutablePathClass = "homebrew_opt"
+	ExecutablePathClassPackageManaged ExecutablePathClass = "package_managed"
+	ExecutablePathClassArchivePath    ExecutablePathClass = "archive_path"
+	ExecutablePathClassUnknown        ExecutablePathClass = "unknown"
+)
+
+type UpdateCapability string
+
+const (
+	UpdateCapabilityOneClickAvailable UpdateCapability = "one_click_available"
+	UpdateCapabilityManualRequired    UpdateCapability = "manual_required"
+	UpdateCapabilityUnsupported       UpdateCapability = "unsupported"
+	UpdateCapabilityUnknown           UpdateCapability = "unknown"
+)
+
+type UpdateState string
+
+const (
+	UpdateStateIdle       UpdateState = "idle"
+	UpdateStateChecking   UpdateState = "checking"
+	UpdateStateAvailable  UpdateState = "available"
+	UpdateStateRunning    UpdateState = "running"
+	UpdateStateRestarting UpdateState = "restarting"
+	UpdateStateSucceeded  UpdateState = "succeeded"
+	UpdateStateFailed     UpdateState = "failed"
+)
+
+type UpdateReason string
+
+const (
+	UpdateReasonRequiresSudo               UpdateReason = "requires_sudo"
+	UpdateReasonSystemLaunchDaemonHomebrew UpdateReason = "system_launchdaemon_homebrew"
+	UpdateReasonPackageManagerMissing      UpdateReason = "package_manager_missing"
+	UpdateReasonUnknownInstallChannel      UpdateReason = "unknown_install_channel"
+	UpdateReasonReleaseMetadataUnavailable UpdateReason = "release_metadata_unavailable"
+	UpdateReasonWSL2ManualRequired         UpdateReason = "wsl2_manual_required"
 )
 
 // ConnectionStatus identifies Connector bridge status reported to Gateway.
@@ -282,6 +338,11 @@ type Frame struct {
 	RunTerminal       *RunTerminalPayload       `json:"run_terminal,omitempty"`
 	RunTerminalAck    *RunTerminalAckPayload    `json:"run_terminal_ack,omitempty"`
 	RunCancel         *RunCancelPayload         `json:"run_cancel,omitempty"`
+	UpdateRequest     *UpdateRequestPayload     `json:"update_request,omitempty"`
+	UpdateAccepted    *UpdateAcceptedPayload    `json:"update_accepted,omitempty"`
+	UpdateProgress    *UpdateProgressPayload    `json:"update_progress,omitempty"`
+	UpdateFailed      *UpdateFailedPayload      `json:"update_failed,omitempty"`
+	UpdateRestarting  *UpdateRestartingPayload  `json:"update_restarting,omitempty"`
 	ConfigRefresh     *ConfigRefreshPayload     `json:"config_refresh,omitempty"`
 	TokenRevoked      *TokenRevokedPayload      `json:"token_revoked,omitempty"`
 	ServerDraining    *ServerDrainingPayload    `json:"server_draining,omitempty"`
@@ -289,19 +350,26 @@ type Frame struct {
 }
 
 type ConnectPayload struct {
-	ProtocolVersion           string      `json:"protocol_version"`
-	SupportedProtocolVersions []string    `json:"supported_protocol_versions,omitempty"`
-	ConnectorVersion          string      `json:"connector_version"`
-	RuntimeKind               RuntimeKind `json:"runtime_kind"`
-	ConnectionGeneration      int64       `json:"connection_generation"`
-	Hostname                  string      `json:"hostname,omitempty"`
-	OS                        string      `json:"os,omitempty"`
-	Arch                      string      `json:"arch,omitempty"`
-	DevicePublicKey           string      `json:"device_public_key"`
-	CredentialID              string      `json:"credential_id"`
-	CredentialProof           string      `json:"credential_proof"`
-	CredentialProofNonce      string      `json:"credential_proof_nonce"`
-	CredentialProofUnix       int64       `json:"credential_proof_unix"`
+	ProtocolVersion           string              `json:"protocol_version"`
+	SupportedProtocolVersions []string            `json:"supported_protocol_versions,omitempty"`
+	ConnectorVersion          string              `json:"connector_version"`
+	RuntimeKind               RuntimeKind         `json:"runtime_kind"`
+	ConnectionGeneration      int64               `json:"connection_generation"`
+	Hostname                  string              `json:"hostname,omitempty"`
+	OS                        string              `json:"os,omitempty"`
+	Arch                      string              `json:"arch,omitempty"`
+	InstallChannel            InstallChannel      `json:"install_channel,omitempty"`
+	ExecutablePathClass       ExecutablePathClass `json:"executable_path_class,omitempty"`
+	UpdateCapability          UpdateCapability    `json:"update_capability,omitempty"`
+	UpdateState               UpdateState         `json:"update_state,omitempty"`
+	UpdateReason              UpdateReason        `json:"update_reason,omitempty"`
+	LastUpdateRequestID       string              `json:"last_update_request_id,omitempty"`
+	LastUpdateSummary         string              `json:"last_update_summary,omitempty"`
+	DevicePublicKey           string              `json:"device_public_key"`
+	CredentialID              string              `json:"credential_id"`
+	CredentialProof           string              `json:"credential_proof"`
+	CredentialProofNonce      string              `json:"credential_proof_nonce"`
+	CredentialProofUnix       int64               `json:"credential_proof_unix"`
 }
 
 type ConnectAcceptedPayload struct {
@@ -333,6 +401,13 @@ type HeartbeatPayload struct {
 	OS                     string               `json:"os,omitempty"`
 	Arch                   string               `json:"arch,omitempty"`
 	ReleaseChannel         string               `json:"release_channel,omitempty"`
+	InstallChannel         InstallChannel       `json:"install_channel,omitempty"`
+	ExecutablePathClass    ExecutablePathClass  `json:"executable_path_class,omitempty"`
+	UpdateCapability       UpdateCapability     `json:"update_capability,omitempty"`
+	UpdateState            UpdateState          `json:"update_state,omitempty"`
+	UpdateReason           UpdateReason         `json:"update_reason,omitempty"`
+	LastUpdateRequestID    string               `json:"last_update_request_id,omitempty"`
+	LastUpdateSummary      string               `json:"last_update_summary,omitempty"`
 	LastWakeProbeAt        *time.Time           `json:"last_wake_probe_at,omitempty"`
 	DiagnosticCode         DiagnosticCode       `json:"diagnostic_code,omitempty"`
 }
@@ -430,6 +505,44 @@ type RunTerminalAckPayload struct {
 
 type RunCancelPayload struct {
 	Reason string `json:"reason"`
+}
+
+type UpdateRequestPayload struct {
+	RequestID            string         `json:"request_id"`
+	TargetVersion        string         `json:"target_version"`
+	InstallChannel       InstallChannel `json:"install_channel,omitempty"`
+	PackageKind          string         `json:"package_kind,omitempty"`
+	AssetURL             string         `json:"asset_url,omitempty"`
+	ChecksumURL          string         `json:"checksum_url,omitempty"`
+	ManifestURL          string         `json:"manifest_url,omitempty"`
+	ManifestChecksumURL  string         `json:"manifest_checksum_url,omitempty"`
+	SignatureURL         string         `json:"signature_url,omitempty"`
+	InstallCommandSource string         `json:"install_command_source,omitempty"`
+	RequestedAt          time.Time      `json:"requested_at"`
+}
+
+type UpdateAcceptedPayload struct {
+	RequestID  string    `json:"request_id"`
+	AcceptedAt time.Time `json:"accepted_at"`
+}
+
+type UpdateProgressPayload struct {
+	RequestID string      `json:"request_id"`
+	State     UpdateState `json:"state"`
+	Summary   string      `json:"summary,omitempty"`
+	UpdatedAt time.Time   `json:"updated_at"`
+}
+
+type UpdateFailedPayload struct {
+	RequestID string       `json:"request_id"`
+	Reason    UpdateReason `json:"reason,omitempty"`
+	Message   string       `json:"message,omitempty"`
+	FailedAt  time.Time    `json:"failed_at"`
+}
+
+type UpdateRestartingPayload struct {
+	RequestID    string    `json:"request_id"`
+	RestartingAt time.Time `json:"restarting_at"`
 }
 
 type ConfigRefreshPayload struct {

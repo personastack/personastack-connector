@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/personastack/personastack-connector/internal/updater"
 )
 
 const serviceName = "personastack-connector"
@@ -169,6 +171,7 @@ func (installer Installer) Plan() (InstallResult, error) {
 	if err != nil {
 		return InstallResult{}, err
 	}
+	executablePath = serviceExecutablePath(executablePath, goos, scope)
 	switch goos {
 	case "darwin":
 		if scope == ServiceScopeSystemLaunchDaemon {
@@ -204,6 +207,7 @@ func (installer Installer) Install() (InstallResult, error) {
 	if err != nil {
 		return InstallResult{}, err
 	}
+	executablePath = serviceExecutablePath(executablePath, goos, scope)
 	switch goos {
 	case "darwin":
 		if scope == ServiceScopeSystemLaunchDaemon {
@@ -220,6 +224,17 @@ func (installer Installer) Install() (InstallResult, error) {
 	default:
 		return InstallResult{}, fmt.Errorf("unsupported service platform: %s", goos)
 	}
+}
+
+func serviceExecutablePath(executablePath string, goos string, scope ServiceScope) string {
+	if goos != "darwin" || scope != ServiceScopeUserLaunchAgent {
+		return executablePath
+	}
+	stablePath, ok := updater.StableHomebrewOptExecutablePath(executablePath)
+	if !ok {
+		return executablePath
+	}
+	return stablePath
 }
 
 func (installer Installer) Uninstall() ([]UninstallResult, error) {

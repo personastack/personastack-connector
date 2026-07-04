@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	stdruntime "runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -18,17 +19,23 @@ import (
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/mcp"
+	"github.com/personastack/personastack-connector/internal/menubar"
 	"github.com/personastack/personastack-connector/internal/openclawauth"
 	"github.com/personastack/personastack-connector/internal/runtime"
+	"github.com/personastack/personastack-connector/internal/updater"
 )
 
 type Runner struct {
-	Store        config.Store
-	ServiceScope externalagentprotocol.ServiceScope
-	Now          func() time.Time
-	ReconnectMin time.Duration
-	ReconnectMax time.Duration
-	ReadTimeout  time.Duration
+	Store          config.Store
+	ServiceScope   externalagentprotocol.ServiceScope
+	UpdateMetadata bridge.UpdateMetadata
+	UpdateRunner   updater.CommandRunner
+	MenuBar        menubar.Controller
+	GOOS           string
+	Now            func() time.Time
+	ReconnectMin   time.Duration
+	ReconnectMax   time.Duration
+	ReadTimeout    time.Duration
 }
 
 var errConnectorBindingRemoved = errors.New("connector binding removed")
@@ -73,6 +80,74 @@ func (err connectorDrainingError) Is(target error) bool {
 type observedRunCancel struct {
 	token  int
 	cancel context.CancelFunc
+}
+
+type sessionUpdateSnapshot struct {
+	mu                  sync.Mutex
+	metadata            bridge.UpdateMetadata
+	latestVersion       string
+	manualUpdateCommand string
+}
+
+func newSessionUpdateSnapshot(metadata bridge.UpdateMetadata) *sessionUpdateSnapshot {
+	metadata = normalizeBridgeUpdateMetadata(metadata)
+	return &sessionUpdateSnapshot{
+		metadata:            metadata,
+		manualUpdateCommand: manualUpdateCommandForMetadata(metadata),
+	}
+}
+
+func (snapshot *sessionUpdateSnapshot) current() (bridge.UpdateMetadata, string, string) {
+	if snapshot == nil {
+		return bridge.UpdateMetadata{}, "", ""
+	}
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	return snapshot.metadata, snapshot.latestVersion, snapshot.manualUpdateCommand
+}
+
+func (snapshot *sessionUpdateSnapshot) setRequest(request externalagentprotocol.UpdateRequestPayload) {
+	if snapshot == nil {
+		return
+	}
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	snapshot.latestVersion = strings.TrimSpace(request.TargetVersion)
+	snapshot.metadata.LastUpdateRequestID = strings.TrimSpace(request.RequestID)
+}
+
+func (snapshot *sessionUpdateSnapshot) set(state externalagentprotocol.UpdateState, reason externalagentprotocol.UpdateReason, summary string) {
+	if snapshot == nil {
+		return
+	}
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	snapshot.metadata.UpdateState = state
+	snapshot.metadata.UpdateReason = reason
+	snapshot.metadata.LastUpdateSummary = strings.TrimSpace(summary)
+}
+
+func normalizeBridgeUpdateMetadata(metadata bridge.UpdateMetadata) bridge.UpdateMetadata {
+	if metadata.InstallChannel == "" {
+		metadata.InstallChannel = externalagentprotocol.InstallChannelUnknown
+	}
+	if metadata.ExecutablePathClass == "" {
+		metadata.ExecutablePathClass = externalagentprotocol.ExecutablePathClassUnknown
+	}
+	if metadata.UpdateCapability == "" {
+		metadata.UpdateCapability = externalagentprotocol.UpdateCapabilityUnknown
+	}
+	if metadata.UpdateState == "" {
+		metadata.UpdateState = externalagentprotocol.UpdateStateIdle
+	}
+	return metadata
+}
+
+func manualUpdateCommandForMetadata(metadata bridge.UpdateMetadata) string {
+	if metadata.InstallChannel != externalagentprotocol.InstallChannelHomebrew {
+		return ""
+	}
+	return updater.ManualUpdateCommand(updater.Metadata(metadata))
 }
 
 type runObservationRegistry struct {
@@ -314,6 +389,7 @@ func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) erro
 			continue
 		}
 		if err := writable.SaveBinding(current); err != nil {
+			log.Printf("connector binding save failed connection_id=%s err=%v", connectionID, err)
 			if !waitForBackoff() {
 				return nil
 			}
@@ -321,6 +397,7 @@ func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) erro
 		}
 		credential, err := bridge.CredentialFromBinding(current)
 		if err != nil {
+			log.Printf("connector binding credential failed connection_id=%s err=%v", connectionID, err)
 			if !waitForBackoff() {
 				return nil
 			}
@@ -328,12 +405,14 @@ func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) erro
 		}
 		session, err := bridge.NewSession(current, credential)
 		if err != nil {
+			log.Printf("connector binding session failed connection_id=%s err=%v", connectionID, err)
 			if !waitForBackoff() {
 				return nil
 			}
 			continue
 		}
 		session.ServiceScope = r.serviceScope()
+		session.UpdateMetadata = normalizeBridgeUpdateMetadata(r.updateMetadataForBinding(current))
 		err = r.runBindingSession(ctx, current, session)
 		if ctx.Err() != nil {
 			return nil
@@ -356,6 +435,8 @@ func (r Runner) runBindingLoop(ctx context.Context, binding config.Binding) erro
 		}
 		if err == nil {
 			backoff = r.reconnectMin()
+		} else {
+			log.Printf("connector binding session stopped connection_id=%s err=%v", connectionID, err)
 		}
 		if !waitForBackoff() {
 			return nil
@@ -380,6 +461,124 @@ func (r Runner) serviceScope() externalagentprotocol.ServiceScope {
 		return r.ServiceScope
 	}
 	return externalagentprotocol.ServiceScopeUserLaunchAgent
+}
+
+func (r Runner) updateMetadata() bridge.UpdateMetadata {
+	if r.UpdateMetadata.InstallChannel != "" ||
+		r.UpdateMetadata.ExecutablePathClass != "" ||
+		r.UpdateMetadata.UpdateCapability != "" ||
+		r.UpdateMetadata.UpdateState != "" ||
+		r.UpdateMetadata.UpdateReason != "" ||
+		strings.TrimSpace(r.UpdateMetadata.LastUpdateRequestID) != "" ||
+		strings.TrimSpace(r.UpdateMetadata.LastUpdateSummary) != "" {
+		return r.UpdateMetadata
+	}
+	return bridge.UpdateMetadata(updater.Detect(updater.DetectionOptions{
+		GOOS:         r.goos(),
+		ServiceScope: r.serviceScope(),
+	}))
+}
+
+func (r Runner) updateMetadataForBinding(binding config.Binding) bridge.UpdateMetadata {
+	metadata := r.updateMetadata()
+	if strings.TrimSpace(binding.LastUpdateState) == "" &&
+		strings.TrimSpace(binding.LastUpdateReason) == "" &&
+		strings.TrimSpace(binding.LastUpdateRequestID) == "" &&
+		strings.TrimSpace(binding.LastUpdateSummary) == "" {
+		return metadata
+	}
+	metadata.UpdateState = externalagentprotocol.UpdateState(strings.TrimSpace(binding.LastUpdateState))
+	metadata.UpdateReason = externalagentprotocol.UpdateReason(strings.TrimSpace(binding.LastUpdateReason))
+	metadata.LastUpdateRequestID = strings.TrimSpace(binding.LastUpdateRequestID)
+	metadata.LastUpdateSummary = strings.TrimSpace(binding.LastUpdateSummary)
+	return metadata
+}
+
+func (r Runner) goos() string {
+	if strings.TrimSpace(r.GOOS) != "" {
+		return strings.TrimSpace(r.GOOS)
+	}
+	return stdruntime.GOOS
+}
+
+func (r Runner) updateMenuBar(binding config.Binding, detection runtime.Detection, lastWakeProbeAt *time.Time, heartbeatAt time.Time, updateMetadata bridge.UpdateMetadata, latestVersion string, manualUpdateCommand string) {
+	if r.MenuBar == nil {
+		return
+	}
+	active := binding
+	if r.Store != nil {
+		if latest, ok := r.Store.Binding(binding.ConnectionID); ok && latest.ConnectionGeneration == binding.ConnectionGeneration {
+			active = latest
+		}
+	}
+	r.MenuBar.Update(menubar.State{
+		ActiveRunID:         active.ActiveRunID,
+		ConnectionStatus:    externalagentprotocol.ConnectionStatusBridgeConnected,
+		CurrentVersion:      "",
+		LatestVersion:       latestVersion,
+		LastHeartbeatAt:     heartbeatAt,
+		ManualUpdateCommand: manualUpdateCommand,
+		PersonaID:           string(binding.PersonaID),
+		RuntimeKind:         externalagentprotocol.RuntimeKind(detection.Kind.String()),
+		RuntimeLabel:        detection.Kind.String(),
+		UpdateCapability:    updateMetadata.UpdateCapability,
+		UpdateReason:        updateMetadata.UpdateReason,
+		UpdateState:         updateMetadata.UpdateState,
+		WakeReadiness:       menuReadinessForAdapterState(detection.State, lastWakeProbeAt),
+	})
+}
+
+func (r Runner) recordBindingUpdateAttempt(binding config.Binding, snapshot *sessionUpdateSnapshot, at time.Time) {
+	if snapshot == nil || r.Store == nil {
+		return
+	}
+	writable, ok := r.Store.(config.WritableStore)
+	if !ok {
+		return
+	}
+	metadata, latestVersion, _ := snapshot.current()
+	current, ok := r.Store.Binding(binding.ConnectionID)
+	if ok && current.ConnectionGeneration != binding.ConnectionGeneration {
+		return
+	}
+	if !ok {
+		current = binding
+	}
+	current.LastUpdateAt = at.UTC()
+	current.LastUpdateState = string(metadata.UpdateState)
+	current.LastUpdateReason = string(metadata.UpdateReason)
+	current.LastUpdateRequestID = strings.TrimSpace(metadata.LastUpdateRequestID)
+	current.LastUpdateSummary = boundedUpdateSummary(metadata.LastUpdateSummary)
+	current.LastUpdateTargetVersion = strings.TrimSpace(latestVersion)
+	if err := writable.SaveBinding(current); err != nil {
+		log.Printf("connector update state save failed connection_id=%s err=%v", binding.ConnectionID, err)
+		return
+	}
+	log.Printf("connector update state connection_id=%s state=%s reason=%s target_version=%s summary=%q", binding.ConnectionID, metadata.UpdateState, metadata.UpdateReason, current.LastUpdateTargetVersion, current.LastUpdateSummary)
+}
+
+func boundedUpdateSummary(summary string) string {
+	summary = strings.TrimSpace(summary)
+	if len(summary) <= 160 {
+		return summary
+	}
+	return summary[:160]
+}
+
+func menuReadinessForAdapterState(state runtime.AdapterState, lastWakeProbeAt *time.Time) externalagentprotocol.ReadinessStatus {
+	switch state {
+	case runtime.AdapterStateReady:
+		return externalagentprotocol.ReadinessStatusWakeable
+	case runtime.AdapterStateMCPVerified:
+		if lastWakeProbeAt != nil && !lastWakeProbeAt.IsZero() {
+			return externalagentprotocol.ReadinessStatusWakeable
+		}
+		return externalagentprotocol.ReadinessStatusMCPConfigured
+	case runtime.AdapterStateRuntimeStopped, runtime.AdapterStateRuntimeMissing, runtime.AdapterStateAuthMissing, runtime.AdapterStateCapabilityMissing, runtime.AdapterStateWakeProbeFailed:
+		return externalagentprotocol.ReadinessStatusRuntimeError
+	default:
+		return externalagentprotocol.ReadinessStatusRuntimeHealthy
+	}
 }
 
 func (r Runner) readTimeout() time.Duration {
@@ -440,6 +639,9 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		return fmt.Errorf("read connect response: %w", err)
 	}
 	if accepted.MessageType != externalagentprotocol.FrameTypeConnectAccepted {
+		if accepted.ConnectRejected != nil {
+			return fmt.Errorf("connector rejected: %s reason=%s message=%s", accepted.MessageType, accepted.ConnectRejected.Reason, accepted.ConnectRejected.Message)
+		}
 		return fmt.Errorf("connector rejected: %s", accepted.MessageType)
 	}
 	if accepted.ConnectAccepted == nil {
@@ -483,10 +685,25 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		runStarted[runID] = true
 		return true
 	}
-	heartbeat := session.HeartbeatFrameWithDetection(detection, lastSessionWakeProbeAt())
+	updateSnapshot := newSessionUpdateSnapshot(session.UpdateMetadata)
+	heartbeatFrame := func(readiness runtime.Detection, lastWakeProbeAt *time.Time) externalagentprotocol.Frame {
+		updateMetadata, _, _ := updateSnapshot.current()
+		nextSession := session
+		nextSession.UpdateMetadata = updateMetadata
+		return nextSession.HeartbeatFrameWithDetection(readiness, lastWakeProbeAt)
+	}
+	updateMenu := func(readiness runtime.Detection, lastWakeProbeAt *time.Time, heartbeatAt time.Time) {
+		updateMetadata, latestVersion, manualUpdateCommand := updateSnapshot.current()
+		r.updateMenuBar(binding, readiness, lastWakeProbeAt, heartbeatAt, updateMetadata, latestVersion, manualUpdateCommand)
+	}
+	recordUpdate := func(at time.Time) {
+		r.recordBindingUpdateAttempt(binding, updateSnapshot, at)
+	}
+	heartbeat := heartbeatFrame(detection, lastSessionWakeProbeAt())
 	if err := writeFrame(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
+	updateMenu(detection, lastSessionWakeProbeAt(), r.now())
 	capabilityReporter := newNativeCapabilityChangeReporter()
 	runObservations := newRunObservationRegistry()
 	if err := r.replayActiveRun(sessionCtx, binding, session, adapter, runObservations, writeFrame); err != nil {
@@ -513,13 +730,16 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			case <-ticker.C:
 				_ = r.recordHeartbeat(binding, r.now())
 				readiness := r.bindingReadiness(adapter, binding)
-				_ = writeFrame(session.HeartbeatFrameWithDetection(readiness, lastSessionWakeProbeAt()))
+				updateMenu(readiness, lastSessionWakeProbeAt(), r.now())
+				_ = writeFrame(heartbeatFrame(readiness, lastSessionWakeProbeAt()))
 				_ = writePing()
 				_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
 			}
 		}
 	}()
 	commandCache := newCommandFrameCache()
+	updateLock := make(chan struct{}, 1)
+	updateLock <- struct{}{}
 	for {
 		var frame externalagentprotocol.Frame
 		if err := conn.ReadJSON(&frame); err != nil {
@@ -561,9 +781,10 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				return fmt.Errorf("write wake probe ack: %w", err)
 			}
 			wakeReadiness := r.bindingReadiness(adapter, binding)
-			if err := writeFrame(session.HeartbeatFrameWithDetection(wakeReadiness, lastSessionWakeProbeAt())); err != nil {
+			if err := writeFrame(heartbeatFrame(wakeReadiness, lastSessionWakeProbeAt())); err != nil {
 				return fmt.Errorf("write wake probe heartbeat: %w", err)
 			}
+			updateMenu(wakeReadiness, lastSessionWakeProbeAt(), probedAt)
 			_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, wakeReadiness, lastSessionWakeProbeAt, writeFrame)
 		case externalagentprotocol.FrameTypeConfigRefresh:
 			if frame.ConfigRefresh == nil {
@@ -739,6 +960,99 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			commandCache.mark(frame)
 			_ = adapter.CancelRun(nativeRunID)
 			runObservations.cancel(frame.RunID)
+		case externalagentprotocol.FrameTypeUpdateRequest:
+			if frame.UpdateRequest == nil {
+				continue
+			}
+			updateSnapshot.setRequest(*frame.UpdateRequest)
+			if cached, ok := commandCache.cachedReplies(frame); ok {
+				for _, reply := range cached {
+					if err := writeFrame(reply); err != nil {
+						return fmt.Errorf("write cached update response: %w", err)
+					}
+				}
+				continue
+			}
+			select {
+			case <-updateLock:
+			default:
+				failed := session.UpdateFailedFrame(frame, "", "update already running")
+				updateSnapshot.set(externalagentprotocol.UpdateStateRunning, "", "update already running")
+				recordUpdate(r.now())
+				updateMenu(detection, lastSessionWakeProbeAt(), r.now())
+				commandCache.storeReply(frame, failed)
+				if err := writeFrame(failed); err != nil {
+					return fmt.Errorf("write update lock failure: %w", err)
+				}
+				continue
+			}
+			plan, failure := updater.DerivePlan(updater.PlanOptions{
+				GOOS:         r.goos(),
+				ServiceScope: session.ServiceScope,
+				UID:          os.Getuid(),
+				Metadata:     updater.Metadata(session.UpdateMetadata),
+				Request:      *frame.UpdateRequest,
+			})
+			if failure != nil {
+				updateLock <- struct{}{}
+				failed := session.UpdateFailedFrame(frame, failure.Reason, failure.Message)
+				updateSnapshot.set(externalagentprotocol.UpdateStateFailed, failure.Reason, failure.Message)
+				recordUpdate(r.now())
+				updateMenu(detection, lastSessionWakeProbeAt(), r.now())
+				commandCache.storeReply(frame, failed)
+				if err := writeFrame(failed); err != nil {
+					return fmt.Errorf("write update planning failure: %w", err)
+				}
+				continue
+			}
+			accepted := session.UpdateAcceptedFrame(frame)
+			running := session.UpdateProgressFrame(frame, externalagentprotocol.UpdateStateRunning, "update running")
+			updateSnapshot.set(externalagentprotocol.UpdateStateRunning, "", "update running")
+			recordUpdate(r.now())
+			updateMenu(detection, lastSessionWakeProbeAt(), r.now())
+			commandCache.storeReplies(frame, []externalagentprotocol.Frame{accepted, running})
+			if err := writeFrame(accepted); err != nil {
+				updateLock <- struct{}{}
+				updateSnapshot.set(externalagentprotocol.UpdateStateFailed, "", "update accepted frame failed")
+				recordUpdate(r.now())
+				updateMenu(detection, lastSessionWakeProbeAt(), r.now())
+				return fmt.Errorf("write update accepted: %w", err)
+			}
+			if err := writeFrame(running); err != nil {
+				updateLock <- struct{}{}
+				updateSnapshot.set(externalagentprotocol.UpdateStateFailed, "", "update running frame failed")
+				recordUpdate(r.now())
+				updateMenu(detection, lastSessionWakeProbeAt(), r.now())
+				return fmt.Errorf("write update running: %w", err)
+			}
+			go func(frame externalagentprotocol.Frame, plan updater.Plan) {
+				defer func() {
+					updateLock <- struct{}{}
+				}()
+				if err := updater.RunPlan(r.UpdateRunner, plan); err != nil {
+					message := redactUpdateFailure(err)
+					updateSnapshot.set(externalagentprotocol.UpdateStateFailed, "", message)
+					recordUpdate(r.now())
+					updateMenu(detection, lastSessionWakeProbeAt(), r.now())
+					_ = writeFrame(session.UpdateFailedFrame(frame, "", message))
+					return
+				}
+				updateSnapshot.set(externalagentprotocol.UpdateStateSucceeded, "", "update installed")
+				recordUpdate(r.now())
+				updateMenu(detection, lastSessionWakeProbeAt(), r.now())
+				_ = writeFrame(session.UpdateProgressFrame(frame, externalagentprotocol.UpdateStateSucceeded, "update installed"))
+				updateSnapshot.set(externalagentprotocol.UpdateStateRestarting, "", "restarting connector")
+				recordUpdate(r.now())
+				updateMenu(detection, lastSessionWakeProbeAt(), r.now())
+				_ = writeFrame(session.UpdateRestartingFrame(frame))
+				if err := updater.RestartFromPlan(r.UpdateRunner, plan); err != nil {
+					message := redactUpdateFailure(err)
+					updateSnapshot.set(externalagentprotocol.UpdateStateFailed, "", message)
+					recordUpdate(r.now())
+					updateMenu(detection, lastSessionWakeProbeAt(), r.now())
+					_ = writeFrame(session.UpdateFailedFrame(frame, "", message))
+				}
+			}(frame, plan)
 		case externalagentprotocol.FrameTypeTokenRevoked:
 			if frame.TokenRevoked == nil {
 				continue
@@ -776,6 +1090,13 @@ func (r Runner) now() time.Time {
 		return r.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func redactUpdateFailure(err error) string {
+	if err == nil {
+		return ""
+	}
+	return "update command failed"
 }
 
 type commandFrameCache struct {

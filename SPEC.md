@@ -66,6 +66,18 @@ external persona.
   host OS, and host architecture so API-owned external persona state can display
   the installed Connector and browser surfaces can choose the correct upgrade
   command when recommended releases advance.
+- Connect and heartbeat payloads include finite non-secret install and updater
+  metadata. `install_channel` is one of `homebrew`, `deb`, `rpm`, `archive`, or
+  `unknown`. `executable_path_class` is one of `homebrew_opt`, `package_managed`,
+  `archive_path`, or `unknown`. `update_capability` is one of
+  `one_click_available`, `manual_required`, `unsupported`, or `unknown`.
+  `update_state` is one of `idle`, `checking`, `available`, `running`,
+  `restarting`, `succeeded`, or `failed`. Safe updater reason codes include
+  `requires_sudo`, `system_launchdaemon_homebrew`, `package_manager_missing`,
+  `unknown_install_channel`, `release_metadata_unavailable`, and
+  `wsl2_manual_required`. Heartbeats must not include local secrets, bearer
+  tokens, full executable paths, full config paths, or raw package-manager
+  output.
 - Each binding has one PersonaStack connection id, persona id, external agent
   kind, bridge credential, PersonaStack MCP credential, native MCP server name,
   local runtime selection, optional Hermes profile home, and local readiness
@@ -128,6 +140,9 @@ external persona.
 - `personastack-connector pair <code> --runtime auto`
 - `personastack-connector pair <code> --runtime hermes`
 - `personastack-connector pair <code> --runtime hermes --hermes-home <path>`
+- `personastack-connector update status`
+- `personastack-connector update check`
+- `personastack-connector update install`
 - `personastack-connector pair <code> --runtime openclaw`
 - `personastack-connector pair <code> --service-scope user`
 - `personastack-connector pair <code> --service-scope system`
@@ -165,9 +180,14 @@ Hermes/OpenClaw runtime, native MCP configuration, and wake probe are live.
 
 The V1 Connector does not expose a local HTTP UI/control listener. CLI control
 is local process execution and native MCP uses stdio; any future local control
-server must bind loopback only. If a tray/menu surface is added, it is only an
-optional convenience mirror for status, repair, logs, and pairing, and it must
-not be required for headless Linux.
+server must bind loopback only. macOS user-scope LaunchAgent runs may expose an
+optional menu bar status icon derived from checked-in PersonaStack favicon
+assets. The menu bar must show connection, runtime, persona, heartbeat, wake,
+active-run, version, latest-version, and update state. Menu actions may open
+PersonaStack, copy redacted status, run repair, view diagnostics, check for
+updates, install an update, copy the API-derived manual update command, and quit
+the user-scope Connector. macOS system LaunchDaemon runs and Linux runs must not
+attempt to show a menu bar icon. Linux remains CLI-first and headless.
 
 ## Runtime Adapters
 
@@ -234,6 +254,12 @@ Adapter result states must be concrete typed enums, including:
   unavailable until a future Connector/Hermes/OpenClaw contract supplies
   API-verifiable active website-chat turn authority, bounded byte transfer,
   40 MiB local enforcement, retention, and ownership checks.
+- Connector `final_message` is a returned assistant reply only for website chat
+  window runs. Telegram, Matrix, Discord, Slack, and every other integration
+  chat must reply only through explicit PersonaStack MCP reply/send tools.
+  Connector must not route `final_message`, public commentary, assistant-final
+  run-output events, media-output events, or inline-control events into provider
+  chats.
 - `mcp install` and `mcp repair` must preserve unrelated native runtime config,
   write an owner-only first backup, use atomic replacement, and refuse to
   overwrite an unrecognized same-name MCP server by reporting a conflict state.
@@ -383,6 +409,12 @@ Adapter result states must be concrete typed enums, including:
   semver, commit, and minimum protocol after the release workflow has completed
   and public assets have been verified. The API owns derivation of every
   recommended OS/arch/package asset URL and install command.
+- Release acceptance must run a read-only API metadata check against the public
+  Homebrew tap formula before marking a Connector release accepted. The check
+  must fail when any supported recommended OS/arch/package row is missing, when
+  the API-recommended semver differs from the tap formula, or when API-derived
+  asset, checksum, manifest, or install command fields do not match the
+  canonical GitHub Release target.
 - The binary must expose `personastack-connector version` so install flows and
   support diagnostics can verify the downloaded artifact.
 - V1 signed distribution channels are GitHub Release archives for macOS and
@@ -397,9 +429,26 @@ Adapter result states must be concrete typed enums, including:
 - Public source visibility is for audit only. Repository docs and package
   metadata must not describe the Connector as open source unless the license
   changes to an OSI-style open-source grant.
-- Signed auto-update launch scope stays deferred until a separate
-  `personastack-ship` decision; package-manager/manual update prompts remain
-  the default guidance.
+- Signed auto-update is in scope for supported package-manager channels.
+  Auto-update must use API-owned recommended release metadata for version and
+  asset selection, but the Connector must derive and execute only
+  connector-owned finite command sequences. It must not execute arbitrary shell
+  text from API data.
+- macOS Homebrew user-scope updates run only `brew update` followed by
+  `brew upgrade personastack/tap/personastack-connector`, then restart the
+  user LaunchAgent. Homebrew-installed user LaunchAgents should use the stable
+  Homebrew opt-path executable. macOS system LaunchDaemon Homebrew installs are
+  manual unless a separate root-safe design is accepted.
+- Linux `.deb` and `.rpm` installs expose exact API-derived manual commands and
+  may perform one-click package updates only when the Connector is already
+  running with the required privilege and the needed package manager is present.
+  WSL2, archive installs, unknown package managers, user-scope services without
+  privilege, and unknown install channels must report manual-required or
+  unsupported states instead of trying to prompt for privilege.
+- Update attempts must hold an update lock, record bounded local state for
+  diagnostics/menu/status display, verify downloaded assets against API release
+  checksums when Connector downloads directly, and preserve pairing state,
+  local config, credentials, service registration, and logs on failure.
 - Stable public release activation is a separate `personastack-ship` gate and
   is not part of routine implementation completion.
 - WSL2 uses the Linux Connector inside the WSL2 environment.
