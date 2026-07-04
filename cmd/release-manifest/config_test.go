@@ -15,15 +15,7 @@ type goReleaserConfig struct {
 	Before struct {
 		Hooks []string `yaml:"hooks"`
 	} `yaml:"before"`
-	Builds []struct {
-		ID      string   `yaml:"id"`
-		Main    string   `yaml:"main"`
-		Binary  string   `yaml:"binary"`
-		Env     []string `yaml:"env"`
-		GoOS    []string `yaml:"goos"`
-		GoArch  []string `yaml:"goarch"`
-		LdFlags []string `yaml:"ldflags"`
-	} `yaml:"builds"`
+	Builds   []goReleaserBuild `yaml:"builds"`
 	Archives []struct {
 		ID           string `yaml:"id"`
 		NameTemplate string `yaml:"name_template"`
@@ -77,6 +69,16 @@ type goReleaserConfig struct {
 	} `yaml:"release"`
 }
 
+type goReleaserBuild struct {
+	ID      string   `yaml:"id"`
+	Main    string   `yaml:"main"`
+	Binary  string   `yaml:"binary"`
+	Env     []string `yaml:"env"`
+	GoOS    []string `yaml:"goos"`
+	GoArch  []string `yaml:"goarch"`
+	LdFlags []string `yaml:"ldflags"`
+}
+
 func TestGoReleaserConfigCoversReleaseMatrix(t *testing.T) {
 	raw, err := os.ReadFile("../../.goreleaser.yaml")
 	if err != nil {
@@ -88,27 +90,43 @@ func TestGoReleaserConfigCoversReleaseMatrix(t *testing.T) {
 		t.Fatalf("decode goreleaser config: %v", err)
 	}
 
-	if len(cfg.Builds) != 1 {
-		t.Fatalf("build count = %d, want 1", len(cfg.Builds))
+	if len(cfg.Builds) != 2 {
+		t.Fatalf("build count = %d, want 2", len(cfg.Builds))
 	}
-	build := cfg.Builds[0]
-	if build.ID != "personastack-connector" || build.Main != "./cmd/personastack-connector" || build.Binary != "personastack-connector" {
-		t.Fatalf("unexpected build identity: %+v", build)
+	linux := findBuild(cfg.Builds, "personastack-connector-linux")
+	if linux == nil {
+		t.Fatalf("missing linux build: %+v", cfg.Builds)
 	}
-	if !containsAll(build.GoOS, "darwin", "linux") {
-		t.Fatalf("unexpected goos matrix: %v", build.GoOS)
+	assertBuildIdentity(t, *linux)
+	if !containsAll(linux.GoOS, "linux") || containsString(linux.GoOS, "darwin") || containsString(linux.GoOS, "windows") {
+		t.Fatalf("unexpected linux goos matrix: %v", linux.GoOS)
 	}
-	if containsString(build.GoOS, "windows") {
-		t.Fatalf("windows must not be in the release matrix: %v", build.GoOS)
+	if !containsAll(linux.GoArch, "amd64", "arm64") {
+		t.Fatalf("unexpected linux goarch matrix: %v", linux.GoArch)
 	}
-	if !containsAll(build.GoArch, "amd64", "arm64") {
-		t.Fatalf("unexpected goarch matrix: %v", build.GoArch)
+	if !containsString(linux.Env, "CGO_ENABLED=0") {
+		t.Fatalf("missing linux CGO disablement: %v", linux.Env)
 	}
-	if !containsString(build.Env, "CGO_ENABLED=0") {
-		t.Fatalf("missing CGO disablement: %v", build.Env)
+	if !containsString(linux.LdFlags, "-X github.com/personastack/personastack-connector/internal/buildinfo.Version={{ .Version }}") {
+		t.Fatalf("missing linux buildinfo ldflags: %v", linux.LdFlags)
 	}
-	if !containsString(build.LdFlags, "-X github.com/personastack/personastack-connector/internal/buildinfo.Version={{ .Version }}") {
-		t.Fatalf("missing buildinfo ldflags: %v", build.LdFlags)
+
+	darwin := findBuild(cfg.Builds, "personastack-connector-darwin")
+	if darwin == nil {
+		t.Fatalf("missing darwin build: %+v", cfg.Builds)
+	}
+	assertBuildIdentity(t, *darwin)
+	if !containsAll(darwin.GoOS, "darwin") || containsString(darwin.GoOS, "linux") || containsString(darwin.GoOS, "windows") {
+		t.Fatalf("unexpected darwin goos matrix: %v", darwin.GoOS)
+	}
+	if !containsAll(darwin.GoArch, "amd64", "arm64") {
+		t.Fatalf("unexpected darwin goarch matrix: %v", darwin.GoArch)
+	}
+	if !containsString(darwin.Env, "CGO_ENABLED=1") {
+		t.Fatalf("missing darwin CGO enablement: %v", darwin.Env)
+	}
+	if !containsString(darwin.LdFlags, "-X github.com/personastack/personastack-connector/internal/buildinfo.Version={{ .Version }}") {
+		t.Fatalf("missing darwin buildinfo ldflags: %v", darwin.LdFlags)
 	}
 
 	if len(cfg.Archives) != 1 {
@@ -154,7 +172,7 @@ func TestGoReleaserConfigCoversReleaseMatrix(t *testing.T) {
 	if macos.Enabled != "{{ and (isEnvSet \"MACOS_SIGN_P12\") (isEnvSet \"MACOS_SIGN_PASSWORD\") (isEnvSet \"MACOS_NOTARY_ISSUER_ID\") (isEnvSet \"MACOS_NOTARY_KEY_ID\") (isEnvSet \"MACOS_NOTARY_KEY\") }}" {
 		t.Fatalf("unexpected macos enable gate: %q", macos.Enabled)
 	}
-	if !containsAll(macos.Ids, "personastack-connector") {
+	if !containsAll(macos.Ids, "personastack-connector-darwin") {
 		t.Fatalf("unexpected macos ids: %+v", macos.Ids)
 	}
 	if macos.Sign.Certificate != "{{ .Env.MACOS_SIGN_P12 }}" || macos.Sign.Password != "{{ .Env.MACOS_SIGN_PASSWORD }}" {
@@ -268,11 +286,13 @@ func TestGoReleaserConfigExcludesWindows(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("decode goreleaser config: %v", err)
 	}
-	if len(cfg.Builds) != 1 {
-		t.Fatalf("build count = %d, want 1", len(cfg.Builds))
+	if len(cfg.Builds) == 0 {
+		t.Fatalf("build matrix must not be empty")
 	}
-	if containsString(cfg.Builds[0].GoOS, "windows") {
-		t.Fatalf("windows must not be in the release matrix: %v", cfg.Builds[0].GoOS)
+	for _, build := range cfg.Builds {
+		if containsString(build.GoOS, "windows") {
+			t.Fatalf("windows must not be in the release matrix for %s: %v", build.ID, build.GoOS)
+		}
 	}
 }
 
@@ -572,6 +592,22 @@ func containsAll(values []string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+func findBuild(builds []goReleaserBuild, id string) *goReleaserBuild {
+	for i := range builds {
+		if builds[i].ID == id {
+			return &builds[i]
+		}
+	}
+	return nil
+}
+
+func assertBuildIdentity(t *testing.T, build goReleaserBuild) {
+	t.Helper()
+	if build.Main != "./cmd/personastack-connector" || build.Binary != "personastack-connector" {
+		t.Fatalf("unexpected build identity: %+v", build)
+	}
 }
 
 func hasNFPMContent(values []struct {
