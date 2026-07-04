@@ -219,6 +219,31 @@ func TestInstallerPlansSystemLaunchDaemon(t *testing.T) {
 	}
 }
 
+func TestInstallerWritesHomebrewLaunchAgentWithStableOptPath(t *testing.T) {
+	homeDir := t.TempDir()
+	runner := &recordingRunner{}
+	_, err := (Installer{
+		HomeDir:        homeDir,
+		ExecutablePath: "/opt/homebrew/Cellar/personastack-connector/1.2.3/bin/personastack-connector",
+		GOOS:           "darwin",
+		ServiceScope:   ServiceScopeUserLaunchAgent,
+		Runner:         runner,
+	}).Install()
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(homeDir, "Library", "LaunchAgents", "ai.personastack.connector.plist"))
+	if err != nil {
+		t.Fatalf("read launch agent: %v", err)
+	}
+	if !strings.Contains(string(raw), "<string>/opt/homebrew/opt/personastack-connector/bin/personastack-connector</string>") {
+		t.Fatalf("launch agent did not use stable Homebrew opt path:\n%s", raw)
+	}
+	if strings.Contains(string(raw), "/Cellar/personastack-connector/") {
+		t.Fatalf("launch agent kept versioned Homebrew Cellar path:\n%s", raw)
+	}
+}
+
 func TestInstallerFallsBackToLinuxAutostart(t *testing.T) {
 	homeDir := t.TempDir()
 	runner := &recordingRunner{err: errors.New("systemd unavailable")}

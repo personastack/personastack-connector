@@ -60,6 +60,12 @@ type Binding struct {
 	LastHeartbeatAt         time.Time
 	LastWakeProbeAt         time.Time
 	LastWakeProbeGeneration int64
+	LastUpdateAt            time.Time
+	LastUpdateState         string
+	LastUpdateReason        string
+	LastUpdateRequestID     string
+	LastUpdateSummary       string
+	LastUpdateTargetVersion string
 	RuntimeKind             runtime.AdapterKind
 	ReadinessState          runtime.AdapterState
 	HasBridgeSecret         bool

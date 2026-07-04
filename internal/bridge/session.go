@@ -39,10 +39,21 @@ func CredentialFromBinding(binding config.Binding) (Credential, error) {
 }
 
 type Session struct {
-	Binding      config.Binding
-	Credential   Credential
-	ServiceScope externalagentprotocol.ServiceScope
-	Now          func() time.Time
+	Binding        config.Binding
+	Credential     Credential
+	ServiceScope   externalagentprotocol.ServiceScope
+	UpdateMetadata UpdateMetadata
+	Now            func() time.Time
+}
+
+type UpdateMetadata struct {
+	InstallChannel      externalagentprotocol.InstallChannel
+	ExecutablePathClass externalagentprotocol.ExecutablePathClass
+	UpdateCapability    externalagentprotocol.UpdateCapability
+	UpdateState         externalagentprotocol.UpdateState
+	UpdateReason        externalagentprotocol.UpdateReason
+	LastUpdateRequestID string
+	LastUpdateSummary   string
 }
 
 func NewSession(binding config.Binding, credential Credential) (Session, error) {
@@ -82,6 +93,13 @@ func (s Session) ConnectFrame(nonce string) (externalagentprotocol.Frame, error)
 		Hostname:                  localHostname(),
 		OS:                        stdruntime.GOOS,
 		Arch:                      stdruntime.GOARCH,
+		InstallChannel:            s.updateMetadata().InstallChannel,
+		ExecutablePathClass:       s.updateMetadata().ExecutablePathClass,
+		UpdateCapability:          s.updateMetadata().UpdateCapability,
+		UpdateState:               s.updateMetadata().UpdateState,
+		UpdateReason:              s.updateMetadata().UpdateReason,
+		LastUpdateRequestID:       s.updateMetadata().LastUpdateRequestID,
+		LastUpdateSummary:         s.updateMetadata().LastUpdateSummary,
 		DevicePublicKey:           base64.StdEncoding.EncodeToString(s.Credential.PublicKey),
 		CredentialID:              strings.TrimSpace(s.Credential.ID),
 		CredentialProofNonce:      strings.TrimSpace(nonce),
@@ -120,9 +138,33 @@ func (s Session) HeartbeatFrameWithDiagnostic(state runtime.AdapterState, diagno
 		OS:                     stdruntime.GOOS,
 		Arch:                   stdruntime.GOARCH,
 		ReleaseChannel:         buildinfo.ReleaseChannelString(),
+		InstallChannel:         s.updateMetadata().InstallChannel,
+		ExecutablePathClass:    s.updateMetadata().ExecutablePathClass,
+		UpdateCapability:       s.updateMetadata().UpdateCapability,
+		UpdateState:            s.updateMetadata().UpdateState,
+		UpdateReason:           s.updateMetadata().UpdateReason,
+		LastUpdateRequestID:    s.updateMetadata().LastUpdateRequestID,
+		LastUpdateSummary:      s.updateMetadata().LastUpdateSummary,
 		LastWakeProbeAt:        lastWakeProbeAt,
 	}
 	return frame
+}
+
+func (s Session) updateMetadata() UpdateMetadata {
+	metadata := s.UpdateMetadata
+	if metadata.InstallChannel == "" {
+		metadata.InstallChannel = externalagentprotocol.InstallChannelUnknown
+	}
+	if metadata.ExecutablePathClass == "" {
+		metadata.ExecutablePathClass = externalagentprotocol.ExecutablePathClassUnknown
+	}
+	if metadata.UpdateCapability == "" {
+		metadata.UpdateCapability = externalagentprotocol.UpdateCapabilityUnknown
+	}
+	if metadata.UpdateState == "" {
+		metadata.UpdateState = externalagentprotocol.UpdateStateIdle
+	}
+	return metadata
 }
 
 func (s Session) serviceScope() externalagentprotocol.ServiceScope {
@@ -177,6 +219,57 @@ func (s Session) RunAcceptedFrame(request externalagentprotocol.Frame, nativeRun
 		NativeRunID: strings.TrimSpace(nativeRunID),
 	}
 	return frame
+}
+
+func (s Session) UpdateAcceptedFrame(request externalagentprotocol.Frame) externalagentprotocol.Frame {
+	frame := s.baseFrame(externalagentprotocol.FrameTypeUpdateAccepted, s.now())
+	frame.MessageID = strings.TrimSpace(request.MessageID)
+	frame.UpdateAccepted = &externalagentprotocol.UpdateAcceptedPayload{
+		RequestID:  updateRequestID(request),
+		AcceptedAt: frame.SentAt,
+	}
+	return frame
+}
+
+func (s Session) UpdateProgressFrame(request externalagentprotocol.Frame, state externalagentprotocol.UpdateState, summary string) externalagentprotocol.Frame {
+	frame := s.baseFrame(externalagentprotocol.FrameTypeUpdateProgress, s.now())
+	frame.MessageID = strings.TrimSpace(request.MessageID)
+	frame.UpdateProgress = &externalagentprotocol.UpdateProgressPayload{
+		RequestID: updateRequestID(request),
+		State:     state,
+		Summary:   strings.TrimSpace(summary),
+		UpdatedAt: frame.SentAt,
+	}
+	return frame
+}
+
+func (s Session) UpdateFailedFrame(request externalagentprotocol.Frame, reason externalagentprotocol.UpdateReason, message string) externalagentprotocol.Frame {
+	frame := s.baseFrame(externalagentprotocol.FrameTypeUpdateFailed, s.now())
+	frame.MessageID = strings.TrimSpace(request.MessageID)
+	frame.UpdateFailed = &externalagentprotocol.UpdateFailedPayload{
+		RequestID: updateRequestID(request),
+		Reason:    reason,
+		Message:   strings.TrimSpace(message),
+		FailedAt:  frame.SentAt,
+	}
+	return frame
+}
+
+func (s Session) UpdateRestartingFrame(request externalagentprotocol.Frame) externalagentprotocol.Frame {
+	frame := s.baseFrame(externalagentprotocol.FrameTypeUpdateRestarting, s.now())
+	frame.MessageID = strings.TrimSpace(request.MessageID)
+	frame.UpdateRestarting = &externalagentprotocol.UpdateRestartingPayload{
+		RequestID:    updateRequestID(request),
+		RestartingAt: frame.SentAt,
+	}
+	return frame
+}
+
+func updateRequestID(request externalagentprotocol.Frame) string {
+	if request.UpdateRequest == nil {
+		return ""
+	}
+	return strings.TrimSpace(request.UpdateRequest.RequestID)
 }
 
 func (s Session) RunStartedFrame(request externalagentprotocol.Frame, nativeRunID string, startedAt time.Time) externalagentprotocol.Frame {

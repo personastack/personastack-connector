@@ -23,6 +23,12 @@ func TestConnectFrameSignsAPIVerifiableMessage(t *testing.T) {
 	session.Now = func() time.Time {
 		return time.Unix(100, 0).UTC()
 	}
+	session.UpdateMetadata = UpdateMetadata{
+		InstallChannel:      externalagentprotocol.InstallChannelHomebrew,
+		ExecutablePathClass: externalagentprotocol.ExecutablePathClassHomebrewOpt,
+		UpdateCapability:    externalagentprotocol.UpdateCapabilityOneClickAvailable,
+		UpdateState:         externalagentprotocol.UpdateStateAvailable,
+	}
 
 	frame, err := session.ConnectFrame("nonce-1")
 	if err != nil {
@@ -46,6 +52,12 @@ func TestConnectFrameSignsAPIVerifiableMessage(t *testing.T) {
 	}
 	if frame.Connect.OS != stdruntime.GOOS || frame.Connect.Arch != stdruntime.GOARCH {
 		t.Fatalf("connect platform metadata: got=%s/%s want=%s/%s", frame.Connect.OS, frame.Connect.Arch, stdruntime.GOOS, stdruntime.GOARCH)
+	}
+	if frame.Connect.InstallChannel != externalagentprotocol.InstallChannelHomebrew ||
+		frame.Connect.ExecutablePathClass != externalagentprotocol.ExecutablePathClassHomebrewOpt ||
+		frame.Connect.UpdateCapability != externalagentprotocol.UpdateCapabilityOneClickAvailable ||
+		frame.Connect.UpdateState != externalagentprotocol.UpdateStateAvailable {
+		t.Fatalf("unexpected connect update metadata: %+v", frame.Connect)
 	}
 }
 
@@ -106,6 +118,57 @@ func TestRunFrameBuildersCarryEventPayloads(t *testing.T) {
 	}
 }
 
+func TestUpdateFrameBuildersCarryRequestPayloads(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session := testSession(t, publicKey, privateKey)
+	session.Now = func() time.Time {
+		return time.Unix(123, 0).UTC()
+	}
+	request := externalagentprotocol.Frame{
+		MessageID: "message-1",
+		UpdateRequest: &externalagentprotocol.UpdateRequestPayload{
+			RequestID: "update-1",
+		},
+	}
+
+	accepted := session.UpdateAcceptedFrame(request)
+	if accepted.MessageType != externalagentprotocol.FrameTypeUpdateAccepted ||
+		accepted.MessageID != "message-1" ||
+		accepted.UpdateAccepted == nil ||
+		accepted.UpdateAccepted.RequestID != "update-1" ||
+		!accepted.UpdateAccepted.AcceptedAt.Equal(time.Unix(123, 0).UTC()) {
+		t.Fatalf("unexpected accepted frame: %+v", accepted)
+	}
+
+	progress := session.UpdateProgressFrame(request, externalagentprotocol.UpdateStateRunning, " running ")
+	if progress.MessageType != externalagentprotocol.FrameTypeUpdateProgress ||
+		progress.UpdateProgress == nil ||
+		progress.UpdateProgress.RequestID != "update-1" ||
+		progress.UpdateProgress.State != externalagentprotocol.UpdateStateRunning ||
+		progress.UpdateProgress.Summary != "running" {
+		t.Fatalf("unexpected progress frame: %+v", progress)
+	}
+
+	failed := session.UpdateFailedFrame(request, externalagentprotocol.UpdateReasonRequiresSudo, " requires sudo ")
+	if failed.MessageType != externalagentprotocol.FrameTypeUpdateFailed ||
+		failed.UpdateFailed == nil ||
+		failed.UpdateFailed.RequestID != "update-1" ||
+		failed.UpdateFailed.Reason != externalagentprotocol.UpdateReasonRequiresSudo ||
+		failed.UpdateFailed.Message != "requires sudo" {
+		t.Fatalf("unexpected failed frame: %+v", failed)
+	}
+
+	restarting := session.UpdateRestartingFrame(request)
+	if restarting.MessageType != externalagentprotocol.FrameTypeUpdateRestarting ||
+		restarting.UpdateRestarting == nil ||
+		restarting.UpdateRestarting.RequestID != "update-1" {
+		t.Fatalf("unexpected restarting frame: %+v", restarting)
+	}
+}
+
 func TestHeartbeatFrameReportsBuildMetadata(t *testing.T) {
 	oldVersion := buildinfo.Version
 	oldCommit := buildinfo.GitCommit
@@ -123,6 +186,15 @@ func TestHeartbeatFrameReportsBuildMetadata(t *testing.T) {
 		t.Fatalf("generate key: %v", err)
 	}
 	session := testSession(t, publicKey, privateKey)
+	session.UpdateMetadata = UpdateMetadata{
+		InstallChannel:      externalagentprotocol.InstallChannelDeb,
+		ExecutablePathClass: externalagentprotocol.ExecutablePathClassPackageManaged,
+		UpdateCapability:    externalagentprotocol.UpdateCapabilityManualRequired,
+		UpdateState:         externalagentprotocol.UpdateStateIdle,
+		UpdateReason:        externalagentprotocol.UpdateReasonRequiresSudo,
+		LastUpdateRequestID: "update-1",
+		LastUpdateSummary:   "dpkg updates require sudo",
+	}
 
 	frame := session.HeartbeatFrame(runtime.AdapterStateReady, nil)
 	if frame.Heartbeat.ConnectionGeneration != 5 || frame.Heartbeat.ConnectorVersion != "v1.2.3" || frame.Heartbeat.GitCommit != "abc123" || frame.Heartbeat.ReleaseChannel != "test" {
@@ -136,6 +208,15 @@ func TestHeartbeatFrameReportsBuildMetadata(t *testing.T) {
 	}
 	if frame.Heartbeat.OS != stdruntime.GOOS || frame.Heartbeat.Arch != stdruntime.GOARCH {
 		t.Fatalf("heartbeat platform metadata: got=%s/%s want=%s/%s", frame.Heartbeat.OS, frame.Heartbeat.Arch, stdruntime.GOOS, stdruntime.GOARCH)
+	}
+	if frame.Heartbeat.InstallChannel != externalagentprotocol.InstallChannelDeb ||
+		frame.Heartbeat.ExecutablePathClass != externalagentprotocol.ExecutablePathClassPackageManaged ||
+		frame.Heartbeat.UpdateCapability != externalagentprotocol.UpdateCapabilityManualRequired ||
+		frame.Heartbeat.UpdateState != externalagentprotocol.UpdateStateIdle ||
+		frame.Heartbeat.UpdateReason != externalagentprotocol.UpdateReasonRequiresSudo ||
+		frame.Heartbeat.LastUpdateRequestID != "update-1" ||
+		frame.Heartbeat.LastUpdateSummary != "dpkg updates require sudo" {
+		t.Fatalf("unexpected heartbeat update metadata: %+v", frame.Heartbeat)
 	}
 }
 
