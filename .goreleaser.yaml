@@ -3,14 +3,29 @@ version: 2
 project_name: personastack-connector
 
 builds:
-  - id: personastack-connector
+  - id: personastack-connector-linux
     main: ./cmd/personastack-connector
     binary: personastack-connector
     env:
       - CGO_ENABLED=0
     goos:
-      - darwin
       - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/personastack/personastack-connector/internal/buildinfo.Version={{ .Version }}
+      - -X github.com/personastack/personastack-connector/internal/buildinfo.GitCommit={{ .Commit }}
+      - -X github.com/personastack/personastack-connector/internal/buildinfo.BuildDate={{ .Date }}
+      - -X github.com/personastack/personastack-connector/internal/buildinfo.ReleaseChannel=stable
+  - id: personastack-connector-darwin
+    main: ./cmd/personastack-connector
+    binary: personastack-connector
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
     goarch:
       - amd64
       - arm64
@@ -25,7 +40,7 @@ notarize:
   macos:
     - enabled: '{{ and (isEnvSet "MACOS_SIGN_P12") (isEnvSet "MACOS_SIGN_PASSWORD") (isEnvSet "MACOS_NOTARY_ISSUER_ID") (isEnvSet "MACOS_NOTARY_KEY_ID") (isEnvSet "MACOS_NOTARY_KEY") }}'
       ids:
-        - personastack-connector
+        - personastack-connector-darwin
       sign:
         certificate: "{{ .Env.MACOS_SIGN_P12 }}"
         password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
@@ -38,7 +53,8 @@ notarize:
 archives:
   - id: default
     ids:
-      - personastack-connector
+      - personastack-connector-linux
+      - personastack-connector-darwin
     name_template: >-
       personastack-connector_{{ .Version }}_
       {{- .Os }}_
@@ -47,7 +63,7 @@ archives:
 nfpms:
   - id: linux-packages
     ids:
-      - personastack-connector
+      - personastack-connector-linux
     package_name: personastack-connector
     vendor: PersonaStack
     homepage: https://personastack.ai

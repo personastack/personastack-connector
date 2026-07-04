@@ -62,7 +62,7 @@ jobs:
     needs:
       - test
       - runtime-smoke
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     environment:
       name: release
     permissions:
