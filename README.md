@@ -6,6 +6,8 @@ This repository is public source for user audit. It is not open source: the
 license permits inspection, but does not grant reuse, modification,
 redistribution, hosting, or commercial rights without written permission.
 
+See [DATA-HANDLING.md](DATA-HANDLING.md) for Connector's local data, credential, network, and deletion boundaries.
+
 It runs on a user's macOS or Linux machine, pairs with PersonaStack,
 configures a supported local agent runtime, and keeps that runtime wakeable as a
 PersonaStack stack member.
