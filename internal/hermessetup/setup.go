@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -30,12 +31,15 @@ var (
 	keyringSet = keyring.Set
 
 	lookPath     = exec.LookPath
-	startGateway = func(homeDir string, binary string) error {
+	startGateway = func(paths Paths, identity ProcessIdentity, binary string) error {
 		cmd := exec.Command(binary, "gateway")
-		cmd.Env = append(os.Environ(), "HERMES_HOME="+strings.TrimSpace(homeDir))
-		cmd.Dir = strings.TrimSpace(homeDir)
+		cmd.Env = processEnv(paths, identity)
+		cmd.Dir = strings.TrimSpace(paths.HermesHome)
 		cmd.Stdout = ioDiscard{}
 		cmd.Stderr = ioDiscard{}
+		if err := applyProcessIdentity(cmd, identity); err != nil {
+			return err
+		}
 		return cmd.Start()
 	}
 )
@@ -88,6 +92,16 @@ type Paths struct {
 	HermesHome string
 	EnvPath    string
 	ConfigPath string
+}
+
+// ProcessIdentity is the account that owns a selected native runtime. Empty
+// values retain the current account for backwards-compatible local setup.
+type ProcessIdentity struct {
+	Username string
+	HomeDir  string
+	UID      int
+	GID      int
+	GroupIDs []int
 }
 
 func ResolvePaths(homeDir string, explicitHermesHome string) Paths {
@@ -243,17 +257,25 @@ func TryStartGateway(homeDir string) (bool, error) {
 }
 
 func TryStartGatewayForPaths(paths Paths) (bool, error) {
+	return TryStartGatewayForPathsAs(paths, ProcessIdentity{HomeDir: paths.HomeDir})
+}
+
+// TryStartGatewayForPathsAs starts Hermes with the selected account identity.
+// A root Connector may switch to a discovered account. An unprivileged
+// Connector can only start its own account and receives an explicit error for
+// another target instead of falling back to its own profile.
+func TryStartGatewayForPathsAs(paths Paths, identity ProcessIdentity) (bool, error) {
 	if os.Getenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START") == "1" {
 		return false, nil
 	}
 	if err := probeHermesHealth(defaultHermesBase); err == nil {
 		return false, nil
 	}
-	binary, err := lookPath("hermes")
+	binary, err := hermesBinaryForPaths(paths)
 	if err != nil {
 		return false, nil
 	}
-	if err := startGateway(paths.HermesHome, binary); err != nil {
+	if err := startGateway(paths, identity, binary); err != nil {
 		return false, fmt.Errorf("start Hermes gateway: %w", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -264,6 +286,60 @@ func TryStartGatewayForPaths(paths Paths) (bool, error) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	return true, nil
+}
+
+func hermesBinaryForPaths(paths Paths) (string, error) {
+	if binary, err := lookPath("hermes"); err == nil {
+		return binary, nil
+	}
+	for _, candidate := range []string{
+		filepath.Join(paths.HomeDir, ".local", "bin", "hermes"),
+		filepath.Join(paths.HomeDir, ".hermes", "bin", "hermes"),
+		filepath.Join(paths.HomeDir, ".hermes", "hermes-agent", "venv", "bin", "hermes"),
+		filepath.Join(paths.HomeDir, ".hermes", "hermes-agent", ".venv", "bin", "hermes"),
+	} {
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
+func processEnv(paths Paths, identity ProcessIdentity) []string {
+	homeDir := strings.TrimSpace(identity.HomeDir)
+	if homeDir == "" {
+		homeDir = strings.TrimSpace(paths.HomeDir)
+	}
+	username := strings.TrimSpace(identity.Username)
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, item := range os.Environ() {
+		if strings.HasPrefix(item, "HOME=") || strings.HasPrefix(item, "USER=") || strings.HasPrefix(item, "LOGNAME=") || strings.HasPrefix(item, "HERMES_HOME=") {
+			continue
+		}
+		env = append(env, item)
+	}
+	env = append(env, "HOME="+homeDir, "HERMES_HOME="+strings.TrimSpace(paths.HermesHome))
+	if username != "" {
+		env = append(env, "USER="+username, "LOGNAME="+username)
+	}
+	return env
+}
+
+func applyProcessIdentity(cmd *exec.Cmd, identity ProcessIdentity) error {
+	if cmd == nil || identity.UID <= 0 || identity.UID == os.Geteuid() {
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("selected runtime account %q requires root Connector service", strings.TrimSpace(identity.Username))
+	}
+	groups := make([]uint32, 0, len(identity.GroupIDs))
+	for _, groupID := range identity.GroupIDs {
+		if groupID >= 0 {
+			groups = append(groups, uint32(groupID))
+		}
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(identity.UID), Gid: uint32(identity.GID), Groups: groups}}
+	return nil
 }
 
 func ensureEnvFile(path string, values map[string]string) (bool, error) {

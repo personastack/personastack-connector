@@ -446,10 +446,9 @@ func TestRunPairReportsSuccessState(t *testing.T) {
 		"Connection: connection-1",
 		"Runtime: hermes",
 		"Local link: active",
-		"MCP: configured",
+		"MCP: waiting for PersonaStack account and profile selection",
 		"Status: waiting for bridge wake probe",
 		"Details:",
-		"installed mcp binding=connection-1 runtime=hermes",
 		"service installed kind=launchagent scope=user_launch_agent path=/tmp/personastack-connector.plist",
 		"paired persona=persona-1 connection=connection-1 runtime=hermes configure_mcp=true service_scope=user_launch_agent setup_state=pending_bridge_wake_probe",
 	} {

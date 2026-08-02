@@ -285,10 +285,7 @@ func (cmd command) runPair(args []string) error {
 	replaced := replacedBindingCount(cmd.store.ListBindings(), binding.ConnectionID)
 	if serviceScope == service.ServiceScopeLinuxSystemService {
 		err = withLinuxSystemServiceConfigEnv(func() error {
-			if err := writable.SaveBinding(binding); err != nil {
-				return err
-			}
-			return chownLinuxSystemScopePaths(binding.HermesHome)
+			return writable.SaveBinding(binding)
 		})
 		if err != nil {
 			return err
@@ -298,7 +295,10 @@ func (cmd command) runPair(args []string) error {
 			return err
 		}
 	}
-	repairResults, err := cmd.repairSetup(configureMCP, serviceScope)
+	// Runtime configuration is intentionally deferred until PersonaStack sends
+	// the API-selected account and profile in config.refresh. Pairing must not
+	// guess the invoking or root home directory.
+	repairResults, err := cmd.repairSetup(false, serviceScope)
 	if err != nil {
 		return err
 	}
@@ -312,7 +312,7 @@ func (cmd command) runPair(args []string) error {
 		fmt.Fprintln(cmd.stdout, "Local link: active")
 	}
 	if configureMCP {
-		fmt.Fprintln(cmd.stdout, "MCP: configured")
+		fmt.Fprintln(cmd.stdout, "MCP: waiting for PersonaStack account and profile selection")
 	} else {
 		fmt.Fprintln(cmd.stdout, "MCP: skipped")
 	}

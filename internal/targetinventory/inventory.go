@@ -22,6 +22,19 @@ type account struct {
 	username string
 	homeDir  string
 	uid      int
+	gid      int
+	groupIDs []int
+}
+
+// ResolvedTarget is the local account and profile selected by PersonaStack.
+// It is resolved for a single operation and must never be saved in Binding.
+type ResolvedTarget struct {
+	Username   string
+	HomeDir    string
+	UID        int
+	GID        int
+	GroupIDs   []int
+	HermesHome string
 }
 
 var currentUser = user.Current
@@ -59,9 +72,9 @@ func Discover(kind connectorruntime.AdapterKind, installationSecret ...string) (
 // Resolve verifies that an API-provided target is still currently discoverable.
 // It returns the user's home and the Hermes profile directory without persisting
 // either value in Connector state or transmitting it to PersonaStack.
-func Resolve(kind connectorruntime.AdapterKind, target *externalagentprotocol.RuntimeTarget, installationSecret ...string) (homeDir string, runtimeHome string, err error) {
+func Resolve(kind connectorruntime.AdapterKind, target *externalagentprotocol.RuntimeTarget, installationSecret ...string) (ResolvedTarget, error) {
 	if target == nil || target.RuntimeKind != protocolRuntimeKind(kind) {
-		return "", "", fmt.Errorf("runtime target required")
+		return ResolvedTarget{}, fmt.Errorf("runtime target required")
 	}
 	secret := ""
 	if len(installationSecret) > 0 {
@@ -81,11 +94,18 @@ func Resolve(kind connectorruntime.AdapterKind, target *externalagentprotocol.Ru
 				if accountID(candidate, secret) != accountCandidate.CandidateID {
 					continue
 				}
-				return candidate.homeDir, profileHome(candidate, kind, profile.CandidateID, secret), nil
+				return ResolvedTarget{
+					Username:   candidate.username,
+					HomeDir:    candidate.homeDir,
+					UID:        candidate.uid,
+					GID:        candidate.gid,
+					GroupIDs:   append([]int(nil), candidate.groupIDs...),
+					HermesHome: profileHome(candidate, kind, profile.CandidateID, secret),
+				}, nil
 			}
 		}
 	}
-	return "", "", fmt.Errorf("selected runtime target is no longer available")
+	return ResolvedTarget{}, fmt.Errorf("selected runtime target is no longer available")
 }
 
 func discoverAccounts() ([]account, []error) {
@@ -95,7 +115,8 @@ func discoverAccounts() ([]account, []error) {
 			return nil, []error{fmt.Errorf("resolve current user: %w", err)}
 		}
 		uid, _ := strconv.Atoi(current.Uid)
-		return []account{{username: strings.TrimSpace(current.Username), homeDir: strings.TrimSpace(current.HomeDir), uid: uid}}, nil
+		gid, _ := strconv.Atoi(current.Gid)
+		return []account{{username: strings.TrimSpace(current.Username), homeDir: strings.TrimSpace(current.HomeDir), uid: uid, gid: gid, groupIDs: groupIDsForUser(current, gid)}}, nil
 	}
 	raw, err := readFile("/etc/passwd")
 	if err != nil {
@@ -126,10 +147,51 @@ func discoverAccounts() ([]account, []error) {
 			continue
 		}
 		seen[key] = struct{}{}
-		accounts = append(accounts, account{username: username, homeDir: homeDir, uid: uid})
+		gid, gidErr := strconv.Atoi(fields[3])
+		if gidErr != nil {
+			continue
+		}
+		accounts = append(accounts, account{username: username, homeDir: homeDir, uid: uid, gid: gid, groupIDs: groupIDsForUID(uid, gid)})
 	}
 	sort.Slice(accounts, func(i int, j int) bool { return accounts[i].username < accounts[j].username })
 	return accounts, nil
+}
+
+func groupIDsForUser(current *user.User, primaryGID int) []int {
+	if current == nil {
+		return []int{primaryGID}
+	}
+	groups, err := current.GroupIds()
+	if err != nil {
+		return []int{primaryGID}
+	}
+	return parseGroupIDs(groups, primaryGID)
+}
+
+func groupIDsForUID(uid int, primaryGID int) []int {
+	current, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil {
+		return []int{primaryGID}
+	}
+	return groupIDsForUser(current, primaryGID)
+}
+
+func parseGroupIDs(values []string, primaryGID int) []int {
+	seen := map[int]struct{}{primaryGID: {}}
+	groups := []int{primaryGID}
+	for _, value := range values {
+		groupID, err := strconv.Atoi(value)
+		if err != nil || groupID < 0 {
+			continue
+		}
+		if _, found := seen[groupID]; found {
+			continue
+		}
+		seen[groupID] = struct{}{}
+		groups = append(groups, groupID)
+	}
+	sort.Ints(groups)
+	return groups
 }
 
 func discoverProfiles(candidate account, kind connectorruntime.AdapterKind, installationSecret string) ([]externalagentprotocol.RuntimeProfileCandidate, []error) {

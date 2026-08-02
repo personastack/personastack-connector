@@ -36,12 +36,12 @@ func TestDiscoverNonRootOnlyReportsCurrentUserHermesProfiles(t *testing.T) {
 		t.Fatalf("unexpected profiles: %+v", profiles)
 	}
 	target := &externalagentprotocol.RuntimeTarget{AccountCandidateID: inventory.Accounts[0].CandidateID, ProfileCandidateID: profiles[1].CandidateID, RuntimeKind: externalagentprotocol.RuntimeKindHermes, SelectionRevision: 1}
-	_, resolvedProfile, err := Resolve(runtime.AdapterKindHermes, target)
+	resolved, err := Resolve(runtime.AdapterKindHermes, target)
 	if err != nil {
 		t.Fatalf("resolve selected Hermes profile: %v", err)
 	}
-	if resolvedProfile != filepath.Join(homeDir, ".hermes", "profiles", "work") {
-		t.Fatalf("profile = %q", resolvedProfile)
+	if resolved.HermesHome != filepath.Join(homeDir, ".hermes", "profiles", "work") {
+		t.Fatalf("profile = %q", resolved.HermesHome)
 	}
 }
 

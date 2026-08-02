@@ -372,7 +372,7 @@ func TestRunnerCancelsRemovedBindingAndStartsReplacement(t *testing.T) {
 	}
 }
 
-func TestRunnerConfigRefreshUsesLatestLoopbackProxyState(t *testing.T) {
+func TestRunnerConfigRefreshRequiresAPITarget(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	if err := os.MkdirAll(filepath.Join(homeDir, ".openclaw"), 0o700); err != nil {
@@ -393,8 +393,8 @@ func TestRunnerConfigRefreshUsesLatestLoopbackProxyState(t *testing.T) {
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{latest}})
 
 	err := (Runner{Store: &store}).refreshMCPConfig(stale)
-	if err != nil {
-		t.Fatalf("refreshMCPConfig() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "runtime target required") {
+		t.Fatalf("refreshMCPConfig() error = %v, want target requirement", err)
 	}
 	stored, ok := store.Binding("conn-1")
 	if !ok {
@@ -407,8 +407,8 @@ func TestRunnerConfigRefreshUsesLatestLoopbackProxyState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read openclaw config: %v", err)
 	}
-	if !strings.Contains(string(raw), latest.LocalMCPProxyURL) {
-		t.Fatalf("refresh did not use latest loopback url:\n%s", string(raw))
+	if string(raw) != "{invalid json" {
+		t.Fatalf("refresh changed config without a selected target:\n%s", string(raw))
 	}
 }
 

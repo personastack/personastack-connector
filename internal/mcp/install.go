@@ -48,6 +48,7 @@ type Installer struct {
 	ExecutablePath string
 	GOOS           string
 	Transport      MCPProxyTransport
+	HermesIdentity hermessetup.ProcessIdentity
 }
 
 type MCPProxyTransport int
@@ -98,6 +99,24 @@ func (installer Installer) InstallBinding(binding config.Binding) (InstallResult
 	return installer.installBinding(homeDir, executablePath, binding)
 }
 
+// InstallBindingForTarget writes only to the account and Hermes profile chosen
+// by PersonaStack. The target path is operation-scoped and is never persisted
+// with the Connector binding.
+func (installer Installer) InstallBindingForTarget(binding config.Binding, homeDir string, hermesHome string, identity hermessetup.ProcessIdentity) (InstallResult, error) {
+	homeDir = strings.TrimSpace(homeDir)
+	if homeDir == "" {
+		return InstallResult{}, fmt.Errorf("selected runtime home required")
+	}
+	binding.HermesHome = strings.TrimSpace(hermesHome)
+	installer.HomeDir = homeDir
+	installer.HermesIdentity = identity
+	executablePath, err := installer.executablePath(homeDir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	return installer.installBinding(homeDir, executablePath, binding)
+}
+
 func (installer Installer) installBinding(homeDir string, executablePath string, binding config.Binding) (InstallResult, error) {
 	server := stdioServer(binding, executablePath)
 	hermesPaths := hermessetup.ResolvePaths(homeDir, binding.HermesHome)
@@ -117,7 +136,7 @@ func (installer Installer) installBinding(homeDir string, executablePath string,
 		path := hermesPaths.ConfigPath
 		if err := upsertHermesServer(path, server); err == nil {
 			result := InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name, Note: setupReport.Note}
-			if started, err := hermessetup.TryStartGatewayForPaths(hermesPaths); err != nil {
+			if started, err := hermessetup.TryStartGatewayForPathsAs(hermesPaths, installer.HermesIdentity); err != nil {
 				return InstallResult{}, err
 			} else if started {
 				result.Note = appendNote(result.Note, "Hermes gateway start attempted")
@@ -184,7 +203,7 @@ func (installer Installer) installBindingNativeHTTP(homeDir string, binding conf
 			ServerName:   server.Name,
 			Note:         setupReport.Note,
 		}
-		if started, err := hermessetup.TryStartGatewayForPaths(hermesPaths); err != nil {
+		if started, err := hermessetup.TryStartGatewayForPathsAs(hermesPaths, installer.HermesIdentity); err != nil {
 			return InstallResult{}, err
 		} else if started {
 			result.Note = appendNote(result.Note, "Hermes gateway start attempted")

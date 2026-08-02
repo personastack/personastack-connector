@@ -17,6 +17,7 @@ import (
 	"github.com/personastack/personastack-connector/internal/bridge"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
+	"github.com/personastack/personastack-connector/internal/hermessetup"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/openclawauth"
 	"github.com/personastack/personastack-connector/internal/runtime"
@@ -450,7 +451,30 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		return fmt.Errorf("unsupported protocol version: %s", accepted.ConnectAccepted.ProtocolVersion)
 	}
 	adapter := r.adapterForBinding(binding)
-	detection := r.bindingReadiness(adapter, binding)
+	var selectedRuntime struct {
+		sync.RWMutex
+		adapter    runtime.Adapter
+		homeDir    string
+		hermesHome string
+		configured bool
+	}
+	sessionRuntime := func() (runtime.Adapter, runtime.Detection) {
+		if accepted.ConnectAccepted.ProtocolVersion != externalagentprotocol.ProtocolVersionV4 {
+			return adapter, r.bindingReadiness(adapter, binding)
+		}
+		selectedRuntime.RLock()
+		targetAdapter := selectedRuntime.adapter
+		homeDir := selectedRuntime.homeDir
+		hermesHome := selectedRuntime.hermesHome
+		configured := selectedRuntime.configured
+		selectedRuntime.RUnlock()
+		if !configured || targetAdapter == nil {
+			waiting := runtime.NewErrorAdapter(binding.RuntimeKind, runtime.AdapterStateRuntimeStopped, "waiting for PersonaStack account and profile selection")
+			return waiting, waiting.Detect()
+		}
+		return targetAdapter, r.bindingReadinessAtHome(targetAdapter, binding, homeDir, hermesHome)
+	}
+	_, detection := sessionRuntime()
 	_ = r.recordHeartbeat(binding, r.now())
 	var wakeProbeMu sync.Mutex
 	var sessionWakeProbeAt *time.Time
@@ -528,8 +552,8 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	heartbeatStop := make(chan struct{})
 	defer close(heartbeatStop)
 	go func() {
-		readiness := r.bindingReadiness(adapter, binding)
-		_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
+		heartbeatAdapter, readiness := sessionRuntime()
+		_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, heartbeatAdapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		inventoryTicker := time.NewTicker(5 * time.Minute)
@@ -542,10 +566,10 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				return
 			case <-ticker.C:
 				_ = r.recordHeartbeat(binding, r.now())
-				readiness := r.bindingReadiness(adapter, binding)
+				heartbeatAdapter, readiness := sessionRuntime()
 				_ = writeFrame(session.HeartbeatFrameWithDetection(readiness, lastSessionWakeProbeAt()))
 				_ = writePing()
-				_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
+				_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, heartbeatAdapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
 			case <-inventoryTicker.C:
 				if accepted.ConnectAccepted.ProtocolVersion == externalagentprotocol.ProtocolVersionV4 {
 					_ = reportTargetInventory()
@@ -582,7 +606,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
-			readiness := r.bindingReadiness(adapter, binding)
+			wakeAdapter, readiness := sessionRuntime()
 			if !wakeProbeSucceeded(readiness.State) {
 				continue
 			}
@@ -594,18 +618,28 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := writeFrame(accepted); err != nil {
 				return fmt.Errorf("write wake probe ack: %w", err)
 			}
-			wakeReadiness := r.bindingReadiness(adapter, binding)
+			_, wakeReadiness := sessionRuntime()
 			if err := writeFrame(session.HeartbeatFrameWithDetection(wakeReadiness, lastSessionWakeProbeAt())); err != nil {
 				return fmt.Errorf("write wake probe heartbeat: %w", err)
 			}
-			_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, wakeReadiness, lastSessionWakeProbeAt, writeFrame)
+			_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, wakeAdapter, binding, wakeReadiness, lastSessionWakeProbeAt, writeFrame)
 		case externalagentprotocol.FrameTypeConfigRefresh:
 			if frame.ConfigRefresh == nil {
 				continue
 			}
-			if err := r.refreshMCPConfig(binding); err != nil {
+			targetAdapter, resolvedTarget, targetErr := r.targetAdapter(binding, frame.ConfigRefresh.RuntimeTarget)
+			if targetErr != nil {
+				return fmt.Errorf("resolve config refresh runtime target: %w", targetErr)
+			}
+			if err := r.refreshMCPConfig(binding, frame.ConfigRefresh.RuntimeTarget); err != nil {
 				return fmt.Errorf("refresh mcp config: %w", err)
 			}
+			selectedRuntime.Lock()
+			selectedRuntime.adapter = targetAdapter
+			selectedRuntime.homeDir = resolvedTarget.HomeDir
+			selectedRuntime.hermesHome = resolvedTarget.HermesHome
+			selectedRuntime.configured = true
+			selectedRuntime.Unlock()
 		case externalagentprotocol.FrameTypeRunTerminalAck:
 			if frame.RunTerminalAck == nil {
 				continue
@@ -656,9 +690,12 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				continue
 			}
 			runAdapter := adapter
+			runHomeDir := ""
+			runHermesHome := ""
 			if accepted.ConnectAccepted.ProtocolVersion == externalagentprotocol.ProtocolVersionV4 {
 				var targetErr error
-				runAdapter, targetErr = r.adapterForRuntimeTarget(binding, frame.RunStart.RuntimeTarget)
+				var resolvedTarget targetinventory.ResolvedTarget
+				runAdapter, resolvedTarget, targetErr = r.targetAdapter(binding, frame.RunStart.RuntimeTarget)
 				if targetErr != nil {
 					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, targetErr.Error())
 					commandCache.storeReply(frame, failed)
@@ -667,8 +704,13 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 					}
 					continue
 				}
+				runHomeDir = resolvedTarget.HomeDir
+				runHermesHome = resolvedTarget.HermesHome
 			}
 			readiness := r.bindingReadiness(runAdapter, binding)
+			if runHomeDir != "" {
+				readiness = r.bindingReadinessAtHome(runAdapter, binding, runHomeDir, runHermesHome)
+			}
 			if !canStartRunWithReadiness(readiness.State, lastSessionWakeProbeAt()) {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
 				commandCache.storeReply(frame, failed)
@@ -802,7 +844,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	}
 }
 
-func (r Runner) refreshMCPConfig(binding config.Binding) error {
+func (r Runner) refreshMCPConfig(binding config.Binding, targets ...*externalagentprotocol.RuntimeTarget) error {
 	latest, ok := r.Store.Binding(binding.ConnectionID)
 	if !ok {
 		return nil
@@ -810,11 +852,27 @@ func (r Runner) refreshMCPConfig(binding config.Binding) error {
 	if latest.ConnectionGeneration != binding.ConnectionGeneration {
 		return nil
 	}
+	var target *externalagentprotocol.RuntimeTarget
+	if len(targets) > 0 {
+		target = targets[0]
+	}
+	if target == nil {
+		return fmt.Errorf("runtime target required for MCP refresh")
+	}
+	resolved, err := targetinventory.Resolve(latest.RuntimeKind, target, latest.BridgePrivateKey)
+	if err != nil {
+		return err
+	}
 	transport := mcp.MCPProxyTransportAuto
 	if strings.TrimSpace(latest.LocalMCPProxyURL) != "" || strings.TrimSpace(latest.LocalMCPProxyToken) != "" {
 		transport = mcp.MCPProxyTransportLoopbackHTTP
 	}
-	_, err := (mcp.Installer{Store: r.Store, Transport: transport}).InstallBinding(latest)
+	_, err = (mcp.Installer{Store: r.Store, Transport: transport}).InstallBindingForTarget(
+		latest,
+		resolved.HomeDir,
+		resolved.HermesHome,
+		hermessetup.ProcessIdentity{Username: resolved.Username, HomeDir: resolved.HomeDir, UID: resolved.UID, GID: resolved.GID, GroupIDs: resolved.GroupIDs},
+	)
 	return err
 }
 
@@ -1232,19 +1290,23 @@ func (r Runner) nativeRunIDForCancel(binding config.Binding, runID string) (stri
 }
 
 func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding) runtime.Detection {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return runtime.Detection{Kind: binding.RuntimeKind, State: runtime.AdapterStateMCPConfigMissing, Note: "resolve home dir: " + err.Error()}
+	}
+	return r.bindingReadinessAtHome(adapter, binding, homeDir, binding.HermesHome)
+}
+
+func (r Runner) bindingReadinessAtHome(adapter runtime.Adapter, binding config.Binding, homeDir string, hermesHome string) runtime.Detection {
 	detection := adapter.Detect()
 	if detection.State != runtime.AdapterStateReady {
 		return detection
 	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		detection.State = runtime.AdapterStateMCPConfigMissing
-		detection.Note = "resolve home dir: " + err.Error()
-		return detection
-	}
+	verificationBinding := binding
+	verificationBinding.HermesHome = strings.TrimSpace(hermesHome)
 	verifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	verify := mcp.VerifyBindingWithLive(verifyCtx, homeDir, binding, nil)
+	verify := mcp.VerifyBindingWithLive(verifyCtx, homeDir, verificationBinding, nil)
 	detection.State = verify.State
 	detection.Note = verify.Note
 	detection.DiagnosticCode = verify.DiagnosticCode
@@ -1292,19 +1354,31 @@ func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
 // adapterForRuntimeTarget resolves the API-selected account/profile at dispatch
 // time. It deliberately keeps home and profile paths out of Binding storage.
 func (r Runner) adapterForRuntimeTarget(binding config.Binding, target *externalagentprotocol.RuntimeTarget) (runtime.Adapter, error) {
-	homeDir, hermesHome, err := targetinventory.Resolve(binding.RuntimeKind, target, binding.BridgePrivateKey)
+	adapter, _, err := r.targetAdapter(binding, target)
+	return adapter, err
+}
+
+func (r Runner) targetAdapter(binding config.Binding, target *externalagentprotocol.RuntimeTarget) (runtime.Adapter, targetinventory.ResolvedTarget, error) {
+	resolvedTarget, err := targetinventory.Resolve(binding.RuntimeKind, target, binding.BridgePrivateKey)
 	if err != nil {
-		return nil, err
+		return nil, targetinventory.ResolvedTarget{}, err
 	}
 	switch binding.RuntimeKind {
 	case runtime.AdapterKindHermes:
-		if strings.TrimSpace(hermesHome) == "" {
-			return nil, fmt.Errorf("selected Hermes profile is unavailable")
+		if strings.TrimSpace(resolvedTarget.HermesHome) == "" {
+			return nil, targetinventory.ResolvedTarget{}, fmt.Errorf("selected Hermes profile is unavailable")
 		}
-		return runtime.NewHermesAdapterForHome(getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), hermesHome), nil
+		adapter := runtime.NewHermesAdapterForHome(getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), resolvedTarget.HermesHome)
+		if adapter.Detect().State == runtime.AdapterStateRuntimeStopped {
+			paths := hermessetup.ResolvePaths(resolvedTarget.HomeDir, resolvedTarget.HermesHome)
+			if _, err := hermessetup.TryStartGatewayForPathsAs(paths, hermessetup.ProcessIdentity{Username: resolvedTarget.Username, HomeDir: resolvedTarget.HomeDir, UID: resolvedTarget.UID, GID: resolvedTarget.GID, GroupIDs: resolvedTarget.GroupIDs}); err != nil {
+				return nil, targetinventory.ResolvedTarget{}, err
+			}
+		}
+		return adapter, resolvedTarget, nil
 	case runtime.AdapterKindOpenClaw:
 		resolved, err := openclawauth.Resolve(openclawauth.Options{
-			HomeDir: homeDir,
+			HomeDir: resolvedTarget.HomeDir,
 			Env: func(name string) string {
 				switch name {
 				case "OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD", "OPENCLAW_GATEWAY_DEVICE_TOKEN", "OPENCLAW_CONFIG_PATH":
@@ -1315,14 +1389,14 @@ func (r Runner) adapterForRuntimeTarget(binding config.Binding, target *external
 			},
 		})
 		if err != nil {
-			return nil, fmt.Errorf("resolve selected OpenClaw credentials: %w", err)
+			return nil, targetinventory.ResolvedTarget{}, fmt.Errorf("resolve selected OpenClaw credentials: %w", err)
 		}
 		if !resolved.Found() {
-			return nil, fmt.Errorf("selected OpenClaw profile has no usable local credential")
+			return nil, targetinventory.ResolvedTarget{}, fmt.Errorf("selected OpenClaw profile has no usable local credential")
 		}
-		return runtime.NewOpenClawAdapterWithAuth(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, ""), nil
+		return runtime.NewOpenClawAdapterWithAuth(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, ""), resolvedTarget, nil
 	default:
-		return nil, fmt.Errorf("unsupported runtime target")
+		return nil, targetinventory.ResolvedTarget{}, fmt.Errorf("unsupported runtime target")
 	}
 }
 

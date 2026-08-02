@@ -118,9 +118,11 @@ external persona.
   alone; each websocket session must complete a live wake probe before it may
   report wakeable or accept a new `run.start`, unless the current runtime state
   is `ready` and already proves wakeability.
-- A `config.refresh` bridge frame should re-run the local MCP installer for the
-  active binding so native MCP config is rewritten and the local proxy is
-  restarted before revocation cleanup runs.
+- A `config.refresh` bridge frame must carry the API-selected opaque target.
+  The Connector resolves it again and rewrites MCP configuration only in that
+  account and Hermes profile. It retains the target only for the websocket
+  session. Missing or stale targets are errors, never a fallback to the
+  Connector account or root home.
 - A `token.revoked` bridge frame deletes the local binding, clears OS credential
   storage for bridge/MCP/active-run secrets, best-effort cancels the active
   native run when one is journaled, and stops reconnecting that binding.
@@ -291,12 +293,12 @@ Adapter result states must be concrete typed enums, including:
 - Configure Hermes MCP through the top-level `mcp_servers` map with the
   per-binding native MCP server name; config edits must be atomic and keep an
   owner-only backup of the prior config.
-- Hermes named profiles are supported by resolving the active Hermes home as:
-  explicit `--hermes-home`, stored binding `HermesHome`, `HERMES_HOME`, then
-  `$HOME/.hermes`. Connector writes `config.yaml` and `.env`, runs
-  `hermes gateway`, verifies `hermes tools list`, and generates persistent
-  services against that same Hermes home. Connector must not emulate profile
-  selection by rewriting `HOME` into a nested profile home.
+- Hermes named profiles are selected only by the API-provided opaque candidate.
+  The Connector resolves that candidate to its discovered profile home for one
+  operation. A root service starts `hermes gateway` with the selected account's
+  UID, GID, supplementary groups, `HOME`, and `HERMES_HOME`. An unprivileged
+  service may only target its effective account. It must not persist a chosen
+  profile or emulate selection by rewriting the Connector's own home.
 - Map Hermes native run events to Connector protocol run events.
 - Treat cancellation as best-effort until Hermes returns terminal state or the
   Connector cancellation timeout expires.
