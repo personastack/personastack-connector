@@ -138,7 +138,6 @@ external persona.
 
 - `personastack-connector pair <code> --runtime auto`
 - `personastack-connector pair <code> --runtime hermes`
-- `personastack-connector pair <code> --runtime hermes --hermes-home <path>`
 - `personastack-connector pair <code> --runtime openclaw`
 - `personastack-connector pair <code> --service-scope user`
 - `personastack-connector pair <code> --service-scope system`
@@ -146,7 +145,6 @@ external persona.
 - `personastack-connector status --repair`
 - `personastack-connector runtime detect`
 - `personastack-connector runtime repair`
-- `personastack-connector runtime hermes configure --hermes-home <path>`
 - `personastack-connector mcp install`
 - `personastack-connector mcp repair`
 - `personastack-connector mcp stdio --binding <connection_id>`
@@ -160,9 +158,10 @@ external persona.
 - `personastack-connector unpair`
 
 Default setup must require only package installation plus the pairing command.
-Pairing configures PersonaStack MCP access by default; any future MCP opt-out or
-repair flag is advanced-only and must not be required by the primary setup
-command. OpenClaw pairing must locate an approved operator credential locally
+Pairing reports inventory and waits for the API-selected account/profile before
+changing native MCP configuration. `status --repair`, `runtime repair`,
+`runtime * configure`, `mcp install`, and `mcp repair` must reject a paired
+binding rather than write a default or legacy profile. OpenClaw pairing must locate an approved operator credential locally
 before prompting the user. Discovery must prefer Connector credential storage,
 local-only flags such as `--openclaw-token`, `--openclaw-password`, or
 `--openclaw-device-token`, the matching `OPENCLAW_GATEWAY_*` environment
@@ -251,7 +250,7 @@ Adapter result states must be concrete typed enums, including:
   unavailable until a future Connector/Hermes/OpenClaw contract supplies
   API-verifiable active website-chat turn authority, bounded byte transfer,
   40 MiB local enforcement, retention, and ownership checks.
-- `mcp install` and `mcp repair` must preserve unrelated native runtime config,
+- Target-scoped MCP writes must preserve unrelated native runtime config,
   write an owner-only first backup, use atomic replacement, and refuse to
   overwrite an unrecognized same-name MCP server by reporting a conflict state.
 - Direct config diagnostics must redact bearer tokens from logs, status, and

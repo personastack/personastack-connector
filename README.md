@@ -29,9 +29,10 @@ into the selected runtime.
 Shared product state, pairing state, run admission, PromptStack rendering, and
 browser-visible runtime state remain owned by `personastack-api`.
 
-Pairing configures PersonaStack MCP access by default, but does not claim full
-wakeable success until the authenticated bridge, local runtime health, native
-MCP verification, and wake probe have all reported through PersonaStack.
+Pairing reports local account/profile inventory. PersonaStack selects the target
+before the Connector changes native MCP configuration. The Connector does not
+claim wakeable success until the authenticated bridge, selected runtime health,
+native MCP verification, and wake probe have all reported through PersonaStack.
 OpenClaw users must provide an approved operator
 credential during pairing with `--openclaw-token`, `--openclaw-password`, or
 `--openclaw-device-token`, or through the matching `OPENCLAW_GATEWAY_*`

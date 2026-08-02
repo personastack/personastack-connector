@@ -955,14 +955,9 @@ func TestRunRuntimeHermesConfigure(t *testing.T) {
 		}),
 	}
 
-	if err := cmd.runRuntime([]string{"hermes", "configure", "--enable-api", "--configure-mcp"}); err != nil {
+	err := cmd.runRuntime([]string{"hermes", "configure", "--enable-api", "--configure-mcp"})
+	if err == nil || !strings.Contains(err.Error(), websiteTargetRequiredMessage) {
 		t.Fatalf("runRuntime() error = %v", err)
-	}
-	output := stdout.String()
-	for _, want := range []string{"runtime hermes configure state=ready", "installed mcp binding=connection-1 runtime=hermes"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("runtime output missing %q: %s", want, output)
-		}
 	}
 }
 
@@ -993,14 +988,9 @@ func TestRunRuntimeOpenClawConfigure(t *testing.T) {
 		}),
 	}
 
-	if err := cmd.runRuntime([]string{"openclaw", "configure", "--gateway", "ws://127.0.0.1:1", "--configure-mcp"}); err != nil {
+	err := cmd.runRuntime([]string{"openclaw", "configure", "--gateway", "ws://127.0.0.1:1", "--configure-mcp"})
+	if err == nil || !strings.Contains(err.Error(), websiteTargetRequiredMessage) {
 		t.Fatalf("runRuntime() error = %v", err)
-	}
-	output := stdout.String()
-	for _, want := range []string{"runtime openclaw configure binding=connection-1", "installed mcp binding=connection-1 runtime=openclaw"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("runtime output missing %q: %s", want, output)
-		}
 	}
 }
 
@@ -1014,21 +1004,18 @@ func TestApplyOpenClawPairOptionsStoresOperatorCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyOpenClawPairOptions() error = %v", err)
 	}
-	if binding.OpenClawGatewayToken != "token-1" || binding.OpenClawAgentID != "agent-1" {
+	if binding.OpenClawGatewayToken != "token-1" || binding.OpenClawAgentID != "" {
 		t.Fatalf("binding OpenClaw options not stored: %+v", binding)
 	}
 }
 
-func TestApplyHermesPairOptionsStoresExplicitHome(t *testing.T) {
+func TestApplyHermesPairOptionsRejectsExplicitHome(t *testing.T) {
 	hermesHome := filepath.Join(t.TempDir(), ".hermes", "profiles", "homeschool")
 	binding := config.Binding{RuntimeKind: runtime.AdapterKindHermes}
 
 	err := applyHermesPairOptions(&binding, hermesHome)
-	if err != nil {
+	if err == nil || !strings.Contains(err.Error(), websiteTargetRequiredMessage) {
 		t.Fatalf("applyHermesPairOptions() error = %v", err)
-	}
-	if binding.HermesHome != hermesHome {
-		t.Fatalf("HermesHome = %q, want %q", binding.HermesHome, hermesHome)
 	}
 }
 
@@ -1036,8 +1023,23 @@ func TestApplyHermesPairOptionsRejectsRelativeHome(t *testing.T) {
 	binding := config.Binding{RuntimeKind: runtime.AdapterKindHermes}
 
 	err := applyHermesPairOptions(&binding, "profiles/homeschool")
-	if err == nil || !strings.Contains(err.Error(), "absolute path") {
-		t.Fatalf("applyHermesPairOptions() error = %v, want absolute path", err)
+	if err == nil || !strings.Contains(err.Error(), websiteTargetRequiredMessage) {
+		t.Fatalf("applyHermesPairOptions() error = %v, want website target selection", err)
+	}
+}
+
+func TestMCPCommandsRequireWebsiteTargetSelection(t *testing.T) {
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID: "connection-1",
+		PersonaID:    "persona-1",
+		RuntimeKind:  runtime.AdapterKindHermes,
+	}}})
+	cmd := command{store: store, stdout: io.Discard, stderr: io.Discard}
+	for _, args := range [][]string{{"install"}, {"repair"}} {
+		err := cmd.runMCP(context.Background(), args)
+		if err == nil || !strings.Contains(err.Error(), websiteTargetRequiredMessage) {
+			t.Fatalf("runMCP(%q) error = %v", args, err)
+		}
 	}
 }
 

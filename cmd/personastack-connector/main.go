@@ -55,16 +55,24 @@ type command struct {
 }
 
 var installService = func(scope service.ServiceScope) (service.InstallResult, error) {
-	return (service.Installer{ServiceScope: scope, HermesHome: os.Getenv("HERMES_HOME")}).Install()
+	return (service.Installer{ServiceScope: scope}).Install()
 }
 
 var newServiceInstaller = func(scope service.ServiceScope) service.Installer {
 	return service.Installer{
 		ServiceScope: scope,
-		HermesHome:   os.Getenv("HERMES_HOME"),
 		GOOS:         currentGOOS,
 		SystemRoot:   os.Getenv("PERSONASTACK_CONNECTOR_SYSTEM_ROOT"),
 	}
+}
+
+const websiteTargetRequiredMessage = "select the local account and profile in my.personastack.ai before this Connector command can change native runtime configuration"
+
+func requireWebsiteTargetSelection(bindings []config.Binding) error {
+	if len(bindings) == 0 {
+		return nil
+	}
+	return errors.New(websiteTargetRequiredMessage)
 }
 
 var currentGOOS = stdruntime.GOOS
@@ -446,7 +454,9 @@ func applyOpenClawPairOptions(binding *config.Binding, options openClawPairOptio
 	binding.OpenClawGatewayToken = firstNonEmpty(options.token, binding.OpenClawGatewayToken, os.Getenv("OPENCLAW_GATEWAY_TOKEN"))
 	binding.OpenClawPassword = firstNonEmpty(options.password, binding.OpenClawPassword, os.Getenv("OPENCLAW_GATEWAY_PASSWORD"))
 	binding.OpenClawDeviceToken = firstNonEmpty(options.deviceToken, binding.OpenClawDeviceToken, os.Getenv("OPENCLAW_GATEWAY_DEVICE_TOKEN"))
-	binding.OpenClawAgentID = firstNonEmpty(options.agentID, binding.OpenClawAgentID)
+	// OpenClaw agent/profile selection is API-owned. Pairing may retain a local
+	// credential, but it must not retain an agent choice for later dispatch.
+	binding.OpenClawAgentID = ""
 	if !openClawPairCredentialAvailable(options, *binding) {
 		return errors.New(openClawCredentialRequiredMessage())
 	}
@@ -457,15 +467,10 @@ func applyHermesPairOptions(binding *config.Binding, explicitHermesHome string) 
 	if binding == nil || binding.RuntimeKind != runtime.AdapterKindHermes {
 		return nil
 	}
-	selected := firstNonEmpty(explicitHermesHome, binding.HermesHome, os.Getenv("HERMES_HOME"))
-	cleaned, err := normalizeHermesHome(selected)
-	if err != nil {
-		return err
+	if strings.TrimSpace(explicitHermesHome) != "" {
+		return errors.New(websiteTargetRequiredMessage)
 	}
-	if cleaned == "" {
-		return nil
-	}
-	binding.HermesHome = cleaned
+	binding.HermesHome = ""
 	return nil
 }
 
@@ -590,6 +595,9 @@ func (cmd command) runStatus(ctx context.Context, args []string) error {
 		if err := validateServiceScopeForBindings(scope, bindings, true); err != nil {
 			return err
 		}
+		if err := requireWebsiteTargetSelection(bindings); err != nil {
+			return err
+		}
 		results, err := cmd.repairSetup(true, scope)
 		if err != nil {
 			return err
@@ -640,6 +648,9 @@ func (cmd command) runRuntime(args []string) error {
 		cmd.store = cmd.storeForServiceScope(scope)
 		bindings := cmd.store.ListBindings()
 		if err := validateServiceScopeForBindings(scope, bindings, true); err != nil {
+			return err
+		}
+		if err := requireWebsiteTargetSelection(bindings); err != nil {
 			return err
 		}
 		for _, binding := range bindings {
@@ -696,6 +707,9 @@ func (cmd command) runRuntimeHermes(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := requireWebsiteTargetSelection(filterBindingsByRuntime(cmd.store.ListBindings(), runtime.AdapterKindHermes)); err != nil {
+		return err
+	}
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -745,6 +759,9 @@ func (cmd command) runRuntimeOpenClaw(args []string) error {
 	}
 
 	bindings := filterBindingsByRuntime(cmd.store.ListBindings(), runtime.AdapterKindOpenClaw)
+	if err := requireWebsiteTargetSelection(bindings); err != nil {
+		return err
+	}
 	if len(bindings) == 0 {
 		fmt.Fprintf(cmd.stdout, "runtime openclaw configure gateway=%s no_bindings\n", strings.TrimSpace(gateway))
 		return nil
@@ -893,7 +910,11 @@ func (cmd command) runMCPInstall(args []string) error {
 		return err
 	}
 	cmd.store = cmd.storeForServiceScope(scope)
-	if err := validateServiceScopeForBindings(scope, cmd.store.ListBindings(), true); err != nil {
+	bindings := cmd.store.ListBindings()
+	if err := validateServiceScopeForBindings(scope, bindings, true); err != nil {
+		return err
+	}
+	if err := requireWebsiteTargetSelection(bindings); err != nil {
 		return err
 	}
 	results, err := cmd.installMCPForServiceScope(scope)
@@ -919,7 +940,11 @@ func (cmd command) runMCPRepair(args []string) error {
 		return err
 	}
 	cmd.store = cmd.storeForServiceScope(scope)
-	if err := validateServiceScopeForBindings(scope, cmd.store.ListBindings(), true); err != nil {
+	bindings := cmd.store.ListBindings()
+	if err := validateServiceScopeForBindings(scope, bindings, true); err != nil {
+		return err
+	}
+	if err := requireWebsiteTargetSelection(bindings); err != nil {
 		return err
 	}
 	results, err := cmd.installMCPForServiceScope(scope)
@@ -1029,9 +1054,6 @@ func (cmd command) runService(args []string) error {
 	}
 	cmd.store = cmd.storeForServiceScope(scope)
 	installer := newServiceInstaller(scope)
-	if hermesHome := firstHermesHome(cmd.store.ListBindings()); hermesHome != "" {
-		installer.HermesHome = hermesHome
-	}
 	if args[0] == "plan" {
 		result, err := installer.Plan()
 		if err != nil {
