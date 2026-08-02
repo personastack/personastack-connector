@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,23 @@ func TestApplyProcessIdentityRejectsInvalidSelectedIdentity(t *testing.T) {
 	err := ApplyProcessIdentity(exec.Command("true"), ProcessIdentity{Username: "invalid", UID: -1, GID: 1})
 	if err == nil || !strings.Contains(err.Error(), "invalid process identity") {
 		t.Fatalf("ApplyProcessIdentity() error = %v", err)
+	}
+}
+
+func TestApplyProcessIdentityPrivilegedLinuxSmoke(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+		t.Skip("requires a root Linux test process")
+	}
+	cmd := exec.Command("id", "-u")
+	if err := ApplyProcessIdentity(cmd, ProcessIdentity{Username: "nobody", HomeDir: "/nonexistent", UID: 65534, GID: 65534, GroupIDs: []int{65534}}); err != nil {
+		t.Fatalf("ApplyProcessIdentity() error = %v", err)
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run selected process: %v", err)
+	}
+	if got := strings.TrimSpace(string(output)); got != "65534" {
+		t.Fatalf("selected child uid = %q, want 65534", got)
 	}
 }
 

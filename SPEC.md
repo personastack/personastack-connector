@@ -458,3 +458,6 @@ Adapter result states must be concrete typed enums, including:
 - Fake Hermes and OpenClaw runtime tests must cover success, degraded fallback,
   cancel, reconnect, and MCP verification paths.
 - Connector CLI pairing tests must cover clear success and degraded setup states.
+- Root Linux support requires the privileged smoke test to start a selected
+  non-root child under its requested UID. Run that test in a root Linux
+  container or host before claiming system-scope launch support.
