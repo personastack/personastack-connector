@@ -381,8 +381,11 @@ func processEnv(paths Paths, identity ProcessIdentity) []string {
 // ApplyProcessIdentity limits a native child process to its selected account.
 // It is intentionally shared by target-scoped Hermes and OpenClaw launchers.
 func ApplyProcessIdentity(cmd *exec.Cmd, identity ProcessIdentity) error {
-	if cmd == nil || identity.UID <= 0 || identity.UID == os.Geteuid() {
+	if cmd == nil || strings.TrimSpace(identity.Username) == "" || identity.UID == os.Geteuid() {
 		return nil
+	}
+	if identity.UID < 0 || identity.GID < 0 {
+		return fmt.Errorf("selected runtime account %q has invalid process identity", strings.TrimSpace(identity.Username))
 	}
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("selected runtime account %q requires root Connector service", strings.TrimSpace(identity.Username))

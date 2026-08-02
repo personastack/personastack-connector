@@ -2,10 +2,28 @@ package hermessetup
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestApplyProcessIdentityRejectsRootTargetForUnprivilegedConnector(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged test process")
+	}
+	err := ApplyProcessIdentity(exec.Command("true"), ProcessIdentity{Username: "root", HomeDir: "/root", UID: 0, GID: 0})
+	if err == nil || !strings.Contains(err.Error(), "requires root Connector service") {
+		t.Fatalf("ApplyProcessIdentity() error = %v", err)
+	}
+}
+
+func TestApplyProcessIdentityRejectsInvalidSelectedIdentity(t *testing.T) {
+	err := ApplyProcessIdentity(exec.Command("true"), ProcessIdentity{Username: "invalid", UID: -1, GID: 1})
+	if err == nil || !strings.Contains(err.Error(), "invalid process identity") {
+		t.Fatalf("ApplyProcessIdentity() error = %v", err)
+	}
+}
 
 func TestEnsureAPISetupMergesEnvAndStoresKey(t *testing.T) {
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
