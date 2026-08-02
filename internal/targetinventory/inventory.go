@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/user"
@@ -30,12 +31,13 @@ type account struct {
 // ResolvedTarget is the local account and profile selected by PersonaStack.
 // It is resolved for a single operation and must never be saved in Binding.
 type ResolvedTarget struct {
-	Username   string
-	HomeDir    string
-	UID        int
-	GID        int
-	GroupIDs   []int
-	HermesHome string
+	Username        string
+	HomeDir         string
+	UID             int
+	GID             int
+	GroupIDs        []int
+	HermesHome      string
+	OpenClawAgentID string
 }
 
 var currentUser = user.Current
@@ -97,16 +99,18 @@ func Resolve(kind connectorruntime.AdapterKind, target *externalagentprotocol.Ru
 					continue
 				}
 				runtimeHome := profileHome(candidate, kind, profile.CandidateID, secret)
+				openClawAgentID := profileName(candidate, kind, profile.CandidateID, secret)
 				if err := validateResolvedTarget(candidate, kind, runtimeHome); err != nil {
 					return ResolvedTarget{}, err
 				}
 				return ResolvedTarget{
-					Username:   candidate.username,
-					HomeDir:    candidate.homeDir,
-					UID:        candidate.uid,
-					GID:        candidate.gid,
-					GroupIDs:   append([]int(nil), candidate.groupIDs...),
-					HermesHome: runtimeHome,
+					Username:        candidate.username,
+					HomeDir:         candidate.homeDir,
+					UID:             candidate.uid,
+					GID:             candidate.gid,
+					GroupIDs:        append([]int(nil), candidate.groupIDs...),
+					HermesHome:      runtimeHome,
+					OpenClawAgentID: openClawAgentID,
 				}, nil
 			}
 		}
@@ -270,10 +274,59 @@ func discoverProfiles(candidate account, kind connectorruntime.AdapterKind, inst
 			}
 			return nil, []error{fmt.Errorf("inspect OpenClaw home for %s: %w", candidate.username, err)}
 		}
-		return []externalagentprotocol.RuntimeProfileCandidate{{CandidateID: profileID(candidate, "default", installationSecret), Label: "Default", RuntimeKind: externalagentprotocol.RuntimeKindOpenClaw}}, nil
+		profiles, err := discoverOpenClawProfiles(candidate, installationSecret)
+		if err != nil {
+			return nil, []error{fmt.Errorf("parse OpenClaw profiles for %s: %w", candidate.username, err)}
+		}
+		return profiles, nil
 	default:
 		return nil, nil
 	}
+}
+
+func discoverOpenClawProfiles(candidate account, installationSecret string) ([]externalagentprotocol.RuntimeProfileCandidate, error) {
+	const defaultAgentID = "main"
+	path := filepath.Join(candidate.homeDir, ".openclaw", "openclaw.json")
+	raw, err := readFile(path)
+	if err != nil {
+		if os.IsNotExist(err) || os.IsPermission(err) {
+			return []externalagentprotocol.RuntimeProfileCandidate{{CandidateID: profileID(candidate, defaultAgentID, installationSecret), Label: "Default", RuntimeKind: externalagentprotocol.RuntimeKindOpenClaw}}, nil
+		}
+		return nil, err
+	}
+	var document struct {
+		Agents struct {
+			List []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"list"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	profiles := make([]externalagentprotocol.RuntimeProfileCandidate, 0, len(document.Agents.List))
+	seen := map[string]struct{}{}
+	for _, agent := range document.Agents.List {
+		id := strings.TrimSpace(agent.ID)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		label := strings.TrimSpace(agent.Name)
+		if label == "" {
+			label = id
+		}
+		profiles = append(profiles, externalagentprotocol.RuntimeProfileCandidate{CandidateID: profileID(candidate, id, installationSecret), Label: label, RuntimeKind: externalagentprotocol.RuntimeKindOpenClaw})
+	}
+	if len(profiles) == 0 {
+		return []externalagentprotocol.RuntimeProfileCandidate{{CandidateID: profileID(candidate, defaultAgentID, installationSecret), Label: "Default", RuntimeKind: externalagentprotocol.RuntimeKindOpenClaw}}, nil
+	}
+	sort.Slice(profiles, func(i int, j int) bool { return profiles[i].Label < profiles[j].Label })
+	return profiles, nil
 }
 
 func accountID(candidate account, installationSecret string) string {
@@ -297,6 +350,46 @@ func profileHome(candidate account, kind connectorruntime.AdapterKind, candidate
 		}
 	}
 	return ""
+}
+
+func profileName(candidate account, kind connectorruntime.AdapterKind, candidateID string, installationSecret string) string {
+	if kind != connectorruntime.AdapterKindOpenClaw {
+		return ""
+	}
+	for _, agent := range openClawAgentIDs(candidate) {
+		if candidateID == profileID(candidate, agent, installationSecret) {
+			return agent
+		}
+	}
+	return ""
+}
+
+func openClawAgentIDs(candidate account) []string {
+	path := filepath.Join(candidate.homeDir, ".openclaw", "openclaw.json")
+	raw, err := readFile(path)
+	if err != nil {
+		return []string{"main"}
+	}
+	var document struct {
+		Agents struct {
+			List []struct {
+				ID string `json:"id"`
+			} `json:"list"`
+		} `json:"agents"`
+	}
+	if json.Unmarshal(raw, &document) != nil || len(document.Agents.List) == 0 {
+		return []string{"main"}
+	}
+	ids := make([]string, 0, len(document.Agents.List))
+	for _, agent := range document.Agents.List {
+		if id := strings.TrimSpace(agent.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return []string{"main"}
+	}
+	return ids
 }
 
 func opaqueID(parts ...string) string {

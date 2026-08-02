@@ -139,3 +139,45 @@ func TestDiscoverNonRootIgnoresSudoUser(t *testing.T) {
 		t.Fatalf("SUDO_USER changed non-root discovery: %+v", inventory.Accounts)
 	}
 }
+
+func TestDiscoverAndResolveOpenClawAgentProfiles(t *testing.T) {
+	homeDir := t.TempDir()
+	openClawDir := filepath.Join(homeDir, ".openclaw")
+	if err := os.MkdirAll(openClawDir, 0o700); err != nil {
+		t.Fatalf("create OpenClaw home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(openClawDir, "openclaw.json"), []byte(`{"agents":{"list":[{"id":"main","name":"Personal"},{"id":"work"}]}}`), 0o600); err != nil {
+		t.Fatalf("write OpenClaw config: %v", err)
+	}
+	oldCurrentUser := currentUser
+	oldEffectiveUID := effectiveUID
+	currentUser = func() (*user.User, error) {
+		return &user.User{Username: "alice", HomeDir: homeDir, Uid: "501", Gid: "20"}, nil
+	}
+	effectiveUID = func() int { return 501 }
+	t.Cleanup(func() {
+		currentUser = oldCurrentUser
+		effectiveUID = oldEffectiveUID
+	})
+
+	inventory, warnings := Discover(runtime.AdapterKindOpenClaw, "installation-secret")
+	if len(warnings) != 0 || len(inventory.Accounts) != 1 {
+		t.Fatalf("inventory = %+v warnings=%v", inventory, warnings)
+	}
+	profiles := inventory.Accounts[0].Profiles
+	if len(profiles) != 2 || profiles[0].Label != "Personal" || profiles[1].Label != "work" {
+		t.Fatalf("OpenClaw profiles = %+v", profiles)
+	}
+	resolved, err := Resolve(runtime.AdapterKindOpenClaw, &externalagentprotocol.RuntimeTarget{
+		RuntimeKind:        externalagentprotocol.RuntimeKindOpenClaw,
+		AccountCandidateID: inventory.Accounts[0].CandidateID,
+		ProfileCandidateID: profiles[1].CandidateID,
+		SelectionRevision:  1,
+	}, "installation-secret")
+	if err != nil {
+		t.Fatalf("resolve OpenClaw agent: %v", err)
+	}
+	if resolved.HomeDir != homeDir || resolved.OpenClawAgentID != "work" {
+		t.Fatalf("resolved target = %+v", resolved)
+	}
+}

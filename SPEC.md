@@ -318,6 +318,12 @@ Adapter result states must be concrete typed enums, including:
 
 ## OpenClaw Runtime
 
+- The target inventory discovers OpenClaw agent identities from the selected
+  account's `.openclaw/openclaw.json` `agents.list`. Each agent is reported as
+  a safe profile label and an installation-secret-derived opaque candidate id.
+  The Connector resolves the selected opaque candidate to an agent id only for
+  the active target adapter and MCP verification. It never saves that agent id
+  in binding state or reports it to PersonaStack.
 - Probe OpenClaw Gateway on `ws://127.0.0.1:18789`.
 - Authenticate as an operator client.
 - Use Gateway `agent`, `agent.wait`, and `sessions.abort` for full support.

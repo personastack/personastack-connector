@@ -455,11 +455,12 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	adapter := r.adapterForBinding(binding)
 	var selectedRuntime struct {
 		sync.RWMutex
-		adapter    runtime.Adapter
-		homeDir    string
-		hermesHome string
-		runtimeURL string
-		configured bool
+		adapter         runtime.Adapter
+		homeDir         string
+		hermesHome      string
+		openClawAgentID string
+		runtimeURL      string
+		configured      bool
 	}
 	sessionRuntime := func() (runtime.Adapter, runtime.Detection) {
 		if accepted.ConnectAccepted.ProtocolVersion != externalagentprotocol.ProtocolVersionV4 {
@@ -469,6 +470,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		targetAdapter := selectedRuntime.adapter
 		homeDir := selectedRuntime.homeDir
 		hermesHome := selectedRuntime.hermesHome
+		openClawAgentID := selectedRuntime.openClawAgentID
 		runtimeURL := selectedRuntime.runtimeURL
 		configured := selectedRuntime.configured
 		selectedRuntime.RUnlock()
@@ -476,7 +478,9 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			waiting := runtime.NewErrorAdapter(binding.RuntimeKind, runtime.AdapterStateRuntimeStopped, "waiting for PersonaStack account and profile selection")
 			return waiting, waiting.Detect()
 		}
-		return targetAdapter, r.bindingReadinessAtHome(targetAdapter, binding, homeDir, hermesHome, runtimeURL)
+		verificationBinding := binding
+		verificationBinding.OpenClawAgentID = openClawAgentID
+		return targetAdapter, r.bindingReadinessAtHome(targetAdapter, verificationBinding, homeDir, hermesHome, runtimeURL)
 	}
 	_, detection := sessionRuntime()
 	_ = r.recordHeartbeat(binding, r.now())
@@ -642,6 +646,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			selectedRuntime.adapter = targetAdapter
 			selectedRuntime.homeDir = resolvedTarget.HomeDir
 			selectedRuntime.hermesHome = resolvedTarget.HermesHome
+			selectedRuntime.openClawAgentID = resolvedTarget.OpenClawAgentID
 			selectedRuntime.runtimeURL, targetErr = r.targetRuntimeURL(binding, frame.ConfigRefresh.RuntimeTarget)
 			if targetErr != nil {
 				selectedRuntime.Unlock()
@@ -716,6 +721,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				runHomeDir = resolvedTarget.HomeDir
 				runHermesHome = resolvedTarget.HermesHome
+				binding.OpenClawAgentID = resolvedTarget.OpenClawAgentID
 				runRuntimeURL, targetErr = r.targetRuntimeURL(binding, frame.RunStart.RuntimeTarget)
 				if targetErr != nil {
 					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, targetErr.Error())
@@ -886,6 +892,9 @@ func (r Runner) refreshMCPConfig(binding config.Binding, targets ...*externalage
 	if strings.TrimSpace(latest.LocalMCPProxyURL) != "" || strings.TrimSpace(latest.LocalMCPProxyToken) != "" {
 		transport = mcp.MCPProxyTransportLoopbackHTTP
 	}
+	// The selected OpenClaw agent is operation-scoped. Installer calls do not
+	// save Binding, and config.Store scrubs this legacy field on every write.
+	latest.OpenClawAgentID = resolved.OpenClawAgentID
 	_, err = (mcp.Installer{Store: r.Store, Transport: transport}).InstallBindingForTarget(
 		latest,
 		resolved.HomeDir,
@@ -1425,7 +1434,7 @@ func (r Runner) targetAdapter(binding config.Binding, target *externalagentproto
 		if err != nil {
 			return nil, targetinventory.ResolvedTarget{}, err
 		}
-		adapter := runtime.NewOpenClawAdapterWithAuth(runtimeURL, resolved.Auth, "")
+		adapter := runtime.NewOpenClawAdapterWithAuth(runtimeURL, resolved.Auth, resolvedTarget.OpenClawAgentID)
 		if adapter.Detect().State == runtime.AdapterStateRuntimeMissing && openclawauth.GatewayIsLoopback(runtimeURL) {
 			port, portErr := targetruntime.Port(target, binding.BridgePrivateKey)
 			if portErr != nil {
