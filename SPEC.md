@@ -123,6 +123,13 @@ external persona.
   account and Hermes profile. It retains the target only for the websocket
   session. Missing or stale targets are errors, never a fallback to the
   Connector account or root home.
+- A root system Connector must launch Hermes and OpenClaw as the selected
+  account with its primary and supplementary groups, `HOME`, and runtime home.
+  It must use a target-scoped loopback endpoint derived from the opaque target
+  so a default-account listener cannot be treated as the selected profile.
+  The endpoint assignment is session-only and is never persisted with a
+  binding. A port conflict or failed selected-account launch leaves the target
+  not ready. It never falls back to another account or profile.
 - A `token.revoked` bridge frame deletes the local binding, clears OS credential
   storage for bridge/MCP/active-run secrets, best-effort cancels the active
   native run when one is journaled, and stops reconnecting that binding.

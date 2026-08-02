@@ -20,8 +20,10 @@ import (
 	"github.com/personastack/personastack-connector/internal/hermessetup"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/openclawauth"
+	"github.com/personastack/personastack-connector/internal/openclawsetup"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/targetinventory"
+	"github.com/personastack/personastack-connector/internal/targetruntime"
 )
 
 type Runner struct {
@@ -456,6 +458,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		adapter    runtime.Adapter
 		homeDir    string
 		hermesHome string
+		runtimeURL string
 		configured bool
 	}
 	sessionRuntime := func() (runtime.Adapter, runtime.Detection) {
@@ -466,13 +469,14 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		targetAdapter := selectedRuntime.adapter
 		homeDir := selectedRuntime.homeDir
 		hermesHome := selectedRuntime.hermesHome
+		runtimeURL := selectedRuntime.runtimeURL
 		configured := selectedRuntime.configured
 		selectedRuntime.RUnlock()
 		if !configured || targetAdapter == nil {
 			waiting := runtime.NewErrorAdapter(binding.RuntimeKind, runtime.AdapterStateRuntimeStopped, "waiting for PersonaStack account and profile selection")
 			return waiting, waiting.Detect()
 		}
-		return targetAdapter, r.bindingReadinessAtHome(targetAdapter, binding, homeDir, hermesHome)
+		return targetAdapter, r.bindingReadinessAtHome(targetAdapter, binding, homeDir, hermesHome, runtimeURL)
 	}
 	_, detection := sessionRuntime()
 	_ = r.recordHeartbeat(binding, r.now())
@@ -638,6 +642,11 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			selectedRuntime.adapter = targetAdapter
 			selectedRuntime.homeDir = resolvedTarget.HomeDir
 			selectedRuntime.hermesHome = resolvedTarget.HermesHome
+			selectedRuntime.runtimeURL, targetErr = r.targetRuntimeURL(binding, frame.ConfigRefresh.RuntimeTarget)
+			if targetErr != nil {
+				selectedRuntime.Unlock()
+				return fmt.Errorf("resolve config refresh runtime endpoint: %w", targetErr)
+			}
 			selectedRuntime.configured = true
 			selectedRuntime.Unlock()
 		case externalagentprotocol.FrameTypeRunTerminalAck:
@@ -692,6 +701,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			runAdapter := adapter
 			runHomeDir := ""
 			runHermesHome := ""
+			runRuntimeURL := ""
 			if accepted.ConnectAccepted.ProtocolVersion == externalagentprotocol.ProtocolVersionV4 {
 				var targetErr error
 				var resolvedTarget targetinventory.ResolvedTarget
@@ -706,10 +716,19 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				runHomeDir = resolvedTarget.HomeDir
 				runHermesHome = resolvedTarget.HermesHome
+				runRuntimeURL, targetErr = r.targetRuntimeURL(binding, frame.RunStart.RuntimeTarget)
+				if targetErr != nil {
+					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, targetErr.Error())
+					commandCache.storeReply(frame, failed)
+					if writeErr := writeFrame(failed); writeErr != nil {
+						return fmt.Errorf("write runtime endpoint failure: %w", writeErr)
+					}
+					continue
+				}
 			}
 			readiness := r.bindingReadiness(runAdapter, binding)
 			if runHomeDir != "" {
-				readiness = r.bindingReadinessAtHome(runAdapter, binding, runHomeDir, runHermesHome)
+				readiness = r.bindingReadinessAtHome(runAdapter, binding, runHomeDir, runHermesHome, runRuntimeURL)
 			}
 			if !canStartRunWithReadiness(readiness.State, lastSessionWakeProbeAt()) {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
@@ -1297,7 +1316,7 @@ func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding
 	return r.bindingReadinessAtHome(adapter, binding, homeDir, binding.HermesHome)
 }
 
-func (r Runner) bindingReadinessAtHome(adapter runtime.Adapter, binding config.Binding, homeDir string, hermesHome string) runtime.Detection {
+func (r Runner) bindingReadinessAtHome(adapter runtime.Adapter, binding config.Binding, homeDir string, hermesHome string, runtimeURLs ...string) runtime.Detection {
 	detection := adapter.Detect()
 	if detection.State != runtime.AdapterStateReady {
 		return detection
@@ -1306,7 +1325,11 @@ func (r Runner) bindingReadinessAtHome(adapter runtime.Adapter, binding config.B
 	verificationBinding.HermesHome = strings.TrimSpace(hermesHome)
 	verifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	verify := mcp.VerifyBindingWithLive(verifyCtx, homeDir, verificationBinding, nil)
+	runtimeURL := ""
+	if len(runtimeURLs) > 0 {
+		runtimeURL = runtimeURLs[0]
+	}
+	verify := mcp.VerifyBindingWithLiveAt(verifyCtx, homeDir, verificationBinding, nil, runtimeURL)
 	detection.State = verify.State
 	detection.Note = verify.Note
 	detection.DiagnosticCode = verify.DiagnosticCode
@@ -1368,10 +1391,14 @@ func (r Runner) targetAdapter(binding config.Binding, target *externalagentproto
 		if strings.TrimSpace(resolvedTarget.HermesHome) == "" {
 			return nil, targetinventory.ResolvedTarget{}, fmt.Errorf("selected Hermes profile is unavailable")
 		}
-		adapter := runtime.NewHermesAdapterForHome(getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), resolvedTarget.HermesHome)
+		runtimeURL, err := r.targetRuntimeURL(binding, target)
+		if err != nil {
+			return nil, targetinventory.ResolvedTarget{}, err
+		}
+		adapter := runtime.NewHermesAdapterForHome(runtimeURL, resolvedTarget.HermesHome)
 		if adapter.Detect().State == runtime.AdapterStateRuntimeStopped {
 			paths := hermessetup.ResolvePaths(resolvedTarget.HomeDir, resolvedTarget.HermesHome)
-			if _, err := hermessetup.TryStartGatewayForPathsAs(paths, hermessetup.ProcessIdentity{Username: resolvedTarget.Username, HomeDir: resolvedTarget.HomeDir, UID: resolvedTarget.UID, GID: resolvedTarget.GID, GroupIDs: resolvedTarget.GroupIDs}); err != nil {
+			if _, err := hermessetup.TryStartGatewayForPathsAt(paths, hermessetup.ProcessIdentity{Username: resolvedTarget.Username, HomeDir: resolvedTarget.HomeDir, UID: resolvedTarget.UID, GID: resolvedTarget.GID, GroupIDs: resolvedTarget.GroupIDs}, runtimeURL); err != nil {
 				return nil, targetinventory.ResolvedTarget{}, err
 			}
 		}
@@ -1394,10 +1421,39 @@ func (r Runner) targetAdapter(binding config.Binding, target *externalagentproto
 		if !resolved.Found() {
 			return nil, targetinventory.ResolvedTarget{}, fmt.Errorf("selected OpenClaw profile has no usable local credential")
 		}
-		return runtime.NewOpenClawAdapterWithAuth(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, ""), resolvedTarget, nil
+		runtimeURL, err := r.targetRuntimeURL(binding, target)
+		if err != nil {
+			return nil, targetinventory.ResolvedTarget{}, err
+		}
+		adapter := runtime.NewOpenClawAdapterWithAuth(runtimeURL, resolved.Auth, "")
+		if adapter.Detect().State == runtime.AdapterStateRuntimeMissing && openclawauth.GatewayIsLoopback(runtimeURL) {
+			port, portErr := targetruntime.Port(target, binding.BridgePrivateKey)
+			if portErr != nil {
+				return nil, targetinventory.ResolvedTarget{}, portErr
+			}
+			identity := hermessetup.ProcessIdentity{Username: resolvedTarget.Username, HomeDir: resolvedTarget.HomeDir, UID: resolvedTarget.UID, GID: resolvedTarget.GID, GroupIDs: resolvedTarget.GroupIDs}
+			if _, startErr := openclawsetup.TryStartGatewayForHomeAt(resolvedTarget.HomeDir, identity, port, func() bool { return openclawauth.GatewayReachable(runtimeURL) }); startErr != nil {
+				return nil, targetinventory.ResolvedTarget{}, startErr
+			}
+		}
+		return adapter, resolvedTarget, nil
 	default:
 		return nil, targetinventory.ResolvedTarget{}, fmt.Errorf("unsupported runtime target")
 	}
+}
+
+func (r Runner) targetRuntimeURL(binding config.Binding, target *externalagentprotocol.RuntimeTarget) (string, error) {
+	if r.ServiceScope != externalagentprotocol.ServiceScopeSystemLaunchDaemon && r.ServiceScope != externalagentprotocol.ServiceScopeLinuxSystemService {
+		switch binding.RuntimeKind {
+		case runtime.AdapterKindHermes:
+			return getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), nil
+		case runtime.AdapterKindOpenClaw:
+			return getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), nil
+		default:
+			return "", fmt.Errorf("unsupported runtime target")
+		}
+	}
+	return targetruntime.LoopbackURL(target, binding.BridgePrivateKey)
 }
 
 func (r Runner) writeCapabilitiesFrame(

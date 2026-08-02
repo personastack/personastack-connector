@@ -3726,3 +3726,21 @@ func TestCommandFrameCacheReplaysRepliesAndSuppressesSideEffects(t *testing.T) {
 		t.Fatalf("cancel should be seen after mark")
 	}
 }
+
+func TestTargetRuntimeURLUsesProfileScopedEndpointForSystemService(t *testing.T) {
+	t.Setenv("PERSONASTACK_CONNECTOR_HERMES_URL", "http://127.0.0.1:8642")
+	target := &externalagentprotocol.RuntimeTarget{
+		RuntimeKind:        externalagentprotocol.RuntimeKindHermes,
+		AccountCandidateID: "account-a",
+		ProfileCandidateID: "profile-a",
+	}
+	binding := config.Binding{RuntimeKind: runtime.AdapterKindHermes, BridgePrivateKey: "installation-secret"}
+	runner := Runner{ServiceScope: externalagentprotocol.ServiceScopeLinuxSystemService}
+	endpoint, err := runner.targetRuntimeURL(binding, target)
+	if err != nil {
+		t.Fatalf("targetRuntimeURL() error = %v", err)
+	}
+	if endpoint == "http://127.0.0.1:8642" || !strings.HasPrefix(endpoint, "http://127.0.0.1:") {
+		t.Fatalf("system target endpoint = %q", endpoint)
+	}
+}

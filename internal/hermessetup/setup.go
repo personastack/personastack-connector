@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,7 +39,7 @@ var (
 		cmd.Dir = strings.TrimSpace(paths.HermesHome)
 		cmd.Stdout = ioDiscard{}
 		cmd.Stderr = ioDiscard{}
-		if err := applyProcessIdentity(cmd, identity); err != nil {
+		if err := ApplyProcessIdentity(cmd, identity); err != nil {
 			return err
 		}
 		return cmd.Start()
@@ -265,27 +267,78 @@ func TryStartGatewayForPaths(paths Paths) (bool, error) {
 // Connector can only start its own account and receives an explicit error for
 // another target instead of falling back to its own profile.
 func TryStartGatewayForPathsAs(paths Paths, identity ProcessIdentity) (bool, error) {
+	return tryStartGatewayForPathsAt(paths, identity, defaultHermesBase)
+}
+
+// TryStartGatewayForPathsAt starts Hermes on a target-specific loopback URL.
+// It lets one root-scoped Connector keep separately selected profiles from
+// sharing the default API listener.
+func TryStartGatewayForPathsAt(paths Paths, identity ProcessIdentity, baseURL string) (bool, error) {
+	return tryStartGatewayForPathsAt(paths, identity, baseURL)
+}
+
+func tryStartGatewayForPathsAt(paths Paths, identity ProcessIdentity, baseURL string) (bool, error) {
+	port, err := loopbackPort(baseURL)
+	if err != nil {
+		return false, err
+	}
 	if os.Getenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START") == "1" {
 		return false, nil
 	}
-	if err := probeHermesHealth(defaultHermesBase); err == nil {
+	if err := probeHermesHealth(baseURL); err == nil {
 		return false, nil
 	}
 	binary, err := hermesBinaryForPaths(paths)
 	if err != nil {
 		return false, nil
 	}
-	if err := startGateway(paths, identity, binary); err != nil {
+	if port == defaultHermesPort {
+		if err := startGateway(paths, identity, binary); err != nil {
+			return false, fmt.Errorf("start Hermes gateway: %w", err)
+		}
+	} else if err := startGatewayWithArgs(paths, identity, binary, []string{"gateway", "--port", port}); err != nil {
 		return false, fmt.Errorf("start Hermes gateway: %w", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := probeHermesHealth(defaultHermesBase); err == nil {
+		if err := probeHermesHealth(baseURL); err == nil {
 			return true, nil
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
 	return true, nil
+}
+
+func startGatewayWithArgs(paths Paths, identity ProcessIdentity, binary string, args []string) error {
+	cmd := exec.Command(binary, args...)
+	cmd.Env = processEnv(paths, identity)
+	cmd.Dir = strings.TrimSpace(paths.HermesHome)
+	cmd.Stdout = ioDiscard{}
+	cmd.Stderr = ioDiscard{}
+	if err := ApplyProcessIdentity(cmd, identity); err != nil {
+		return err
+	}
+	return cmd.Start()
+}
+
+func loopbackPort(baseURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return "", fmt.Errorf("parse Hermes gateway URL: %w", err)
+	}
+	host := parsed.Hostname()
+	if host != "127.0.0.1" && host != "::1" && !strings.EqualFold(host, "localhost") {
+		return "", fmt.Errorf("Hermes gateway URL must use loopback")
+	}
+	port := parsed.Port()
+	if port == "" {
+		return "", fmt.Errorf("Hermes gateway URL port required")
+	}
+	parsedPort, err := strconv.Atoi(port)
+	if err != nil || parsedPort < 1024 || parsedPort > 65535 {
+		return "", fmt.Errorf("Hermes gateway URL port invalid")
+	}
+	return port, nil
 }
 
 func hermesBinaryForPaths(paths Paths) (string, error) {
@@ -325,7 +378,9 @@ func processEnv(paths Paths, identity ProcessIdentity) []string {
 	return env
 }
 
-func applyProcessIdentity(cmd *exec.Cmd, identity ProcessIdentity) error {
+// ApplyProcessIdentity limits a native child process to its selected account.
+// It is intentionally shared by target-scoped Hermes and OpenClaw launchers.
+func ApplyProcessIdentity(cmd *exec.Cmd, identity ProcessIdentity) error {
 	if cmd == nil || identity.UID <= 0 || identity.UID == os.Geteuid() {
 		return nil
 	}

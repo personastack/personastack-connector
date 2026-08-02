@@ -43,12 +43,14 @@ type VerifyResult struct {
 }
 
 type Installer struct {
-	Store          config.Store
-	HomeDir        string
-	ExecutablePath string
-	GOOS           string
-	Transport      MCPProxyTransport
-	HermesIdentity hermessetup.ProcessIdentity
+	Store            config.Store
+	HomeDir          string
+	ExecutablePath   string
+	GOOS             string
+	Transport        MCPProxyTransport
+	HermesIdentity   hermessetup.ProcessIdentity
+	OpenClawIdentity hermessetup.ProcessIdentity
+	TargetScoped     bool
 }
 
 type MCPProxyTransport int
@@ -110,11 +112,20 @@ func (installer Installer) InstallBindingForTarget(binding config.Binding, homeD
 	binding.HermesHome = strings.TrimSpace(hermesHome)
 	installer.HomeDir = homeDir
 	installer.HermesIdentity = identity
+	installer.OpenClawIdentity = identity
+	installer.TargetScoped = true
 	executablePath, err := installer.executablePath(homeDir)
 	if err != nil {
 		return InstallResult{}, err
 	}
-	return installer.installBinding(homeDir, executablePath, binding)
+	result, err := installer.installBinding(homeDir, executablePath, binding)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	if err := ensureSelectedOwner(result.Path, identity); err != nil {
+		return InstallResult{}, err
+	}
+	return result, nil
 }
 
 func (installer Installer) installBinding(homeDir string, executablePath string, binding config.Binding) (InstallResult, error) {
@@ -136,10 +147,12 @@ func (installer Installer) installBinding(homeDir string, executablePath string,
 		path := hermesPaths.ConfigPath
 		if err := upsertHermesServer(path, server); err == nil {
 			result := InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name, Note: setupReport.Note}
-			if started, err := hermessetup.TryStartGatewayForPathsAs(hermesPaths, installer.HermesIdentity); err != nil {
-				return InstallResult{}, err
-			} else if started {
-				result.Note = appendNote(result.Note, "Hermes gateway start attempted")
+			if !installer.TargetScoped {
+				if started, err := hermessetup.TryStartGatewayForPathsAs(hermesPaths, installer.HermesIdentity); err != nil {
+					return InstallResult{}, err
+				} else if started {
+					result.Note = appendNote(result.Note, "Hermes gateway start attempted")
+				}
 			}
 			diagnostic := hermessetup.DiagnoseForPaths(hermesPaths)
 			if strings.TrimSpace(diagnostic.Note) != "" {
@@ -152,7 +165,7 @@ func (installer Installer) installBinding(homeDir string, executablePath string,
 		return installer.installBindingLoopbackHTTP(homeDir, binding, server)
 	case runtime.AdapterKindOpenClaw:
 		if transport == MCPProxyTransportStdio {
-			if result, err := installOpenClawServerWithCLI(homeDir, binding, server); err == nil {
+			if result, err := installer.installOpenClawServerWithCLI(homeDir, binding, server); err == nil {
 				return result, nil
 			} else if !errors.Is(err, errOpenClawCLIMissing) {
 				return InstallResult{}, err
@@ -163,7 +176,7 @@ func (installer Installer) installBinding(homeDir string, executablePath string,
 			}
 			return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: path, ServerName: server.Name}, nil
 		}
-		if result, err := installOpenClawServerWithCLI(homeDir, binding, server); err == nil {
+		if result, err := installer.installOpenClawServerWithCLI(homeDir, binding, server); err == nil {
 			return result, nil
 		}
 		path := openClawConfigPath(homeDir)
@@ -203,10 +216,12 @@ func (installer Installer) installBindingNativeHTTP(homeDir string, binding conf
 			ServerName:   server.Name,
 			Note:         setupReport.Note,
 		}
-		if started, err := hermessetup.TryStartGatewayForPathsAs(hermesPaths, installer.HermesIdentity); err != nil {
-			return InstallResult{}, err
-		} else if started {
-			result.Note = appendNote(result.Note, "Hermes gateway start attempted")
+		if !installer.TargetScoped {
+			if started, err := hermessetup.TryStartGatewayForPathsAs(hermesPaths, installer.HermesIdentity); err != nil {
+				return InstallResult{}, err
+			} else if started {
+				result.Note = appendNote(result.Note, "Hermes gateway start attempted")
+			}
 		}
 		diagnostic := hermessetup.DiagnoseForPaths(hermesPaths)
 		if strings.TrimSpace(diagnostic.Note) != "" {
@@ -224,7 +239,7 @@ func (installer Installer) installBindingNativeHTTP(homeDir string, binding conf
 	}
 }
 
-func installOpenClawServerWithCLI(homeDir string, binding config.Binding, server stdioServerConfig) (InstallResult, error) {
+func (installer Installer) installOpenClawServerWithCLI(homeDir string, binding config.Binding, server stdioServerConfig) (InstallResult, error) {
 	cliPath, err := exec.LookPath("openclaw")
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("%w: %v", errOpenClawCLIMissing, err)
@@ -241,11 +256,46 @@ func installOpenClawServerWithCLI(homeDir string, binding config.Binding, server
 		return InstallResult{}, err
 	}
 	cmd := exec.Command(cliPath, "mcp", "set", server.Name, string(raw))
-	cmd.Env = append(os.Environ(), "OPENCLAW_CONFIG_PATH="+configPath)
+	cmd.Env = openClawCommandEnv(homeDir, configPath, installer.OpenClawIdentity)
+	if err := hermessetup.ApplyProcessIdentity(cmd, installer.OpenClawIdentity); err != nil {
+		return InstallResult{}, err
+	}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return InstallResult{}, fmt.Errorf("openclaw mcp set: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return InstallResult{ConnectionID: binding.ConnectionID, Runtime: binding.RuntimeKind, Path: configPath, ServerName: server.Name}, nil
+}
+
+func openClawCommandEnv(homeDir string, configPath string, identity hermessetup.ProcessIdentity) []string {
+	homeDir = strings.TrimSpace(homeDir)
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, item := range os.Environ() {
+		if strings.HasPrefix(item, "HOME=") || strings.HasPrefix(item, "USER=") || strings.HasPrefix(item, "LOGNAME=") || strings.HasPrefix(item, "OPENCLAW_CONFIG_PATH=") {
+			continue
+		}
+		env = append(env, item)
+	}
+	env = append(env, "HOME="+homeDir, "OPENCLAW_CONFIG_PATH="+strings.TrimSpace(configPath))
+	if username := strings.TrimSpace(identity.Username); username != "" {
+		env = append(env, "USER="+username, "LOGNAME="+username)
+	}
+	return env
+}
+
+func ensureSelectedOwner(path string, identity hermessetup.ProcessIdentity) error {
+	if identity.UID <= 0 || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if os.Geteuid() != 0 {
+		if identity.UID != os.Geteuid() {
+			return fmt.Errorf("selected runtime account %q requires root Connector service", strings.TrimSpace(identity.Username))
+		}
+		return nil
+	}
+	if err := os.Chown(path, identity.UID, identity.GID); err != nil {
+		return fmt.Errorf("set selected runtime config ownership: %w", err)
+	}
+	return nil
 }
 
 func (installer Installer) preservedNativeServerNames() map[string]bool {
@@ -349,6 +399,12 @@ func VerifyBinding(homeDir string, binding config.Binding) VerifyResult {
 }
 
 func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.Binding, client *http.Client) VerifyResult {
+	return VerifyBindingWithLiveAt(ctx, homeDir, binding, client, "")
+}
+
+// VerifyBindingWithLiveAt verifies a target-specific native endpoint without
+// borrowing a system Connector's default-account gateway URL.
+func VerifyBindingWithLiveAt(ctx context.Context, homeDir string, binding config.Binding, client *http.Client, runtimeURL string) VerifyResult {
 	result := VerifyBinding(homeDir, binding)
 	if result.State != runtime.AdapterStateMCPRestartRequired {
 		return result
@@ -357,8 +413,12 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 		return result
 	}
 	if binding.RuntimeKind == runtime.AdapterKindOpenClaw {
+		gatewayURL := strings.TrimSpace(runtimeURL)
+		if gatewayURL == "" {
+			gatewayURL = os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL")
+		}
 		resolved := openclawauth.Result{}
-		if openclawauth.GatewayIsLoopback(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL")) {
+		if openclawauth.GatewayIsLoopback(gatewayURL) {
 			var err error
 			resolved, err = openclawauth.Resolve(openclawauth.Options{
 				Binding: binding,
@@ -369,7 +429,7 @@ func VerifyBindingWithLive(ctx context.Context, homeDir string, binding config.B
 				return result
 			}
 		}
-		adapter := runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, binding.OpenClawAgentID)
+		adapter := runtime.NewOpenClawAdapterWithAuth(gatewayURL, resolved.Auth, binding.OpenClawAgentID)
 		openClawLive := adapter.VerifyMCPCatalog(ctx, result.ServerName)
 		if openClawLive.OK {
 			result.Note = openClawLive.Note

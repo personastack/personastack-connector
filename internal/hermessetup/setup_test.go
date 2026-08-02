@@ -67,6 +67,16 @@ func TestEnsureAPISetupMergesEnvAndStoresKey(t *testing.T) {
 	}
 }
 
+func TestLoopbackPortRejectsNonLoopbackGateway(t *testing.T) {
+	if _, err := loopbackPort("http://192.0.2.10:25000"); err == nil {
+		t.Fatal("loopbackPort accepted a non-loopback endpoint")
+	}
+	port, err := loopbackPort("http://127.0.0.1:25000")
+	if err != nil || port != "25000" {
+		t.Fatalf("loopbackPort() port=%q err=%v", port, err)
+	}
+}
+
 func TestEnsureAPISetupSkipsKeyringWhenFallbackForced(t *testing.T) {
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
