@@ -412,6 +412,27 @@ func TestRunnerConfigRefreshRequiresAPITarget(t *testing.T) {
 	}
 }
 
+func TestRunnerDefersRuntimeTargetRefreshUntilActiveRunAcknowledged(t *testing.T) {
+	binding := config.Binding{ConnectionID: "conn-1", ConnectionGeneration: 7, ActiveRunID: "run-1"}
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
+	runner := Runner{Store: store}
+	if !runner.bindingHasActiveRun(binding) {
+		t.Fatal("bindingHasActiveRun() = false, want true")
+	}
+	if got := runner.activeRunID(binding); got != "run-1" {
+		t.Fatalf("activeRunID() = %q, want run-1", got)
+	}
+	if runner.bindingHasActiveRun(config.Binding{ConnectionID: "conn-1", ConnectionGeneration: 8}) {
+		t.Fatal("bindingHasActiveRun() read an active run from a different connection generation")
+	}
+	target := &externalagentprotocol.RuntimeTarget{AccountCandidateID: "account-1", ProfileCandidateID: "profile-1", RuntimeKind: externalagentprotocol.RuntimeKindHermes, SelectionRevision: 1}
+	copy := cloneRuntimeTarget(target)
+	copy.AccountCandidateID = "account-2"
+	if target.AccountCandidateID != "account-1" {
+		t.Fatalf("cloneRuntimeTarget() mutated original target: %+v", target)
+	}
+}
+
 func TestWriteCapabilitiesFrameKeepsNativeCapabilitiesUnknownOnDiscoveryError(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

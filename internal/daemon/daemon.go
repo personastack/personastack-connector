@@ -549,6 +549,28 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	}
 	capabilityReporter := newNativeCapabilityChangeReporter()
 	runObservations := newRunObservationRegistry()
+	var pendingRuntimeTarget *externalagentprotocol.RuntimeTarget
+	applyConfigRefresh := func(target *externalagentprotocol.RuntimeTarget) error {
+		targetAdapter, resolvedTarget, targetErr := r.targetAdapter(binding, target)
+		if targetErr != nil {
+			return fmt.Errorf("resolve config refresh runtime target: %w", targetErr)
+		}
+		if err := r.refreshMCPConfig(binding, target); err != nil {
+			return fmt.Errorf("refresh mcp config: %w", err)
+		}
+		selectedRuntime.Lock()
+		defer selectedRuntime.Unlock()
+		selectedRuntime.adapter = targetAdapter
+		selectedRuntime.homeDir = resolvedTarget.HomeDir
+		selectedRuntime.hermesHome = resolvedTarget.HermesHome
+		selectedRuntime.openClawAgentID = resolvedTarget.OpenClawAgentID
+		selectedRuntime.runtimeURL, targetErr = r.targetRuntimeURL(binding, target)
+		if targetErr != nil {
+			return fmt.Errorf("resolve config refresh runtime endpoint: %w", targetErr)
+		}
+		selectedRuntime.configured = true
+		return nil
+	}
 	if err := r.replayActiveRun(sessionCtx, binding, session, adapter, runObservations, writeFrame); err != nil {
 		return err
 	}
@@ -635,25 +657,17 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.ConfigRefresh == nil {
 				continue
 			}
-			targetAdapter, resolvedTarget, targetErr := r.targetAdapter(binding, frame.ConfigRefresh.RuntimeTarget)
-			if targetErr != nil {
-				return fmt.Errorf("resolve config refresh runtime target: %w", targetErr)
+			if frame.ConfigRefresh.RuntimeTarget == nil {
+				return fmt.Errorf("runtime target required for config refresh")
 			}
-			if err := r.refreshMCPConfig(binding, frame.ConfigRefresh.RuntimeTarget); err != nil {
-				return fmt.Errorf("refresh mcp config: %w", err)
+			if r.bindingHasActiveRun(binding) {
+				pendingRuntimeTarget = cloneRuntimeTarget(frame.ConfigRefresh.RuntimeTarget)
+				log.Printf("connector runtime target refresh deferred connection_id=%s active_run_id=%s", binding.ConnectionID, r.activeRunID(binding))
+				continue
 			}
-			selectedRuntime.Lock()
-			selectedRuntime.adapter = targetAdapter
-			selectedRuntime.homeDir = resolvedTarget.HomeDir
-			selectedRuntime.hermesHome = resolvedTarget.HermesHome
-			selectedRuntime.openClawAgentID = resolvedTarget.OpenClawAgentID
-			selectedRuntime.runtimeURL, targetErr = r.targetRuntimeURL(binding, frame.ConfigRefresh.RuntimeTarget)
-			if targetErr != nil {
-				selectedRuntime.Unlock()
-				return fmt.Errorf("resolve config refresh runtime endpoint: %w", targetErr)
+			if err := applyConfigRefresh(frame.ConfigRefresh.RuntimeTarget); err != nil {
+				return err
 			}
-			selectedRuntime.configured = true
-			selectedRuntime.Unlock()
 		case externalagentprotocol.FrameTypeRunTerminalAck:
 			if frame.RunTerminalAck == nil {
 				continue
@@ -661,6 +675,13 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			runObservations.cancel(frame.RunID)
 			if err := r.clearRunState(binding, frame.RunID); err != nil {
 				return fmt.Errorf("clear acknowledged run state: %w", err)
+			}
+			if pendingRuntimeTarget != nil {
+				target := pendingRuntimeTarget
+				pendingRuntimeTarget = nil
+				if err := applyConfigRefresh(target); err != nil {
+					return err
+				}
 			}
 		case externalagentprotocol.FrameTypeRunStart:
 			if frame.RunStart == nil {
@@ -909,6 +930,29 @@ func (r Runner) now() time.Time {
 		return r.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (r Runner) bindingHasActiveRun(binding config.Binding) bool {
+	return r.activeRunID(binding) != ""
+}
+
+func (r Runner) activeRunID(binding config.Binding) string {
+	if r.Store == nil {
+		return ""
+	}
+	latest, ok := r.Store.Binding(binding.ConnectionID)
+	if !ok || latest.ConnectionGeneration != binding.ConnectionGeneration {
+		return ""
+	}
+	return strings.TrimSpace(latest.ActiveRunID)
+}
+
+func cloneRuntimeTarget(target *externalagentprotocol.RuntimeTarget) *externalagentprotocol.RuntimeTarget {
+	if target == nil {
+		return nil
+	}
+	copy := *target
+	return &copy
 }
 
 type commandFrameCache struct {
