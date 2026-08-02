@@ -10,6 +10,7 @@
 
 ## Authority
 
+- Read `ADR.md` before Connector architecture or implementation-plan decisions.
 - `personastack-api` owns durable persona, pairing, prompt, run, readiness,
   orbit, catalog, and install metadata state.
 - `agent-gateway` owns Connector websocket transport and protocol behavior
