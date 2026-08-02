@@ -20,6 +20,7 @@ func TestDiscoverNonRootOnlyReportsCurrentUserHermesProfiles(t *testing.T) {
 	oldEffectiveUID := effectiveUID
 	currentUser = func() (*user.User, error) { return &user.User{Username: "alice", HomeDir: homeDir, Uid: "501"}, nil }
 	effectiveUID = func() int { return 501 }
+	t.Setenv("HOME", homeDir)
 	t.Cleanup(func() {
 		currentUser = oldCurrentUser
 		effectiveUID = oldEffectiveUID
@@ -53,6 +54,7 @@ func TestDiscoverOmitsUnreadableOrMissingNonRootHomeWithoutFailure(t *testing.T)
 		return &user.User{Username: "alice", HomeDir: filepath.Join(t.TempDir(), "missing"), Uid: "501"}, nil
 	}
 	effectiveUID = func() int { return 501 }
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "missing"))
 	t.Cleanup(func() {
 		currentUser = oldCurrentUser
 		effectiveUID = oldEffectiveUID
@@ -75,6 +77,7 @@ func TestResolveRejectsSymlinkedHermesProfile(t *testing.T) {
 		return &user.User{Username: "alice", HomeDir: homeDir, Uid: "501", Gid: "20"}, nil
 	}
 	effectiveUID = func() int { return 501 }
+	t.Setenv("HOME", homeDir)
 	t.Cleanup(func() {
 		currentUser = oldCurrentUser
 		effectiveUID = oldEffectiveUID
@@ -129,6 +132,7 @@ func TestDiscoverNonRootIgnoresSudoUser(t *testing.T) {
 	oldEffectiveUID := effectiveUID
 	currentUser = func() (*user.User, error) { return &user.User{Username: "alice", HomeDir: homeDir, Uid: "501"}, nil }
 	effectiveUID = func() int { return 501 }
+	t.Setenv("HOME", homeDir)
 	t.Setenv("SUDO_USER", "root")
 	t.Cleanup(func() {
 		currentUser = oldCurrentUser
@@ -155,6 +159,7 @@ func TestDiscoverAndResolveOpenClawAgentProfiles(t *testing.T) {
 		return &user.User{Username: "alice", HomeDir: homeDir, Uid: "501", Gid: "20"}, nil
 	}
 	effectiveUID = func() int { return 501 }
+	t.Setenv("HOME", homeDir)
 	t.Cleanup(func() {
 		currentUser = oldCurrentUser
 		effectiveUID = oldEffectiveUID

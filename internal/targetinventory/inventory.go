@@ -160,7 +160,11 @@ func discoverAccounts() ([]account, []error) {
 		}
 		uid, _ := strconv.Atoi(current.Uid)
 		gid, _ := strconv.Atoi(current.Gid)
-		return []account{{username: strings.TrimSpace(current.Username), homeDir: strings.TrimSpace(current.HomeDir), uid: uid, gid: gid, groupIDs: groupIDsForUser(current, gid)}}, nil
+		homeDir := strings.TrimSpace(current.HomeDir)
+		if configuredHome := strings.TrimSpace(os.Getenv("HOME")); configuredHome != "" {
+			homeDir = configuredHome
+		}
+		return []account{{username: strings.TrimSpace(current.Username), homeDir: homeDir, uid: uid, gid: gid, groupIDs: groupIDsForUser(current, gid)}}, nil
 	}
 	raw, err := readFile("/etc/passwd")
 	if err != nil {
