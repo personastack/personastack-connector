@@ -25,6 +25,7 @@ import (
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/runtime"
+	"github.com/personastack/personastack-connector/internal/targetinventory"
 	"github.com/zalando/go-keyring"
 )
 
@@ -62,10 +63,24 @@ func readFrameOfType(t *testing.T, conn *websocket.Conn, want externalagentproto
 		if frame.MessageType == want {
 			return frame
 		}
-		if frame.MessageType == externalagentprotocol.FrameTypeHeartbeat || frame.MessageType == externalagentprotocol.FrameTypeCapabilitiesReport {
+		if frame.MessageType == externalagentprotocol.FrameTypeHeartbeat || frame.MessageType == externalagentprotocol.FrameTypeCapabilitiesReport || frame.MessageType == externalagentprotocol.FrameTypeTargetInventory {
 			continue
 		}
 		t.Fatalf("expected %s frame, got %+v", want, frame)
+	}
+}
+
+func hermesTestTarget(t *testing.T, installationSecret string) *externalagentprotocol.RuntimeTarget {
+	t.Helper()
+	inventory, warnings := targetinventory.Discover(runtime.AdapterKindHermes, installationSecret)
+	if len(inventory.Accounts) == 0 || len(inventory.Accounts[0].Profiles) == 0 {
+		t.Fatalf("discover Hermes test target: inventory=%+v warnings=%v", inventory, warnings)
+	}
+	return &externalagentprotocol.RuntimeTarget{
+		AccountCandidateID: inventory.Accounts[0].CandidateID,
+		ProfileCandidateID: inventory.Accounts[0].Profiles[0].CandidateID,
+		RuntimeKind:        externalagentprotocol.RuntimeKindHermes,
+		SelectionRevision:  1,
 	}
 }
 
@@ -1253,10 +1268,6 @@ func TestRunnerReconnectsAfterServerDrainingWithoutOverlap(t *testing.T) {
 				}
 			}
 		}
-		var heartbeat externalagentprotocol.Frame
-		if err := conn.ReadJSON(&heartbeat); err != nil {
-			t.Fatalf("read heartbeat: %v", err)
-		}
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageType:  externalagentprotocol.FrameTypeServerDraining,
 			PersonaID:    "persona-1",
@@ -1354,6 +1365,7 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write hermes config: %v", err)
 	}
+	target := hermesTestTarget(t, base64.StdEncoding.EncodeToString(privateKey))
 
 	hermesServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1397,7 +1409,7 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 			if err := conn.ReadJSON(&frame); err != nil {
 				return externalagentprotocol.Frame{}, err
 			}
-			if frame.MessageType == externalagentprotocol.FrameTypeHeartbeat || frame.MessageType == externalagentprotocol.FrameTypeCapabilitiesReport {
+			if frame.MessageType == externalagentprotocol.FrameTypeHeartbeat || frame.MessageType == externalagentprotocol.FrameTypeCapabilitiesReport || frame.MessageType == externalagentprotocol.FrameTypeTargetInventory {
 				continue
 			}
 			return frame, nil
@@ -1440,6 +1452,17 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 		if heartbeat.MessageType != externalagentprotocol.FrameTypeHeartbeat || heartbeat.Heartbeat == nil {
 			t.Fatalf("unexpected heartbeat: %+v", heartbeat)
 		}
+		err = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:     "refresh-1",
+			MessageType:   externalagentprotocol.FrameTypeConfigRefresh,
+			PersonaID:     "persona-1",
+			ConnectionID:  "conn-1",
+			SentAt:        time.Now().UTC(),
+			ConfigRefresh: &externalagentprotocol.ConfigRefreshPayload{RuntimeTarget: target},
+		})
+		if err != nil {
+			t.Fatalf("write config refresh: %v", err)
+		}
 
 		err = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageID:    "probe-1",
@@ -1475,6 +1498,7 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 				MCPURL:                 mcpServer.URL,
 				NativeMCPServerName:    "personastack-conn-1",
 				NativeMCPToolNamespace: "personastack",
+				RuntimeTarget:          target,
 				DeadlineAt:             time.Now().UTC().Add(time.Minute),
 			},
 		}
@@ -1568,7 +1592,7 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx)
+		errCh <- (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond, ReconcileMin: 10 * time.Millisecond, ReconcileMax: 50 * time.Millisecond}).RunForeground(ctx)
 	}()
 
 	select {
@@ -2130,6 +2154,15 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	if err := os.MkdirAll(filepath.Join(homeDir, ".hermes"), 0o700); err != nil {
+		t.Fatalf("create Hermes config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".hermes", "config.yaml"), []byte("mcp_servers: {}\n"), 0o600); err != nil {
+		t.Fatalf("write Hermes config: %v", err)
+	}
+	target := hermesTestTarget(t, base64.StdEncoding.EncodeToString(privateKey))
 	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -2219,6 +2252,18 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 			t.Fatalf("read heartbeat: %v", err)
 		}
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "refresh-1",
+			MessageType:  externalagentprotocol.FrameTypeConfigRefresh,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now(),
+			ConfigRefresh: &externalagentprotocol.ConfigRefreshPayload{
+				RuntimeTarget:     target,
+				SelectionRevision: target.SelectionRevision,
+				TargetEpoch:       1,
+			},
+		})
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageID:    "probe-1",
 			MessageType:  externalagentprotocol.FrameTypeWakeProbe,
 			PersonaID:    "persona-1",
@@ -2245,6 +2290,7 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 				FullyComposedPrompt:    "prompt",
 				NativeMCPServerName:    "personastack-conn-1",
 				NativeMCPToolNamespace: "personastack",
+				RuntimeTarget:          target,
 				Metadata:               map[string]string{"source": "test"},
 			},
 		})
@@ -2281,8 +2327,6 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 	}
 	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{binding}})
 	keyring.MockInit()
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
 	if _, err := (mcp.Installer{Store: &store, HomeDir: homeDir, ExecutablePath: "/usr/local/bin/personastack-connector", GOOS: "linux"}).InstallAll(); err != nil {
 		t.Fatalf("install mcp: %v", err)
@@ -2349,29 +2393,6 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 				HeartbeatSeconds:     15,
 			},
 		})
-		var heartbeat externalagentprotocol.Frame
-		if err := conn.ReadJSON(&heartbeat); err != nil {
-			t.Fatalf("read heartbeat: %v", err)
-		}
-		_ = conn.WriteJSON(externalagentprotocol.Frame{
-			MessageID:     "refresh-1",
-			MessageType:   externalagentprotocol.FrameTypeConfigRefresh,
-			PersonaID:     "persona-1",
-			ConnectionID:  "conn-1",
-			SentAt:        time.Now(),
-			ConfigRefresh: &externalagentprotocol.ConfigRefreshPayload{},
-		})
-		deadline := time.After(2 * time.Second)
-		for {
-			if _, err := os.ReadFile(filepath.Join(homeDir, ".hermes", "config.yaml")); err == nil {
-				break
-			}
-			select {
-			case <-deadline:
-				t.Fatal("timed out waiting for config refresh")
-			case <-time.After(time.Millisecond):
-			}
-		}
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageID:    "revoke-1",
 			MessageType:  externalagentprotocol.FrameTypeTokenRevoked,
@@ -2383,6 +2404,7 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 				Reason:    "user_requested",
 			},
 		})
+		time.Sleep(100 * time.Millisecond)
 	}))
 	defer server.Close()
 
@@ -2431,9 +2453,6 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 	if _, ok := store.Binding("conn-1"); ok {
 		t.Fatalf("expected token revocation to delete binding")
 	}
-	if _, err := os.ReadFile(filepath.Join(homeDir, ".hermes", "config.yaml")); err != nil {
-		t.Fatalf("expected config refresh to write Hermes config: %v", err)
-	}
 }
 
 func TestCanStartRunWithReadiness(t *testing.T) {
@@ -2444,8 +2463,8 @@ func TestCanStartRunWithReadiness(t *testing.T) {
 	if canStartRunWithReadiness(runtime.AdapterStateMCPVerified, nil) {
 		t.Fatalf("mcp verified without wake probe should not be runnable")
 	}
-	if !canStartRunWithReadiness(runtime.AdapterStateReady, nil) {
-		t.Fatalf("ready should be runnable")
+	if canStartRunWithReadiness(runtime.AdapterStateReady, &now) {
+		t.Fatalf("ready without a successful MCP verification should not be runnable")
 	}
 	for _, state := range []runtime.AdapterState{
 		runtime.AdapterStateRuntimeMissing,
@@ -2589,6 +2608,10 @@ func TestDuplicateRunStartMessageIDReplaysCachedStartedFrame(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 	t.Setenv("HERMES_API_SERVER_KEY", "key-1")
 	t.Setenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START", "1")
+	if err := os.MkdirAll(filepath.Join(homeDir, ".hermes"), 0o700); err != nil {
+		t.Fatalf("create Hermes home: %v", err)
+	}
+	target := hermesTestTarget(t, base64.StdEncoding.EncodeToString(privateKey))
 
 	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -2667,6 +2690,16 @@ func TestDuplicateRunStartMessageIDReplaysCachedStartedFrame(t *testing.T) {
 			},
 		})
 		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "refresh-1",
+			MessageType:  externalagentprotocol.FrameTypeConfigRefresh,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			ConfigRefresh: &externalagentprotocol.ConfigRefreshPayload{
+				RuntimeTarget: target,
+			},
+		})
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
 			MessageID:    "probe-1",
 			MessageType:  externalagentprotocol.FrameTypeWakeProbe,
 			PersonaID:    "persona-1",
@@ -2695,6 +2728,7 @@ func TestDuplicateRunStartMessageIDReplaysCachedStartedFrame(t *testing.T) {
 				FullyComposedPrompt:    "prompt",
 				NativeMCPServerName:    "personastack-conn-1",
 				NativeMCPToolNamespace: "personastack",
+				RuntimeTarget:          target,
 			},
 		}
 		_ = conn.WriteJSON(start)
@@ -2899,6 +2933,7 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 	), 0o600); err != nil {
 		t.Fatalf("write hermes config: %v", err)
 	}
+	target := hermesTestTarget(t, base64.StdEncoding.EncodeToString(privateKey))
 	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Method string `json:"method"`
@@ -2959,13 +2994,29 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 				HeartbeatSeconds:     15,
 			},
 		})
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:     "refresh-1",
+			MessageType:   externalagentprotocol.FrameTypeConfigRefresh,
+			PersonaID:     "persona-1",
+			ConnectionID:  "conn-1",
+			SentAt:        time.Now().UTC(),
+			ConfigRefresh: &externalagentprotocol.ConfigRefreshPayload{RuntimeTarget: target},
+		})
+		_ = conn.WriteJSON(externalagentprotocol.Frame{
+			MessageID:    "probe-1",
+			MessageType:  externalagentprotocol.FrameTypeWakeProbe,
+			PersonaID:    "persona-1",
+			ConnectionID: "conn-1",
+			SentAt:       time.Now().UTC(),
+			WakeProbe:    &externalagentprotocol.WakeProbePayload{ProbeID: "probe-1", DeadlineAt: time.Now().UTC().Add(2 * time.Second)},
+		})
 		readRunFrame := func() externalagentprotocol.Frame {
 			for {
 				var frame externalagentprotocol.Frame
 				if err := conn.ReadJSON(&frame); err != nil {
 					t.Fatalf("read frame: %v", err)
 				}
-				if frame.MessageType != externalagentprotocol.FrameTypeHeartbeat && frame.MessageType != externalagentprotocol.FrameTypeCapabilitiesReport {
+				if frame.MessageType != externalagentprotocol.FrameTypeHeartbeat && frame.MessageType != externalagentprotocol.FrameTypeCapabilitiesReport && frame.MessageType != externalagentprotocol.FrameTypeTargetInventory && frame.MessageType != externalagentprotocol.FrameTypeWakeProbeAccepted {
 					return frame
 				}
 			}
@@ -2986,6 +3037,7 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 			SentAt:       time.Now().UTC(),
 			RunStart: &externalagentprotocol.RunStartPayload{
 				FullyComposedPrompt: "prompt",
+				RuntimeTarget:       target,
 			},
 		})
 		runReplay <- []externalagentprotocol.Frame{readRunFrame(), readRunFrame()}
@@ -3009,6 +3061,7 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 		ActiveNativeRunID:    "native-1",
 		RuntimeKind:          runtime.AdapterKindHermes,
 	}}})
+	keyring.MockInit()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- (Runner{Store: &store, ReconnectMin: time.Millisecond, ReconnectMax: time.Millisecond}).RunForeground(ctx)
@@ -3418,6 +3471,7 @@ func TestRunnerServerDrainingReconnectWaitsBeforeFreshGeneration(t *testing.T) {
 					Reason:     "test drain",
 				},
 			})
+			time.Sleep(100 * time.Millisecond)
 			return
 		}
 		cancel()

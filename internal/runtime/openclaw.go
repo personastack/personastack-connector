@@ -73,12 +73,16 @@ func (adapter OpenClawAdapter) Kind() AdapterKind {
 }
 
 func (adapter OpenClawAdapter) Detect() Detection {
+	ctx, cancel := context.WithTimeout(context.Background(), openClawSetupRetryBudget)
+	defer cancel()
+	return adapter.DetectContext(ctx)
+}
+
+func (adapter OpenClawAdapter) DetectContext(ctx context.Context) Detection {
 	if !adapter.hasAuth() {
 		return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateAuthMissing, Note: "OpenClaw operator token, password, or device token is required"}
 	}
-	connectCtx, cancel := context.WithTimeout(context.Background(), openClawSetupRetryBudget)
-	defer cancel()
-	conn, err := adapter.connectOperatorWithRetry(connectCtx)
+	conn, err := adapter.connectOperatorWithRetry(ctx)
 	if err != nil {
 		if openClawConnectErrorIsAuth(err) {
 			return Detection{Kind: AdapterKindOpenClaw, State: AdapterStateAuthMissing, Note: "OpenClaw operator credential rejected"}
@@ -545,8 +549,8 @@ func (adapter OpenClawAdapter) hasAuth() bool {
 	return adapter.Token != "" || adapter.Password != "" || adapter.DeviceToken != ""
 }
 
-func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
-	setOpenClawDeadline(conn, context.Background(), 10*time.Second)
+func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn, ctx context.Context) error {
+	setOpenClawDeadline(conn, ctx, 10*time.Second)
 	var challenge openClawResponse
 	if err := conn.ReadJSON(&challenge); err != nil {
 		return fmt.Errorf("read OpenClaw connect challenge: %w", err)
@@ -586,7 +590,7 @@ func (adapter OpenClawAdapter) connectOperator(conn *websocket.Conn) error {
 	if err := conn.WriteJSON(request); err != nil {
 		return fmt.Errorf("write OpenClaw connect: %w", err)
 	}
-	setOpenClawDeadline(conn, context.Background(), 10*time.Second)
+	setOpenClawDeadline(conn, ctx, 10*time.Second)
 	var hello openClawResponse
 	if err := conn.ReadJSON(&hello); err != nil {
 		return fmt.Errorf("read OpenClaw hello-ok: %w", err)

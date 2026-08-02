@@ -461,3 +461,33 @@ Adapter result states must be concrete typed enums, including:
 - Root Linux support requires the privileged smoke test to start a selected
   non-root child under its requested UID. Run that test in a root Linux
   container or host before claiming system-scope launch support.
+
+## Paired host recovery
+
+- Pairing persists the binding without probing Hermes or OpenClaw readiness.
+  `--runtime hermes` and `--runtime openclaw` remain explicit selections.
+  `--runtime auto` sends the supported runtime-kind set to the API and uses
+  the negotiated response kind. Auto selection never depends on a local
+  readiness probe.
+- A paired Connector keeps its gateway websocket session alive when the local
+  runtime, credentials, native capabilities, MCP config, or startup process is
+  unavailable. Those conditions are typed runtime diagnoses. They are not
+  websocket session failures.
+- Each V4 session owns one reconciler. It serializes target resolution,
+  runtime detection, best-effort startup, MCP installation, live verification,
+  and readiness publication. It retries forever with jittered exponential
+  backoff capped at a bounded delay. Every attempt has a context deadline.
+- Reconciliation publishes a synchronized immutable snapshot keyed by
+  connection generation, API selection revision, and a session target epoch.
+  Target changes cancel the prior attempt. A stale attempt cannot publish
+  readiness or authorize a wake probe or run.
+- `config.refresh` requires either an API-selected `runtime_target` or the
+  explicit `clear_runtime_target` marker with a selection revision. A target
+  clear invalidates readiness and run admission without deleting the paired
+  binding. Unmarked targetless refreshes remain protocol errors.
+- V4 inventory includes typed `discovery_status`. `complete` is authoritative.
+  `degraded` and omitted legacy status never clear an existing API target.
+- Connector writes are supervised. A failed websocket write cancels the
+  session and reconnects. Runtime and MCP faults only update the heartbeat
+  diagnosis. Diagnostics expose stable codes and redacted summaries without
+  local paths, credentials, prompts, or loopback URLs.

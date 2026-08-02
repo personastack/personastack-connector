@@ -2,6 +2,7 @@
 package openclawsetup
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -39,6 +40,14 @@ func TryStartGatewayForHome(homeDir string, identity hermessetup.ProcessIdentity
 
 // TryStartGatewayForHomeAt starts OpenClaw on a target-specific loopback port.
 func TryStartGatewayForHomeAt(homeDir string, identity hermessetup.ProcessIdentity, port int, gatewayReachable func() bool) (bool, error) {
+	return TryStartGatewayForHomeAtContext(context.Background(), homeDir, identity, port, gatewayReachable)
+}
+
+// TryStartGatewayForHomeAtContext keeps the bounded setup attempt cancellable.
+func TryStartGatewayForHomeAtContext(ctx context.Context, homeDir string, identity hermessetup.ProcessIdentity, port int, gatewayReachable func() bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if port < 1024 || port > 65535 {
 		return false, fmt.Errorf("OpenClaw gateway port invalid")
 	}

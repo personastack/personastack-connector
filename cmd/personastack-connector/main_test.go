@@ -816,7 +816,7 @@ func TestRunPairOpenClawDetectsTokenBeforePrompt(t *testing.T) {
 	}
 }
 
-func TestRunPairOpenClawRejectsDetectedInvalidTokenWhenGatewayReachable(t *testing.T) {
+func TestRunPairOpenClawPersistsBindingWhenLocalTokenIsStale(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("OPENCLAW_CONFIG_PATH", "")
@@ -847,11 +847,25 @@ func TestRunPairOpenClawRejectsDetectedInvalidTokenWhenGatewayReachable(t *testi
 	}))
 	defer gateway.Close()
 	t.Setenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL", "ws"+gateway.URL[len("http"):])
+	oldInstallService := installService
+	installService = func(scope service.ServiceScope) (service.InstallResult, error) {
+		return service.InstallResult{Kind: "test", Scope: scope, Path: "/tmp/personastack-connector-test"}, nil
+	}
+	t.Cleanup(func() { installService = oldInstallService })
 
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		http.Error(w, "pairing code consumed", http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"persona_id":                "persona-openclaw",
+			"connection_id":             "connection-openclaw",
+			"credential_id":             "cred-openclaw",
+			"runtime_kind":              "openclaw",
+			"connection_generation":     1,
+			"gateway_websocket_url":     "ws://example/v1/external-agent/ws",
+			"native_mcp_server_name":    "personastack-connection-openclaw",
+			"native_mcp_tool_namespace": "personastack",
+		})
 	}))
 	defer server.Close()
 
@@ -863,11 +877,15 @@ func TestRunPairOpenClawRejectsDetectedInvalidTokenWhenGatewayReachable(t *testi
 		store:  &store,
 	}
 	err := cmd.runPair([]string{"PAIR-OPENCLAW", "--gateway", server.URL, "--runtime", "openclaw"})
-	if err == nil || !strings.Contains(err.Error(), "credential rejected") {
+	if err != nil {
 		t.Fatalf("runPair() error = %v", err)
 	}
-	if calls != 0 {
-		t.Fatalf("pairing exchange should not be called with rejected auth; calls=%d", calls)
+	if calls != 1 {
+		t.Fatalf("pairing exchange calls=%d, want 1", calls)
+	}
+	bindings := store.ListBindings()
+	if len(bindings) != 1 || bindings[0].OpenClawGatewayToken != "stale-token" {
+		t.Fatalf("stale token binding was not persisted: %+v", bindings)
 	}
 }
 
@@ -1164,15 +1182,18 @@ func TestApplyOpenClawPairOptionsStoresEnvironmentCredential(t *testing.T) {
 	}
 }
 
-func TestApplyOpenClawPairOptionsRequiresOperatorCredential(t *testing.T) {
+func TestApplyOpenClawPairOptionsAllowsMissingOperatorCredential(t *testing.T) {
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_PASSWORD", "")
 	t.Setenv("OPENCLAW_GATEWAY_DEVICE_TOKEN", "")
 	binding := config.Binding{RuntimeKind: runtime.AdapterKindOpenClaw}
 
 	err := applyOpenClawPairOptions(&binding, openClawPairOptions{})
-	if err == nil || !strings.Contains(err.Error(), "OpenClaw operator credential required") {
+	if err != nil {
 		t.Fatalf("applyOpenClawPairOptions() error = %v", err)
+	}
+	if binding.OpenClawGatewayToken != "" || binding.HasOpenClawToken {
+		t.Fatalf("unexpected empty credential state: %+v", binding)
 	}
 }
 

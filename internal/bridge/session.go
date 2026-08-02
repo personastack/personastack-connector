@@ -86,6 +86,7 @@ func (s Session) ConnectFrame(nonce string) (externalagentprotocol.Frame, error)
 		CredentialID:              strings.TrimSpace(s.Credential.ID),
 		CredentialProofNonce:      strings.TrimSpace(nonce),
 		CredentialProofUnix:       now.Unix(),
+		SupportsTargetClear:       true,
 	}
 	frame := s.baseFrame(externalagentprotocol.FrameTypeConnect, now)
 	frame.Connect = &connect
@@ -99,6 +100,13 @@ func (s Session) HeartbeatFrame(state runtime.AdapterState, lastWakeProbeAt *tim
 
 func (s Session) HeartbeatFrameWithDetection(detection runtime.Detection, lastWakeProbeAt *time.Time) externalagentprotocol.Frame {
 	return s.HeartbeatFrameWithDiagnostic(detection.State, detection.DiagnosticCode, lastWakeProbeAt)
+}
+
+func (s Session) HeartbeatFrameWithDetectionAndTarget(detection runtime.Detection, lastWakeProbeAt *time.Time, targetRevision int64, targetEpoch uint64) externalagentprotocol.Frame {
+	frame := s.HeartbeatFrameWithDiagnostic(detection.State, detection.DiagnosticCode, lastWakeProbeAt)
+	frame.Heartbeat.TargetSelectionRevision = targetRevision
+	frame.Heartbeat.TargetEpoch = targetEpoch
+	return frame
 }
 
 func (s Session) HeartbeatFrameWithDiagnostic(state runtime.AdapterState, diagnosticCode string, lastWakeProbeAt *time.Time) externalagentprotocol.Frame {
@@ -147,6 +155,22 @@ func (s Session) WakeProbeAcceptedFrame(probeID string) externalagentprotocol.Fr
 		RuntimeKind: runtimeKindForAdapter(s.Binding.RuntimeKind),
 		AcceptedAt:  frame.SentAt,
 	}
+	return frame
+}
+
+func (s Session) WakeProbeAcceptedFrameForRequest(request externalagentprotocol.Frame) externalagentprotocol.Frame {
+	return s.WakeProbeAcceptedFrameForRequestWithTarget(request, 0, 0)
+}
+
+func (s Session) WakeProbeAcceptedFrameForRequestWithTarget(request externalagentprotocol.Frame, targetRevision int64, targetEpoch uint64) externalagentprotocol.Frame {
+	probeID := ""
+	if request.WakeProbe != nil {
+		probeID = request.WakeProbe.ProbeID
+	}
+	frame := s.WakeProbeAcceptedFrame(probeID)
+	frame.MessageID = strings.TrimSpace(request.MessageID)
+	frame.WakeProbeAccepted.TargetSelectionRevision = targetRevision
+	frame.WakeProbeAccepted.TargetEpoch = targetEpoch
 	return frame
 }
 
@@ -336,6 +360,8 @@ func diagnosticCodeForAdapterState(state runtime.AdapterState, diagnosticCode st
 		return "wake_probe_failed"
 	case runtime.AdapterStateReady, runtime.AdapterStateMCPVerified:
 		return ""
+	case runtime.AdapterStateTargetSelectionRequired:
+		return "target_selection_required"
 	default:
 		return "runtime_error"
 	}

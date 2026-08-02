@@ -228,16 +228,8 @@ func (cmd command) runPair(args []string) error {
 	if err != nil {
 		return err
 	}
-	normalizedHermesHome, err := normalizeHermesHome(hermesHome)
-	if err != nil {
+	if _, err := normalizeHermesHome(hermesHome); err != nil {
 		return err
-	}
-	if kind == runtime.AdapterKindAuto {
-		detectedKind, err := detectSingleReadyRuntimeForHermesHome(normalizedHermesHome)
-		if err != nil {
-			return err
-		}
-		kind = detectedKind
 	}
 	serviceScope, err := parseCommandServiceScope(serviceScopeValue)
 	if err != nil {
@@ -424,9 +416,6 @@ func (cmd command) resolveOpenClawPairOptions(kind runtime.AdapterKind, options 
 		return options, err
 	}
 	if resolved.Found() {
-		if err := validateResolvedOpenClawAuth(resolved.Auth, options.agentID); err != nil {
-			return options, err
-		}
 		options.token = resolved.Auth.Token
 		options.password = resolved.Auth.Password
 		options.deviceToken = resolved.Auth.DeviceToken
@@ -456,9 +445,9 @@ func applyOpenClawPairOptions(binding *config.Binding, options openClawPairOptio
 	// OpenClaw agent/profile selection is API-owned. Pairing may retain a local
 	// credential, but it must not retain an agent choice for later dispatch.
 	binding.OpenClawAgentID = ""
-	if !openClawPairCredentialAvailable(options, *binding) {
-		return errors.New(openClawCredentialRequiredMessage())
-	}
+	// Pairing is durable even when the selected host has no usable local
+	// OpenClaw credential. The session reconciler reports auth_missing and keeps
+	// retrying after the operator repairs the host.
 	return nil
 }
 

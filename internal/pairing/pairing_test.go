@@ -62,6 +62,38 @@ func TestClientExchangeBuildsBinding(t *testing.T) {
 	}
 }
 
+func TestClientExchangeAutoNegotiatesWithoutLocalReadiness(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request externalagentprotocol.PairingExchangeRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.RuntimeKind != externalagentprotocol.RuntimeKindAuto {
+			t.Fatalf("runtime kind = %q, want auto", request.RuntimeKind)
+		}
+		if len(request.SupportedRuntimeKinds) != 2 || request.SupportedRuntimeKinds[0] != externalagentprotocol.RuntimeKindHermes || request.SupportedRuntimeKinds[1] != externalagentprotocol.RuntimeKindOpenClaw {
+			t.Fatalf("supported runtime kinds = %+v", request.SupportedRuntimeKinds)
+		}
+		_ = json.NewEncoder(w).Encode(externalagentprotocol.PairingExchangeResponse{
+			PersonaID:            "persona-auto",
+			ConnectionID:         "conn-auto",
+			CredentialID:         "cred-auto",
+			RuntimeKind:          externalagentprotocol.RuntimeKindHermes,
+			ConnectionGeneration: 1,
+			GatewayWebsocketURL:  "ws://example/v1/external-agent/ws",
+		})
+	}))
+	defer server.Close()
+
+	result, err := Client{GatewayBaseURL: server.URL}.Exchange(t.Context(), Request{Code: "PAIR-AUTO", RuntimeKind: runtime.AdapterKindAuto})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if result.Binding.RuntimeKind != runtime.AdapterKindHermes {
+		t.Fatalf("negotiated binding runtime = %s, want hermes", result.Binding.RuntimeKind)
+	}
+}
+
 func TestClientExchangeSurfacesUnsupportedConnectorVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUpgradeRequired)

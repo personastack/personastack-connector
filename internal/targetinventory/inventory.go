@@ -49,8 +49,9 @@ var effectiveUID = os.Geteuid
 
 // Discover returns candidates visible to the effective Connector process. A
 // non-root Connector sees only its own home. Root also sees root and regular
-// local accounts. Errors for inaccessible individual homes are omitted so an
-// unprivileged install remains usable.
+// local accounts. Inaccessible or incomplete homes remain usable as partial
+// results, but are reported as degraded so callers do not treat the inventory
+// as authoritative.
 func Discover(kind connectorruntime.AdapterKind, installationSecret ...string) (externalagentprotocol.TargetInventoryPayload, []error) {
 	secret := ""
 	if len(installationSecret) > 0 {
@@ -69,6 +70,10 @@ func Discover(kind connectorruntime.AdapterKind, installationSecret ...string) (
 			Label:       account.username,
 			Profiles:    profiles,
 		})
+	}
+	result.DiscoveryStatus = externalagentprotocol.DiscoveryStatusComplete
+	if len(warnings) > 0 {
+		result.DiscoveryStatus = externalagentprotocol.DiscoveryStatusDegraded
 	}
 	return result, warnings
 }
@@ -251,7 +256,7 @@ func discoverProfiles(candidate account, kind connectorruntime.AdapterKind, inst
 		base := filepath.Join(candidate.homeDir, ".hermes")
 		if _, err := stat(base); err != nil {
 			if os.IsNotExist(err) || os.IsPermission(err) {
-				return nil, nil
+				return nil, []error{fmt.Errorf("inspect Hermes home for %s: %w", candidate.username, err)}
 			}
 			return nil, []error{fmt.Errorf("inspect Hermes home for %s: %w", candidate.username, err)}
 		}
@@ -259,7 +264,7 @@ func discoverProfiles(candidate account, kind connectorruntime.AdapterKind, inst
 		entries, err := readDir(filepath.Join(base, "profiles"))
 		if err != nil {
 			if os.IsNotExist(err) || os.IsPermission(err) {
-				return profiles, nil
+				return profiles, []error{fmt.Errorf("list Hermes profiles for %s: %w", candidate.username, err)}
 			}
 			return profiles, []error{fmt.Errorf("list Hermes profiles for %s: %w", candidate.username, err)}
 		}
@@ -274,7 +279,7 @@ func discoverProfiles(candidate account, kind connectorruntime.AdapterKind, inst
 	case connectorruntime.AdapterKindOpenClaw:
 		if _, err := stat(filepath.Join(candidate.homeDir, ".openclaw")); err != nil {
 			if os.IsNotExist(err) || os.IsPermission(err) {
-				return nil, nil
+				return nil, []error{fmt.Errorf("inspect OpenClaw home for %s: %w", candidate.username, err)}
 			}
 			return nil, []error{fmt.Errorf("inspect OpenClaw home for %s: %w", candidate.username, err)}
 		}
@@ -294,7 +299,7 @@ func discoverOpenClawProfiles(candidate account, installationSecret string) ([]e
 	raw, err := readFile(path)
 	if err != nil {
 		if os.IsNotExist(err) || os.IsPermission(err) {
-			return []externalagentprotocol.RuntimeProfileCandidate{{CandidateID: profileID(candidate, defaultAgentID, installationSecret), Label: "Default", RuntimeKind: externalagentprotocol.RuntimeKindOpenClaw}}, nil
+			return []externalagentprotocol.RuntimeProfileCandidate{{CandidateID: profileID(candidate, defaultAgentID, installationSecret), Label: "Default", RuntimeKind: externalagentprotocol.RuntimeKindOpenClaw}}, fmt.Errorf("read OpenClaw config for %s: %w", candidate.username, err)
 		}
 		return nil, err
 	}

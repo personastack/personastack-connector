@@ -20,19 +20,21 @@ import (
 	"github.com/personastack/personastack-connector/internal/hermessetup"
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/openclawauth"
-	"github.com/personastack/personastack-connector/internal/openclawsetup"
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/targetinventory"
 	"github.com/personastack/personastack-connector/internal/targetruntime"
 )
 
 type Runner struct {
-	Store        config.Store
-	ServiceScope externalagentprotocol.ServiceScope
-	Now          func() time.Time
-	ReconnectMin time.Duration
-	ReconnectMax time.Duration
-	ReadTimeout  time.Duration
+	Store                   config.Store
+	ServiceScope            externalagentprotocol.ServiceScope
+	Now                     func() time.Time
+	ReconnectMin            time.Duration
+	ReconnectMax            time.Duration
+	ReadTimeout             time.Duration
+	ReconcileMin            time.Duration
+	ReconcileMax            time.Duration
+	ReconcileAttemptTimeout time.Duration
 }
 
 var errConnectorBindingRemoved = errors.New("connector binding removed")
@@ -179,27 +181,35 @@ func (r Runner) RunForeground(ctx context.Context) error {
 		logCancel := func() {
 			bindingCancel()
 		}
+		componentResults := make(chan error, 2)
+		componentCount := 1
 		if strings.TrimSpace(binding.LocalMCPProxyURL) != "" {
 			proxyErrs, err := mcp.StartLoopbackHTTPProxyWithStore(bindingCtx, r.Store, binding, nil)
 			if err != nil {
 				logCancel()
 				return err
 			}
-			wg.Add(1)
-			go func(connectionID config.ConnectionID) {
-				defer wg.Done()
-				err := <-proxyErrs
-				sendResult(bindingRunResult{connectionID: connectionID, token: token, err: err})
-			}(binding.ConnectionID)
+			componentCount++
+			go func() {
+				componentResults <- <-proxyErrs
+			}()
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sendResult(bindingRunResult{
-				connectionID: binding.ConnectionID,
-				token:        token,
-				err:          r.runBinding(bindingCtx, binding),
-			})
+			go func() {
+				componentResults <- r.runBinding(bindingCtx, binding)
+			}()
+			var resultErr error
+			for completed := 0; completed < componentCount; completed++ {
+				componentErr := <-componentResults
+				if resultErr == nil && componentErr != nil {
+					resultErr = componentErr
+				}
+				// Stop the sibling component as soon as either component exits.
+				bindingCancel()
+			}
+			sendResult(bindingRunResult{connectionID: binding.ConnectionID, token: token, err: resultErr})
 		}()
 		active[token] = bindingRun{cancel: logCancel, connectionID: binding.ConnectionID, token: token}
 		delete(startBackoffs, binding.ConnectionID)
@@ -228,7 +238,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 	bindings := r.Store.ListBindings()
 	for _, binding := range bindings {
 		if err := startBinding(binding); err != nil {
-			log.Printf("connector binding start failed connection_id=%s err=%v", binding.ConnectionID, err)
+			log.Printf("connector binding start failed connection_id=%s diagnostic=%s", binding.ConnectionID, safeDiagnosticNote(err.Error()))
 			recordStartFailure(binding)
 		}
 	}
@@ -251,7 +261,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 				delete(active, result.token)
 			}
 			if ok && result.err != nil {
-				log.Printf("connector binding stopped connection_id=%s err=%v", result.connectionID, result.err)
+				log.Printf("connector binding stopped connection_id=%s diagnostic=%s", result.connectionID, safeDiagnosticNote(result.err.Error()))
 				if binding, exists := r.Store.Binding(result.connectionID); exists {
 					recordStartFailure(binding)
 				}
@@ -264,7 +274,7 @@ func (r Runner) RunForeground(ctx context.Context) error {
 			cancelMissingBindings(bindings)
 			for _, binding := range bindings {
 				if err := startBinding(binding); err != nil {
-					log.Printf("connector binding start failed connection_id=%s err=%v", binding.ConnectionID, err)
+					log.Printf("connector binding start failed connection_id=%s diagnostic=%s", binding.ConnectionID, safeDiagnosticNote(err.Error()))
 					recordStartFailure(binding)
 				}
 			}
@@ -411,10 +421,18 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		}
 	}()
 	var writeMu sync.Mutex
+	var writeFailureOnce sync.Once
 	writeFrame := func(frame externalagentprotocol.Frame) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		return conn.WriteJSON(frame)
+		err := conn.WriteJSON(frame)
+		if err != nil {
+			writeFailureOnce.Do(func() {
+				cancelSession()
+				_ = conn.Close()
+			})
+		}
+		return err
 	}
 	extendReadDeadline := func() error {
 		return conn.SetReadDeadline(r.now().Add(r.readTimeout()))
@@ -429,7 +447,14 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		deadline := r.now().Add(5 * time.Second)
-		return conn.WriteControl(websocket.PingMessage, []byte("personastack-connector"), deadline)
+		err := conn.WriteControl(websocket.PingMessage, []byte("personastack-connector"), deadline)
+		if err != nil {
+			writeFailureOnce.Do(func() {
+				cancelSession()
+				_ = conn.Close()
+			})
+		}
+		return err
 	}
 
 	connectFrame, err := session.ConnectFrame("connector-startup")
@@ -453,34 +478,25 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		return fmt.Errorf("unsupported protocol version: %s", accepted.ConnectAccepted.ProtocolVersion)
 	}
 	adapter := r.adapterForBinding(binding)
-	var selectedRuntime struct {
-		sync.RWMutex
-		adapter         runtime.Adapter
-		homeDir         string
-		hermesHome      string
-		openClawAgentID string
-		runtimeURL      string
-		configured      bool
+	initialCtx, cancelInitial := context.WithTimeout(sessionCtx, 10*time.Second)
+	initialDetection := safeDetection(runtime.DetectContext(initialCtx, adapter))
+	cancelInitial()
+	var reconciler *sessionReconciler
+	capabilityReporter := newNativeCapabilityChangeReporter()
+	if accepted.ConnectAccepted.ProtocolVersion == externalagentprotocol.ProtocolVersionV4 {
+		reconciler = newSessionReconciler(sessionCtx, r, binding, adapter, initialDetection)
+		reconciler.start(sessionCtx)
+		defer reconciler.close()
 	}
 	sessionRuntime := func() (runtime.Adapter, runtime.Detection) {
 		if accepted.ConnectAccepted.ProtocolVersion != externalagentprotocol.ProtocolVersionV4 {
-			return adapter, r.bindingReadiness(adapter, binding)
+			return adapter, safeDetection(r.bindingReadiness(adapter, binding))
 		}
-		selectedRuntime.RLock()
-		targetAdapter := selectedRuntime.adapter
-		homeDir := selectedRuntime.homeDir
-		hermesHome := selectedRuntime.hermesHome
-		openClawAgentID := selectedRuntime.openClawAgentID
-		runtimeURL := selectedRuntime.runtimeURL
-		configured := selectedRuntime.configured
-		selectedRuntime.RUnlock()
-		if !configured || targetAdapter == nil {
-			waiting := runtime.NewErrorAdapter(binding.RuntimeKind, runtime.AdapterStateRuntimeStopped, "waiting for PersonaStack account and profile selection")
-			return waiting, waiting.Detect()
+		snapshot := reconciler.snapshotCopy()
+		if snapshot.Adapter == nil {
+			return adapter, selectionRequiredDetection(snapshot.Detection)
 		}
-		verificationBinding := binding
-		verificationBinding.OpenClawAgentID = openClawAgentID
-		return targetAdapter, r.bindingReadinessAtHome(targetAdapter, verificationBinding, homeDir, hermesHome, runtimeURL)
+		return snapshot.Adapter, snapshot.Detection
 	}
 	_, detection := sessionRuntime()
 	_ = r.recordHeartbeat(binding, r.now())
@@ -489,6 +505,15 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	var runStartedMu sync.Mutex
 	runStarted := map[string]bool{}
 	lastSessionWakeProbeAt := func() *time.Time {
+		if reconciler != nil {
+			// V4 wake evidence is scoped to the reconciler epoch. Do not fall
+			// back to the legacy session-wide value after a target changes.
+			if value := reconciler.snapshotCopy().WakeProbeAt; value != nil {
+				copy := value.UTC()
+				return &copy
+			}
+			return nil
+		}
 		wakeProbeMu.Lock()
 		defer wakeProbeMu.Unlock()
 		if sessionWakeProbeAt == nil {
@@ -523,7 +548,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	reportTargetInventory := func() error {
 		inventory, warnings := targetinventory.Discover(binding.RuntimeKind, binding.BridgePrivateKey)
 		for _, warning := range warnings {
-			log.Printf("connector runtime target discovery warning connection_id=%s err=%v", binding.ConnectionID, warning)
+			log.Printf("connector runtime target discovery warning connection_id=%s diagnostic=%s", binding.ConnectionID, safeDiagnosticNote(warning.Error()))
 		}
 		inventory.InventoryGeneration = r.now().UnixNano()
 		if inventory.InventoryGeneration <= 0 {
@@ -543,36 +568,58 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		return nil
 	}
 	if accepted.ConnectAccepted.ProtocolVersion == externalagentprotocol.ProtocolVersionV4 {
+		capabilityAdapter, capabilityDetection := sessionRuntime()
+		if err := capabilityReporter.writeIfChanged(sessionCtx, r, session, capabilityAdapter, binding, capabilityDetection, lastSessionWakeProbeAt, writeFrame); err != nil {
+			return err
+		}
 		if err := reportTargetInventory(); err != nil {
 			return err
 		}
 	}
-	capabilityReporter := newNativeCapabilityChangeReporter()
 	runObservations := newRunObservationRegistry()
-	var pendingRuntimeTarget *externalagentprotocol.RuntimeTarget
-	applyConfigRefresh := func(target *externalagentprotocol.RuntimeTarget) error {
-		targetAdapter, resolvedTarget, targetErr := r.targetAdapter(binding, target)
-		if targetErr != nil {
-			return fmt.Errorf("resolve config refresh runtime target: %w", targetErr)
+	type pendingRefresh struct {
+		target   *externalagentprotocol.RuntimeTarget
+		clear    bool
+		revision int64
+		epoch    uint64
+	}
+	var pendingRuntimeRefresh *pendingRefresh
+	applyConfigRefresh := func(refresh pendingRefresh) error {
+		if refresh.clear {
+			reconciler.clearTarget(refresh.revision, refresh.epoch)
+			return nil
 		}
-		if err := r.refreshMCPConfig(binding, target); err != nil {
-			return fmt.Errorf("refresh mcp config: %w", err)
+		if refresh.target == nil {
+			return fmt.Errorf("runtime target required for config refresh")
 		}
-		selectedRuntime.Lock()
-		defer selectedRuntime.Unlock()
-		selectedRuntime.adapter = targetAdapter
-		selectedRuntime.homeDir = resolvedTarget.HomeDir
-		selectedRuntime.hermesHome = resolvedTarget.HermesHome
-		selectedRuntime.openClawAgentID = resolvedTarget.OpenClawAgentID
-		selectedRuntime.runtimeURL, targetErr = r.targetRuntimeURL(binding, target)
-		if targetErr != nil {
-			return fmt.Errorf("resolve config refresh runtime endpoint: %w", targetErr)
-		}
-		selectedRuntime.configured = true
+		reconciler.setTarget(refresh.target, refresh.epoch)
 		return nil
 	}
-	if err := r.replayActiveRun(sessionCtx, binding, session, adapter, runObservations, writeFrame); err != nil {
-		return err
+	if accepted.ConnectAccepted.ProtocolVersion != externalagentprotocol.ProtocolVersionV4 {
+		if err := r.replayActiveRun(sessionCtx, binding, session, adapter, runObservations, writeFrame); err != nil {
+			return err
+		}
+	} else {
+		// V4 replay is fenced behind the API-selected target and its reconciler.
+		go func() {
+			ticker := time.NewTicker(250 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-sessionCtx.Done():
+					return
+				case <-ticker.C:
+					snapshot := reconciler.snapshotCopy()
+					if snapshot.Target == nil || snapshot.Adapter == nil || !canStartRunWithReadiness(snapshot.Detection.State, snapshot.WakeProbeAt) {
+						continue
+					}
+					if err := r.replayActiveRun(sessionCtx, binding, session, snapshot.Adapter, runObservations, writeFrame); err != nil {
+						return
+					}
+					return
+				}
+			}
+		}()
 	}
 	if r.Store != nil {
 		if latest, ok := r.Store.Binding(binding.ConnectionID); ok && strings.TrimSpace(latest.ActiveRunID) != "" && strings.TrimSpace(latest.ActiveNativeRunID) != "" {
@@ -597,7 +644,11 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			case <-ticker.C:
 				_ = r.recordHeartbeat(binding, r.now())
 				heartbeatAdapter, readiness := sessionRuntime()
-				_ = writeFrame(session.HeartbeatFrameWithDetection(readiness, lastSessionWakeProbeAt()))
+				snapshot := runtimeSnapshot{}
+				if reconciler != nil {
+					snapshot = reconciler.snapshotCopy()
+				}
+				_ = writeFrame(session.HeartbeatFrameWithDetectionAndTarget(readiness, lastSessionWakeProbeAt(), snapshot.TargetRevision, snapshot.TargetEpoch))
 				_ = writePing()
 				_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, heartbeatAdapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
 			case <-inventoryTicker.C:
@@ -636,20 +687,45 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
+			wakeSnapshot := runtimeSnapshot{}
+			if reconciler != nil {
+				initialSnapshot := reconciler.snapshotCopy()
+				if initialSnapshot.Target == nil {
+					continue
+				}
+				wakeContext := sessionCtx
+				cancelWake := func() {}
+				if !frame.WakeProbe.DeadlineAt.IsZero() {
+					wakeContext, cancelWake = context.WithDeadline(sessionCtx, frame.WakeProbe.DeadlineAt)
+				}
+				var ok bool
+				wakeSnapshot, ok = reconciler.waitForWakeable(wakeContext, initialSnapshot.Epoch)
+				cancelWake()
+				if !ok {
+					continue
+				}
+			}
 			wakeAdapter, readiness := sessionRuntime()
+			if reconciler != nil {
+				wakeAdapter = wakeSnapshot.Adapter
+				readiness = wakeSnapshot.Detection
+			}
 			if !wakeProbeSucceeded(readiness.State) {
 				continue
 			}
 			probedAt := r.now()
+			if reconciler != nil && !reconciler.recordWakeProbe(probedAt, wakeSnapshot.Epoch) {
+				continue
+			}
 			_ = r.recordWakeProbe(binding, probedAt)
 			recordSessionWakeProbe(probedAt)
-			accepted := session.WakeProbeAcceptedFrame(frame.WakeProbe.ProbeID)
+			accepted := session.WakeProbeAcceptedFrameForRequestWithTarget(frame, wakeSnapshot.TargetRevision, wakeSnapshot.TargetEpoch)
 			commandCache.storeReply(frame, accepted)
 			if err := writeFrame(accepted); err != nil {
 				return fmt.Errorf("write wake probe ack: %w", err)
 			}
 			_, wakeReadiness := sessionRuntime()
-			if err := writeFrame(session.HeartbeatFrameWithDetection(wakeReadiness, lastSessionWakeProbeAt())); err != nil {
+			if err := writeFrame(session.HeartbeatFrameWithDetectionAndTarget(wakeReadiness, lastSessionWakeProbeAt(), wakeSnapshot.TargetRevision, wakeSnapshot.TargetEpoch)); err != nil {
 				return fmt.Errorf("write wake probe heartbeat: %w", err)
 			}
 			_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, wakeAdapter, binding, wakeReadiness, lastSessionWakeProbeAt, writeFrame)
@@ -657,15 +733,47 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if frame.ConfigRefresh == nil {
 				continue
 			}
-			if frame.ConfigRefresh.RuntimeTarget == nil {
+			if frame.ConfigRefresh.RuntimeTarget == nil && !frame.ConfigRefresh.ClearRuntimeTarget {
 				return fmt.Errorf("runtime target required for config refresh")
 			}
-			if r.bindingHasActiveRun(binding) {
-				pendingRuntimeTarget = cloneRuntimeTarget(frame.ConfigRefresh.RuntimeTarget)
+			refresh := pendingRefresh{
+				target:   cloneRuntimeTarget(frame.ConfigRefresh.RuntimeTarget),
+				clear:    frame.ConfigRefresh.ClearRuntimeTarget,
+				revision: frame.ConfigRefresh.SelectionRevision,
+				epoch:    frame.ConfigRefresh.TargetEpoch,
+			}
+			if refresh.target != nil && refresh.revision == 0 {
+				refresh.revision = refresh.target.SelectionRevision
+			}
+			deferRefresh := r.bindingHasActiveRun(binding)
+			if deferRefresh && reconciler != nil && reconciler.snapshotCopy().Target == nil {
+				// A reconnect has no in-memory target. Apply the first API-selected
+				// target so a persisted active run can be replayed and recovered.
+				deferRefresh = false
+			}
+			if deferRefresh {
+				pendingRuntimeRefresh = &refresh
 				log.Printf("connector runtime target refresh deferred connection_id=%s active_run_id=%s", binding.ConnectionID, r.activeRunID(binding))
 				continue
 			}
-			if err := applyConfigRefresh(frame.ConfigRefresh.RuntimeTarget); err != nil {
+			if err := applyConfigRefresh(refresh); err != nil {
+				return err
+			}
+		case externalagentprotocol.FrameTypeConfigClear:
+			if frame.ConfigClear == nil || frame.ConfigClear.TargetSelectionRevision <= 0 {
+				return fmt.Errorf("target selection revision required for config clear")
+			}
+			refresh := pendingRefresh{
+				clear:    true,
+				revision: frame.ConfigClear.TargetSelectionRevision,
+				epoch:    frame.ConfigClear.TargetEpoch,
+			}
+			if r.bindingHasActiveRun(binding) {
+				pendingRuntimeRefresh = &refresh
+				log.Printf("connector runtime target clear deferred connection_id=%s active_run_id=%s", binding.ConnectionID, r.activeRunID(binding))
+				continue
+			}
+			if err := applyConfigRefresh(refresh); err != nil {
 				return err
 			}
 		case externalagentprotocol.FrameTypeRunTerminalAck:
@@ -676,10 +784,10 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 			if err := r.clearRunState(binding, frame.RunID); err != nil {
 				return fmt.Errorf("clear acknowledged run state: %w", err)
 			}
-			if pendingRuntimeTarget != nil {
-				target := pendingRuntimeTarget
-				pendingRuntimeTarget = nil
-				if err := applyConfigRefresh(target); err != nil {
+			if pendingRuntimeRefresh != nil {
+				refresh := *pendingRuntimeRefresh
+				pendingRuntimeRefresh = nil
+				if err := applyConfigRefresh(refresh); err != nil {
 					return err
 				}
 			}
@@ -725,37 +833,22 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				continue
 			}
 			runAdapter := adapter
-			runHomeDir := ""
-			runHermesHome := ""
-			runRuntimeURL := ""
+			readiness := runtime.Detection{}
 			if accepted.ConnectAccepted.ProtocolVersion == externalagentprotocol.ProtocolVersionV4 {
-				var targetErr error
-				var resolvedTarget targetinventory.ResolvedTarget
-				runAdapter, resolvedTarget, targetErr = r.targetAdapter(binding, frame.RunStart.RuntimeTarget)
-				if targetErr != nil {
-					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, targetErr.Error())
+				snapshot := reconciler.snapshotCopy()
+				if snapshot.Target == nil || !runtimeTargetsEqual(snapshot.Target, frame.RunStart.RuntimeTarget) || snapshot.Adapter == nil {
+					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: selected target is unavailable")
 					commandCache.storeReply(frame, failed)
 					if writeErr := writeFrame(failed); writeErr != nil {
 						return fmt.Errorf("write runtime target failure: %w", writeErr)
 					}
 					continue
 				}
-				runHomeDir = resolvedTarget.HomeDir
-				runHermesHome = resolvedTarget.HermesHome
-				binding.OpenClawAgentID = resolvedTarget.OpenClawAgentID
-				runRuntimeURL, targetErr = r.targetRuntimeURL(binding, frame.RunStart.RuntimeTarget)
-				if targetErr != nil {
-					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, targetErr.Error())
-					commandCache.storeReply(frame, failed)
-					if writeErr := writeFrame(failed); writeErr != nil {
-						return fmt.Errorf("write runtime endpoint failure: %w", writeErr)
-					}
-					continue
-				}
-			}
-			readiness := r.bindingReadiness(runAdapter, binding)
-			if runHomeDir != "" {
-				readiness = r.bindingReadinessAtHome(runAdapter, binding, runHomeDir, runHermesHome, runRuntimeURL)
+				runAdapter = snapshot.Adapter
+				binding.OpenClawAgentID = snapshot.Resolved.OpenClawAgentID
+				readiness = snapshot.Detection
+			} else {
+				readiness = r.bindingReadiness(runAdapter, binding)
 			}
 			if !canStartRunWithReadiness(readiness.State, lastSessionWakeProbeAt()) {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
@@ -766,7 +859,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				continue
 			}
 			if err := r.activateRun(binding, frame); err != nil {
-				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, safeDiagnosticNote(err.Error()))
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run activation failure: %w", writeErr)
@@ -782,7 +875,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				Metadata:               frame.RunStart.Metadata,
 			})
 			if err != nil {
-				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, err.Error())
+				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, safeDiagnosticNote(err.Error()))
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run failure: %w", writeErr)
@@ -830,7 +923,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 						return
 					}
 					reason := externalagentprotocol.TerminalReasonFailed
-					output := err.Error()
+					output := safeDiagnosticNote(err.Error())
 					if errors.Is(observeCtx.Err(), context.DeadlineExceeded) {
 						reason = externalagentprotocol.TerminalReasonExpired
 						output = "external agent run deadline exceeded"
@@ -1179,7 +1272,7 @@ func (r Runner) observeActiveRun(ctx context.Context, binding config.Binding, se
 			return
 		}
 		reason := externalagentprotocol.TerminalReasonFailed
-		output := err.Error()
+		output := safeDiagnosticNote(err.Error())
 		if errors.Is(observeCtx.Err(), context.DeadlineExceeded) {
 			reason = externalagentprotocol.TerminalReasonExpired
 			output = "external agent run deadline exceeded"
@@ -1253,7 +1346,7 @@ func (r Runner) activateRun(binding config.Binding, frame externalagentprotocol.
 
 func runRecordFailureTerminal(adapter runtime.Adapter, session bridge.Session, frame externalagentprotocol.Frame, nativeRunID string, recordErr error) externalagentprotocol.Frame {
 	_ = adapter.CancelRun(strings.TrimSpace(nativeRunID))
-	failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, recordErr.Error())
+	failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, safeDiagnosticNote(recordErr.Error()))
 	if failed.RunTerminal != nil {
 		failed.RunTerminal.NativeRunID = strings.TrimSpace(nativeRunID)
 	}
@@ -1370,19 +1463,23 @@ func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding
 }
 
 func (r Runner) bindingReadinessAtHome(adapter runtime.Adapter, binding config.Binding, homeDir string, hermesHome string, runtimeURLs ...string) runtime.Detection {
-	detection := adapter.Detect()
+	ctx, cancel := context.WithTimeout(context.Background(), r.reconcileAttemptTimeout())
+	defer cancel()
+	return r.bindingReadinessAtHomeContext(ctx, adapter, binding, homeDir, hermesHome, runtimeURLs...)
+}
+
+func (r Runner) bindingReadinessAtHomeContext(ctx context.Context, adapter runtime.Adapter, binding config.Binding, homeDir string, hermesHome string, runtimeURLs ...string) runtime.Detection {
+	detection := runtime.DetectContext(ctx, adapter)
 	if detection.State != runtime.AdapterStateReady {
 		return detection
 	}
 	verificationBinding := binding
 	verificationBinding.HermesHome = strings.TrimSpace(hermesHome)
-	verifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	runtimeURL := ""
 	if len(runtimeURLs) > 0 {
 		runtimeURL = runtimeURLs[0]
 	}
-	verify := mcp.VerifyBindingWithLiveAt(verifyCtx, homeDir, verificationBinding, nil, runtimeURL)
+	verify := mcp.VerifyBindingWithLiveAt(ctx, homeDir, verificationBinding, nil, runtimeURL)
 	detection.State = verify.State
 	detection.Note = verify.Note
 	detection.DiagnosticCode = verify.DiagnosticCode
@@ -1427,8 +1524,9 @@ func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
 	return adapter
 }
 
-// adapterForRuntimeTarget resolves the API-selected account/profile at dispatch
-// time. It deliberately keeps home and profile paths out of Binding storage.
+// adapterForRuntimeTarget constructs an adapter for the API-selected
+// account/profile. It deliberately keeps home and profile paths out of Binding
+// storage. Runtime readiness and startup belong to the session reconciler.
 func (r Runner) adapterForRuntimeTarget(binding config.Binding, target *externalagentprotocol.RuntimeTarget) (runtime.Adapter, error) {
 	adapter, _, err := r.targetAdapter(binding, target)
 	return adapter, err
@@ -1449,12 +1547,6 @@ func (r Runner) targetAdapter(binding config.Binding, target *externalagentproto
 			return nil, targetinventory.ResolvedTarget{}, err
 		}
 		adapter := runtime.NewHermesAdapterForHome(runtimeURL, resolvedTarget.HermesHome)
-		if adapter.Detect().State == runtime.AdapterStateRuntimeStopped {
-			paths := hermessetup.ResolvePaths(resolvedTarget.HomeDir, resolvedTarget.HermesHome)
-			if _, err := hermessetup.TryStartGatewayForPathsAt(paths, hermessetup.ProcessIdentity{Username: resolvedTarget.Username, HomeDir: resolvedTarget.HomeDir, UID: resolvedTarget.UID, GID: resolvedTarget.GID, GroupIDs: resolvedTarget.GroupIDs}, runtimeURL); err != nil {
-				return nil, targetinventory.ResolvedTarget{}, err
-			}
-		}
 		return adapter, resolvedTarget, nil
 	case runtime.AdapterKindOpenClaw:
 		resolved, err := openclawauth.Resolve(openclawauth.Options{
@@ -1479,16 +1571,6 @@ func (r Runner) targetAdapter(binding config.Binding, target *externalagentproto
 			return nil, targetinventory.ResolvedTarget{}, err
 		}
 		adapter := runtime.NewOpenClawAdapterWithAuth(runtimeURL, resolved.Auth, resolvedTarget.OpenClawAgentID)
-		if adapter.Detect().State == runtime.AdapterStateRuntimeMissing && openclawauth.GatewayIsLoopback(runtimeURL) {
-			port, portErr := targetruntime.Port(target, binding.BridgePrivateKey)
-			if portErr != nil {
-				return nil, targetinventory.ResolvedTarget{}, portErr
-			}
-			identity := hermessetup.ProcessIdentity{Username: resolvedTarget.Username, HomeDir: resolvedTarget.HomeDir, UID: resolvedTarget.UID, GID: resolvedTarget.GID, GroupIDs: resolvedTarget.GroupIDs}
-			if _, startErr := openclawsetup.TryStartGatewayForHomeAt(resolvedTarget.HomeDir, identity, port, func() bool { return openclawauth.GatewayReachable(runtimeURL) }); startErr != nil {
-				return nil, targetinventory.ResolvedTarget{}, startErr
-			}
-		}
 		return adapter, resolvedTarget, nil
 	default:
 		return nil, targetinventory.ResolvedTarget{}, fmt.Errorf("unsupported runtime target")
@@ -1614,7 +1696,7 @@ func detectionCapabilities(detection runtime.Detection, lastWakeProbeAt *time.Ti
 		{
 			Kind:       externalagentprotocol.CapabilityKindRuntimeHealth,
 			Status:     status,
-			Label:      strings.TrimSpace(detection.Note),
+			Label:      safeDiagnosticNote(detection.Note),
 			ReportedAt: reportedAt.UTC(),
 		},
 	}
@@ -1747,14 +1829,11 @@ func getenv(key string) string {
 }
 
 func canStartRunWithReadiness(state runtime.AdapterState, lastWakeProbeAt *time.Time) bool {
-	if state == runtime.AdapterStateReady {
-		return true
-	}
 	return state == runtime.AdapterStateMCPVerified && lastWakeProbeAt != nil && !lastWakeProbeAt.IsZero()
 }
 
 func wakeProbeSucceeded(state runtime.AdapterState) bool {
-	return state == runtime.AdapterStateReady || state == runtime.AdapterStateMCPVerified
+	return state == runtime.AdapterStateMCPVerified
 }
 
 func (r Runner) reconnectMin() time.Duration {

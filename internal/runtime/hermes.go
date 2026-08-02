@@ -78,11 +78,21 @@ func (adapter HermesAdapter) Kind() AdapterKind {
 }
 
 func (adapter HermesAdapter) Detect() Detection {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return adapter.DetectContext(ctx)
+}
+
+func (adapter HermesAdapter) DetectContext(ctx context.Context) Detection {
 	if err := adapter.validateLoopbackBaseURL(); err != nil {
 		return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeMissing, Note: err.Error()}
 	}
 	client := adapter.client()
-	resp, err := client.Get(adapter.BaseURL + "/health")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, adapter.BaseURL+"/health", nil)
+	if err != nil {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateRuntimeMissing, Note: err.Error()}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return adapter.unavailableDetection("Hermes API unavailable")
 	}
@@ -93,13 +103,16 @@ func (adapter HermesAdapter) Detect() Detection {
 	if adapter.APIKey == "" {
 		return Detection{Kind: AdapterKindHermes, State: AdapterStateAuthMissing, Note: "HERMES_API_SERVER_KEY is required"}
 	}
-	if detection, failed := adapter.probeOptionalAuthenticatedEndpoint("/health/detailed"); failed {
+	if detection, failed := adapter.probeOptionalAuthenticatedEndpoint(ctx, "/health/detailed"); failed {
 		return detection
 	}
-	if detection, failed := adapter.probeOptionalAuthenticatedEndpoint("/v1/models"); failed {
+	if detection, failed := adapter.probeOptionalAuthenticatedEndpoint(ctx, "/v1/models"); failed {
 		return detection
 	}
-	req, _ := http.NewRequest(http.MethodGet, adapter.BaseURL+"/v1/capabilities", nil)
+	req, err = http.NewRequestWithContext(ctx, http.MethodGet, adapter.BaseURL+"/v1/capabilities", nil)
+	if err != nil {
+		return Detection{Kind: AdapterKindHermes, State: AdapterStateCapabilityMissing, Note: err.Error()}
+	}
 	req.Header.Set("Authorization", "Bearer "+adapter.APIKey)
 	resp, err = client.Do(req)
 	if err != nil {
@@ -178,8 +191,8 @@ func (adapter HermesAdapter) fetchHermesCapabilities(ctx context.Context) (herme
 	return capabilities, nil
 }
 
-func (adapter HermesAdapter) probeOptionalAuthenticatedEndpoint(path string) (Detection, bool) {
-	req, err := http.NewRequest(http.MethodGet, adapter.BaseURL+path, nil)
+func (adapter HermesAdapter) probeOptionalAuthenticatedEndpoint(ctx context.Context, path string) (Detection, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, adapter.BaseURL+path, nil)
 	if err != nil {
 		return Detection{Kind: AdapterKindHermes, State: AdapterStateCapabilityMissing, Note: err.Error()}, true
 	}

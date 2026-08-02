@@ -109,6 +109,7 @@ const (
 	FrameTypeRunTerminalAck     FrameType = "run.terminal_ack"
 	FrameTypeRunCancel          FrameType = "run.cancel"
 	FrameTypeConfigRefresh      FrameType = "config.refresh"
+	FrameTypeConfigClear        FrameType = "config.clear"
 	FrameTypeTokenRevoked       FrameType = "token.revoked"
 	FrameTypeServerDraining     FrameType = "server.draining"
 	FrameTypeShutdown           FrameType = "shutdown"
@@ -118,29 +119,37 @@ const (
 type DiagnosticCode string
 
 const (
-	DiagnosticCodeRuntimeMissing         DiagnosticCode = "runtime_missing"
-	DiagnosticCodeRuntimeStopped         DiagnosticCode = "runtime_stopped"
-	DiagnosticCodeAuthMissing            DiagnosticCode = "auth_missing"
-	DiagnosticCodeCapabilityMissing      DiagnosticCode = "capability_missing"
-	DiagnosticCodeMCPConfigMissing       DiagnosticCode = "mcp_config_missing"
-	DiagnosticCodeMCPConfigParseError    DiagnosticCode = "mcp_config_parse_error"
-	DiagnosticCodeMCPConfigConflict      DiagnosticCode = "mcp_config_conflict"
-	DiagnosticCodeMCPTokenMissing        DiagnosticCode = "mcp_token_missing"
-	DiagnosticCodeMCPTokenRejected       DiagnosticCode = "mcp_token_rejected"
-	DiagnosticCodeMCPEndpointUnreachable DiagnosticCode = "mcp_endpoint_unreachable"
-	DiagnosticCodeNativeMCPUnreachable   DiagnosticCode = "native_mcp_unreachable"
-	DiagnosticCodeMCPRestartRequired     DiagnosticCode = "mcp_restart_required"
-	DiagnosticCodeWakeProbeFailed        DiagnosticCode = "wake_probe_failed"
-	DiagnosticCodeRuntimeError           DiagnosticCode = "runtime_error"
+	DiagnosticCodeRuntimeMissing          DiagnosticCode = "runtime_missing"
+	DiagnosticCodeRuntimeStopped          DiagnosticCode = "runtime_stopped"
+	DiagnosticCodeAuthMissing             DiagnosticCode = "auth_missing"
+	DiagnosticCodeCapabilityMissing       DiagnosticCode = "capability_missing"
+	DiagnosticCodeMCPConfigMissing        DiagnosticCode = "mcp_config_missing"
+	DiagnosticCodeMCPConfigParseError     DiagnosticCode = "mcp_config_parse_error"
+	DiagnosticCodeMCPConfigConflict       DiagnosticCode = "mcp_config_conflict"
+	DiagnosticCodeMCPTokenMissing         DiagnosticCode = "mcp_token_missing"
+	DiagnosticCodeMCPTokenRejected        DiagnosticCode = "mcp_token_rejected"
+	DiagnosticCodeMCPEndpointUnreachable  DiagnosticCode = "mcp_endpoint_unreachable"
+	DiagnosticCodeNativeMCPUnreachable    DiagnosticCode = "native_mcp_unreachable"
+	DiagnosticCodeMCPRestartRequired      DiagnosticCode = "mcp_restart_required"
+	DiagnosticCodeWakeProbeFailed         DiagnosticCode = "wake_probe_failed"
+	DiagnosticCodeRuntimeError            DiagnosticCode = "runtime_error"
+	DiagnosticCodeTargetSelectionRequired DiagnosticCode = "target_selection_required"
 )
 
 // RuntimeKind identifies a supported external local runtime.
 type RuntimeKind string
 
 const (
+	RuntimeKindAuto     RuntimeKind = "auto"
 	RuntimeKindHermes   RuntimeKind = "hermes"
 	RuntimeKindOpenClaw RuntimeKind = "openclaw"
 )
+
+// SupportedRuntimeKinds is the negotiation order used when a pairing command
+// requests --runtime auto. It describes protocol support, not local readiness.
+func SupportedRuntimeKinds() []RuntimeKind {
+	return []RuntimeKind{RuntimeKindHermes, RuntimeKindOpenClaw}
+}
 
 type ServiceScope string
 
@@ -285,6 +294,7 @@ type Frame struct {
 	RunTerminalAck    *RunTerminalAckPayload    `json:"run_terminal_ack,omitempty"`
 	RunCancel         *RunCancelPayload         `json:"run_cancel,omitempty"`
 	ConfigRefresh     *ConfigRefreshPayload     `json:"config_refresh,omitempty"`
+	ConfigClear       *ConfigClearPayload       `json:"config_clear,omitempty"`
 	TokenRevoked      *TokenRevokedPayload      `json:"token_revoked,omitempty"`
 	ServerDraining    *ServerDrainingPayload    `json:"server_draining,omitempty"`
 	Diagnostic        *DiagnosticPayload        `json:"diagnostic,omitempty"`
@@ -304,6 +314,7 @@ type ConnectPayload struct {
 	CredentialProof           string      `json:"credential_proof"`
 	CredentialProofNonce      string      `json:"credential_proof_nonce"`
 	CredentialProofUnix       int64       `json:"credential_proof_unix"`
+	SupportsTargetClear       bool        `json:"supports_target_clear"`
 }
 
 type ConnectAcceptedPayload struct {
@@ -319,24 +330,26 @@ type ConnectRejectedPayload struct {
 }
 
 type HeartbeatPayload struct {
-	ConnectionStatus       ConnectionStatus     `json:"connection_status"`
-	ReadinessStatus        ReadinessStatus      `json:"readiness_status"`
-	RuntimeKind            RuntimeKind          `json:"runtime_kind"`
-	ServiceScope           ServiceScope         `json:"service_scope,omitempty"`
-	ConnectionGeneration   int64                `json:"connection_generation"`
-	RuntimeLabel           string               `json:"runtime_label,omitempty"`
-	Hostname               string               `json:"hostname,omitempty"`
-	NativeMCPServerName    string               `json:"native_mcp_server_name,omitempty"`
-	NativeMCPToolNamespace string               `json:"native_mcp_tool_namespace,omitempty"`
-	NativeMCPToolPrefix    string               `json:"native_mcp_tool_prefix,omitempty"`
-	NativeToolNamingRule   NativeToolNamingRule `json:"native_tool_naming_rule,omitempty"`
-	ConnectorVersion       string               `json:"connector_version"`
-	GitCommit              string               `json:"git_commit,omitempty"`
-	OS                     string               `json:"os,omitempty"`
-	Arch                   string               `json:"arch,omitempty"`
-	ReleaseChannel         string               `json:"release_channel,omitempty"`
-	LastWakeProbeAt        *time.Time           `json:"last_wake_probe_at,omitempty"`
-	DiagnosticCode         DiagnosticCode       `json:"diagnostic_code,omitempty"`
+	ConnectionStatus        ConnectionStatus     `json:"connection_status"`
+	ReadinessStatus         ReadinessStatus      `json:"readiness_status"`
+	RuntimeKind             RuntimeKind          `json:"runtime_kind"`
+	ServiceScope            ServiceScope         `json:"service_scope,omitempty"`
+	ConnectionGeneration    int64                `json:"connection_generation"`
+	RuntimeLabel            string               `json:"runtime_label,omitempty"`
+	Hostname                string               `json:"hostname,omitempty"`
+	NativeMCPServerName     string               `json:"native_mcp_server_name,omitempty"`
+	NativeMCPToolNamespace  string               `json:"native_mcp_tool_namespace,omitempty"`
+	NativeMCPToolPrefix     string               `json:"native_mcp_tool_prefix,omitempty"`
+	NativeToolNamingRule    NativeToolNamingRule `json:"native_tool_naming_rule,omitempty"`
+	ConnectorVersion        string               `json:"connector_version"`
+	GitCommit               string               `json:"git_commit,omitempty"`
+	OS                      string               `json:"os,omitempty"`
+	Arch                    string               `json:"arch,omitempty"`
+	ReleaseChannel          string               `json:"release_channel,omitempty"`
+	LastWakeProbeAt         *time.Time           `json:"last_wake_probe_at,omitempty"`
+	DiagnosticCode          DiagnosticCode       `json:"diagnostic_code,omitempty"`
+	TargetSelectionRevision int64                `json:"target_selection_revision,omitempty"`
+	TargetEpoch             uint64               `json:"target_epoch,omitempty"`
 }
 
 type CapabilitiesPayload struct {
@@ -371,9 +384,11 @@ type WakeProbePayload struct {
 }
 
 type WakeProbeAcceptedPayload struct {
-	ProbeID     string      `json:"probe_id"`
-	RuntimeKind RuntimeKind `json:"runtime_kind"`
-	AcceptedAt  time.Time   `json:"accepted_at"`
+	ProbeID                 string      `json:"probe_id"`
+	RuntimeKind             RuntimeKind `json:"runtime_kind"`
+	AcceptedAt              time.Time   `json:"accepted_at"`
+	TargetSelectionRevision int64       `json:"target_selection_revision,omitempty"`
+	TargetEpoch             uint64      `json:"target_epoch,omitempty"`
 }
 
 type RunStartPayload struct {
@@ -403,8 +418,19 @@ type RuntimeTarget struct {
 // TargetInventoryPayload contains browser-safe candidates discovered on the Connector host.
 type TargetInventoryPayload struct {
 	InventoryGeneration int64                     `json:"inventory_generation"`
+	DiscoveryStatus     DiscoveryStatus           `json:"discovery_status,omitempty"`
 	Accounts            []RuntimeAccountCandidate `json:"accounts"`
 }
+
+// DiscoveryStatus describes whether an inventory is authoritative. Unknown
+// remains the compatibility value for older Connectors that omit the field.
+type DiscoveryStatus string
+
+const (
+	DiscoveryStatusUnknown  DiscoveryStatus = "unknown"
+	DiscoveryStatusComplete DiscoveryStatus = "complete"
+	DiscoveryStatusDegraded DiscoveryStatus = "degraded"
+)
 
 // RuntimeAccountCandidate is one Connector-accessible local account.
 type RuntimeAccountCandidate struct {
@@ -469,6 +495,14 @@ type ConfigRefreshPayload struct {
 	NativeMCPServerName    string         `json:"native_mcp_server_name,omitempty"`
 	NativeMCPToolNamespace string         `json:"native_mcp_tool_namespace,omitempty"`
 	RuntimeTarget          *RuntimeTarget `json:"runtime_target,omitempty"`
+	ClearRuntimeTarget     bool           `json:"clear_runtime_target,omitempty"`
+	SelectionRevision      int64          `json:"selection_revision,omitempty"`
+	TargetEpoch            uint64         `json:"target_epoch,omitempty"`
+}
+
+type ConfigClearPayload struct {
+	TargetSelectionRevision int64  `json:"target_selection_revision"`
+	TargetEpoch             uint64 `json:"target_epoch"`
 }
 
 type TokenRevokedPayload struct {

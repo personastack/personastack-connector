@@ -59,6 +59,7 @@ const (
 	AdapterStateMCPVerified
 	AdapterStateWakeProbeFailed
 	AdapterStateReady
+	AdapterStateTargetSelectionRequired
 )
 
 func (state AdapterState) String() string {
@@ -81,6 +82,8 @@ func (state AdapterState) String() string {
 		return "wake_probe_failed"
 	case AdapterStateReady:
 		return "ready"
+	case AdapterStateTargetSelectionRequired:
+		return "target_selection_required"
 	default:
 		return "unknown"
 	}
@@ -100,6 +103,23 @@ type Adapter interface {
 	StreamOrPollRun(ctx context.Context, nativeRunID string, handle RunEventHandler) (RunResult, error)
 	CancelRun(nativeRunID string) error
 	Diagnose() Detection
+}
+
+// ContextDetector is implemented by adapters whose health probes can honor a
+// reconciliation deadline. The Adapter interface remains compatible with
+// existing integrations and test doubles.
+type ContextDetector interface {
+	DetectContext(context.Context) Detection
+}
+
+func DetectContext(ctx context.Context, adapter Adapter) Detection {
+	if adapter == nil {
+		return Detection{Kind: AdapterKindAuto, State: AdapterStateRuntimeMissing, Note: "runtime adapter unavailable"}
+	}
+	if detector, ok := adapter.(ContextDetector); ok {
+		return detector.DetectContext(ctx)
+	}
+	return adapter.Detect()
 }
 
 type NativeCapabilitySource string

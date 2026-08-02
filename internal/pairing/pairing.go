@@ -76,6 +76,7 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 	payload := externalagentprotocol.PairingExchangeRequest{
 		Code:                      code,
 		RuntimeKind:               runtimeKind,
+		SupportedRuntimeKinds:     supportedRuntimeKinds(request.RuntimeKind),
 		ConnectorVersion:          buildinfo.VersionString(),
 		ProtocolVersion:           externalagentprotocol.ProtocolVersionV4,
 		SupportedProtocolVersions: externalagentprotocol.SupportedProtocolVersions(),
@@ -127,10 +128,25 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 	if err := json.NewDecoder(response.Body).Decode(&decoded); err != nil {
 		return Result{}, fmt.Errorf("decode pairing response: %w", err)
 	}
+	negotiatedKind := decoded.RuntimeKind
+	if negotiatedKind == externalagentprotocol.RuntimeKindAuto || negotiatedKind == "" {
+		if runtimeKind != externalagentprotocol.RuntimeKindAuto {
+			negotiatedKind = runtimeKind
+		} else {
+			return Result{}, fmt.Errorf("pairing response did not negotiate a runtime kind")
+		}
+	}
+	if runtimeKind != externalagentprotocol.RuntimeKindAuto && negotiatedKind != runtimeKind {
+		return Result{}, fmt.Errorf("pairing response changed explicitly selected runtime kind")
+	}
+	if negotiatedKind != externalagentprotocol.RuntimeKindHermes && negotiatedKind != externalagentprotocol.RuntimeKindOpenClaw {
+		return Result{}, fmt.Errorf("pairing response negotiated unsupported runtime kind")
+	}
+	negotiatedAdapterKind := adapterKindForExternalRuntime(negotiatedKind)
 	return Result{Binding: config.Binding{
 		ConnectionID:         config.ConnectionID(strings.TrimSpace(decoded.ConnectionID)),
 		PersonaID:            config.PersonaID(strings.TrimSpace(decoded.PersonaID)),
-		ExternalAgentKind:    externalKindForRuntime(runtimeKind),
+		ExternalAgentKind:    externalKindForRuntime(negotiatedKind),
 		ConnectionGeneration: decoded.ConnectionGeneration,
 		GatewayWebsocketURL:  strings.TrimSpace(decoded.GatewayWebsocketURL),
 		BridgeCredentialID:   strings.TrimSpace(decoded.CredentialID),
@@ -140,7 +156,7 @@ func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
 		NativeMCPNamespace:   strings.TrimSpace(decoded.NativeMCPToolNamespace),
 		PersonaMCPURL:        strings.TrimSpace(decoded.PersonaMCPURL),
 		PersonaMCPToken:      strings.TrimSpace(decoded.PersonaMCPToken),
-		RuntimeKind:          request.RuntimeKind,
+		RuntimeKind:          negotiatedAdapterKind,
 		ReadinessState:       runtime.AdapterStateRuntimeMissing,
 		HasBridgeSecret:      true,
 		HasPersonaMCPToken:   strings.TrimSpace(decoded.PersonaMCPToken) != "",
@@ -163,11 +179,27 @@ func pairingCodeHash(code string) string {
 
 func runtimeKindForAdapter(kind runtime.AdapterKind) externalagentprotocol.RuntimeKind {
 	switch kind {
+	case runtime.AdapterKindAuto:
+		return externalagentprotocol.RuntimeKindAuto
 	case runtime.AdapterKindOpenClaw:
 		return externalagentprotocol.RuntimeKindOpenClaw
 	default:
 		return externalagentprotocol.RuntimeKindHermes
 	}
+}
+
+func supportedRuntimeKinds(kind runtime.AdapterKind) []externalagentprotocol.RuntimeKind {
+	if kind != runtime.AdapterKindAuto {
+		return nil
+	}
+	return externalagentprotocol.SupportedRuntimeKinds()
+}
+
+func adapterKindForExternalRuntime(kind externalagentprotocol.RuntimeKind) runtime.AdapterKind {
+	if kind == externalagentprotocol.RuntimeKindOpenClaw {
+		return runtime.AdapterKindOpenClaw
+	}
+	return runtime.AdapterKindHermes
 }
 
 func externalKindForRuntime(kind externalagentprotocol.RuntimeKind) config.ExternalAgentKind {

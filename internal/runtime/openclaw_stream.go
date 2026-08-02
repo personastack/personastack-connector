@@ -58,7 +58,7 @@ func (adapter OpenClawAdapter) connectOperatorWithRetry(ctx context.Context) (*w
 		if err != nil {
 			return nil, err
 		}
-		if err := adapter.connectOperator(conn); err != nil {
+		if err := adapter.connectOperator(conn, ctx); err != nil {
 			var retryErr openClawRetryableError
 			if errorsAsOpenClawRetryable(err, &retryErr) {
 				conn.Close()

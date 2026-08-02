@@ -60,8 +60,8 @@ func TestDiscoverOmitsUnreadableOrMissingNonRootHomeWithoutFailure(t *testing.T)
 		effectiveUID = oldEffectiveUID
 	})
 	inventory, warnings := Discover(runtime.AdapterKindHermes)
-	if len(warnings) != 0 || len(inventory.Accounts) != 0 {
-		t.Fatalf("missing home must be graceful: inventory=%+v warnings=%v", inventory, warnings)
+	if len(warnings) == 0 || len(inventory.Accounts) != 0 || inventory.DiscoveryStatus != externalagentprotocol.DiscoveryStatusDegraded {
+		t.Fatalf("missing home must be degraded but usable: inventory=%+v warnings=%v", inventory, warnings)
 	}
 }
 
@@ -115,8 +115,8 @@ func TestDiscoverRootIncludesRootAndRegularUsersOnly(t *testing.T) {
 	})
 
 	inventory, warnings := Discover(runtime.AdapterKindHermes, "installation-secret")
-	if len(warnings) != 0 {
-		t.Fatalf("unexpected warnings: %v", warnings)
+	if len(warnings) == 0 || inventory.DiscoveryStatus != externalagentprotocol.DiscoveryStatusDegraded {
+		t.Fatalf("expected degraded discovery warnings: inventory=%+v warnings=%v", inventory, warnings)
 	}
 	if len(inventory.Accounts) != 2 || inventory.Accounts[0].Label != "alice" || inventory.Accounts[1].Label != "root" {
 		t.Fatalf("root discovery accounts = %+v", inventory.Accounts)

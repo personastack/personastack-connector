@@ -173,6 +173,24 @@ func TestHeartbeatFrameReportsDiagnosticCode(t *testing.T) {
 	}
 }
 
+func TestHeartbeatAndWakeProbeCarryTargetFence(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	session := testSession(t, publicKey, privateKey)
+	detection := runtime.Detection{State: runtime.AdapterStateMCPVerified}
+	probedAt := time.Now().UTC()
+	heartbeat := session.HeartbeatFrameWithDetectionAndTarget(detection, &probedAt, 4, 9)
+	if heartbeat.Heartbeat.TargetSelectionRevision != 4 || heartbeat.Heartbeat.TargetEpoch != 9 {
+		t.Fatalf("heartbeat target fence = %+v", heartbeat.Heartbeat)
+	}
+	accepted := session.WakeProbeAcceptedFrameForRequestWithTarget(externalagentprotocol.Frame{MessageID: "probe-1", WakeProbe: &externalagentprotocol.WakeProbePayload{ProbeID: "probe-1"}}, 4, 9)
+	if accepted.WakeProbeAccepted == nil || accepted.WakeProbeAccepted.TargetSelectionRevision != 4 || accepted.WakeProbeAccepted.TargetEpoch != 9 {
+		t.Fatalf("wake probe target fence = %+v", accepted.WakeProbeAccepted)
+	}
+}
+
 func TestHeartbeatFrameReportsServiceScope(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

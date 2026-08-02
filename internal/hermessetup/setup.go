@@ -274,10 +274,12 @@ func TryStartGatewayForPathsAs(paths Paths, identity ProcessIdentity) (bool, err
 // It lets one root-scoped Connector keep separately selected profiles from
 // sharing the default API listener.
 func TryStartGatewayForPathsAt(paths Paths, identity ProcessIdentity, baseURL string) (bool, error) {
-	return tryStartGatewayForPathsAt(paths, identity, baseURL)
+	return TryStartGatewayForPathsAtContext(context.Background(), paths, identity, baseURL)
 }
 
-func tryStartGatewayForPathsAt(paths Paths, identity ProcessIdentity, baseURL string) (bool, error) {
+// TryStartGatewayForPathsAtContext starts Hermes without allowing setup
+// polling to outlive the session reconciliation attempt.
+func TryStartGatewayForPathsAtContext(ctx context.Context, paths Paths, identity ProcessIdentity, baseURL string) (bool, error) {
 	port, err := loopbackPort(baseURL)
 	if err != nil {
 		return false, err
@@ -285,7 +287,7 @@ func tryStartGatewayForPathsAt(paths Paths, identity ProcessIdentity, baseURL st
 	if os.Getenv("PERSONASTACK_CONNECTOR_DISABLE_HERMES_GATEWAY_START") == "1" {
 		return false, nil
 	}
-	if err := probeHermesHealth(baseURL); err == nil {
+	if err := probeHermesHealthContext(ctx, baseURL); err == nil {
 		return false, nil
 	}
 	binary, err := hermesBinaryForPaths(paths)
@@ -301,12 +303,22 @@ func tryStartGatewayForPathsAt(paths Paths, identity ProcessIdentity, baseURL st
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := probeHermesHealth(baseURL); err == nil {
+		if err := probeHermesHealthContext(ctx, baseURL); err == nil {
 			return true, nil
 		}
-		time.Sleep(250 * time.Millisecond)
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		case <-timer.C:
+		}
 	}
 	return true, nil
+}
+
+func tryStartGatewayForPathsAt(paths Paths, identity ProcessIdentity, baseURL string) (bool, error) {
+	return TryStartGatewayForPathsAtContext(context.Background(), paths, identity, baseURL)
 }
 
 func startGatewayWithArgs(paths Paths, identity ProcessIdentity, binary string, args []string) error {
@@ -480,8 +492,12 @@ func hasHermesConfig(path string) bool {
 }
 
 func probeHermesHealth(baseURL string) error {
+	return probeHermesHealthContext(context.Background(), baseURL)
+}
+
+func probeHermesHealthContext(ctx context.Context, baseURL string) error {
 	client := &http.Client{Timeout: 2 * time.Second}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL+"/health", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
 	if err != nil {
 		return err
 	}
