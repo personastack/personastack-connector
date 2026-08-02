@@ -1,0 +1,224 @@
+// Package targetinventory discovers browser-safe local runtime candidates.
+package targetinventory
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/user"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
+	connectorruntime "github.com/personastack/personastack-connector/internal/runtime"
+)
+
+type account struct {
+	username string
+	homeDir  string
+	uid      int
+}
+
+var currentUser = user.Current
+var readFile = os.ReadFile
+var readDir = os.ReadDir
+var stat = os.Stat
+var effectiveUID = os.Geteuid
+
+// Discover returns candidates visible to the effective Connector process. A
+// non-root Connector sees only its own home. Root also sees root and regular
+// local accounts. Errors for inaccessible individual homes are omitted so an
+// unprivileged install remains usable.
+func Discover(kind connectorruntime.AdapterKind, installationSecret ...string) (externalagentprotocol.TargetInventoryPayload, []error) {
+	secret := ""
+	if len(installationSecret) > 0 {
+		secret = strings.TrimSpace(installationSecret[0])
+	}
+	accounts, warnings := discoverAccounts()
+	result := externalagentprotocol.TargetInventoryPayload{Accounts: make([]externalagentprotocol.RuntimeAccountCandidate, 0, len(accounts))}
+	for _, account := range accounts {
+		profiles, profileWarnings := discoverProfiles(account, kind, secret)
+		warnings = append(warnings, profileWarnings...)
+		if len(profiles) == 0 {
+			continue
+		}
+		result.Accounts = append(result.Accounts, externalagentprotocol.RuntimeAccountCandidate{
+			CandidateID: accountID(account, secret),
+			Label:       account.username,
+			Profiles:    profiles,
+		})
+	}
+	return result, warnings
+}
+
+// Resolve verifies that an API-provided target is still currently discoverable.
+// It returns the user's home and the Hermes profile directory without persisting
+// either value in Connector state or transmitting it to PersonaStack.
+func Resolve(kind connectorruntime.AdapterKind, target *externalagentprotocol.RuntimeTarget, installationSecret ...string) (homeDir string, runtimeHome string, err error) {
+	if target == nil || target.RuntimeKind != protocolRuntimeKind(kind) {
+		return "", "", fmt.Errorf("runtime target required")
+	}
+	secret := ""
+	if len(installationSecret) > 0 {
+		secret = strings.TrimSpace(installationSecret[0])
+	}
+	inventory, _ := Discover(kind, secret)
+	for _, accountCandidate := range inventory.Accounts {
+		if accountCandidate.CandidateID != strings.TrimSpace(target.AccountCandidateID) {
+			continue
+		}
+		for _, profile := range accountCandidate.Profiles {
+			if profile.CandidateID != strings.TrimSpace(target.ProfileCandidateID) {
+				continue
+			}
+			accounts, _ := discoverAccounts()
+			for _, candidate := range accounts {
+				if accountID(candidate, secret) != accountCandidate.CandidateID {
+					continue
+				}
+				return candidate.homeDir, profileHome(candidate, kind, profile.CandidateID, secret), nil
+			}
+		}
+	}
+	return "", "", fmt.Errorf("selected runtime target is no longer available")
+}
+
+func discoverAccounts() ([]account, []error) {
+	if effectiveUID() != 0 {
+		current, err := currentUser()
+		if err != nil {
+			return nil, []error{fmt.Errorf("resolve current user: %w", err)}
+		}
+		uid, _ := strconv.Atoi(current.Uid)
+		return []account{{username: strings.TrimSpace(current.Username), homeDir: strings.TrimSpace(current.HomeDir), uid: uid}}, nil
+	}
+	raw, err := readFile("/etc/passwd")
+	if err != nil {
+		return nil, []error{fmt.Errorf("list local users: %w", err)}
+	}
+	minimumUID := 1000
+	if runtime.GOOS == "darwin" {
+		minimumUID = 500
+	}
+	seen := map[string]struct{}{}
+	accounts := []account{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 {
+			continue
+		}
+		uid, parseErr := strconv.Atoi(fields[2])
+		if parseErr != nil || (uid != 0 && uid < minimumUID) {
+			continue
+		}
+		username := strings.TrimSpace(fields[0])
+		homeDir := strings.TrimSpace(fields[5])
+		if username == "" || homeDir == "" || homeDir == "/" {
+			continue
+		}
+		key := username + "\x00" + homeDir
+		if _, found := seen[key]; found {
+			continue
+		}
+		seen[key] = struct{}{}
+		accounts = append(accounts, account{username: username, homeDir: homeDir, uid: uid})
+	}
+	sort.Slice(accounts, func(i int, j int) bool { return accounts[i].username < accounts[j].username })
+	return accounts, nil
+}
+
+func discoverProfiles(candidate account, kind connectorruntime.AdapterKind, installationSecret string) ([]externalagentprotocol.RuntimeProfileCandidate, []error) {
+	if strings.TrimSpace(candidate.homeDir) == "" {
+		return nil, nil
+	}
+	switch kind {
+	case connectorruntime.AdapterKindHermes:
+		base := filepath.Join(candidate.homeDir, ".hermes")
+		if _, err := stat(base); err != nil {
+			if os.IsNotExist(err) || os.IsPermission(err) {
+				return nil, nil
+			}
+			return nil, []error{fmt.Errorf("inspect Hermes home for %s: %w", candidate.username, err)}
+		}
+		profiles := []externalagentprotocol.RuntimeProfileCandidate{{CandidateID: profileID(candidate, "default", installationSecret), Label: "Default", RuntimeKind: externalagentprotocol.RuntimeKindHermes}}
+		entries, err := readDir(filepath.Join(base, "profiles"))
+		if err != nil {
+			if os.IsNotExist(err) || os.IsPermission(err) {
+				return profiles, nil
+			}
+			return profiles, []error{fmt.Errorf("list Hermes profiles for %s: %w", candidate.username, err)}
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || strings.TrimSpace(entry.Name()) == "" {
+				continue
+			}
+			profiles = append(profiles, externalagentprotocol.RuntimeProfileCandidate{CandidateID: profileID(candidate, entry.Name(), installationSecret), Label: entry.Name(), RuntimeKind: externalagentprotocol.RuntimeKindHermes})
+		}
+		sort.Slice(profiles[1:], func(i int, j int) bool { return profiles[i+1].Label < profiles[j+1].Label })
+		return profiles, nil
+	case connectorruntime.AdapterKindOpenClaw:
+		if _, err := stat(filepath.Join(candidate.homeDir, ".openclaw")); err != nil {
+			if os.IsNotExist(err) || os.IsPermission(err) {
+				return nil, nil
+			}
+			return nil, []error{fmt.Errorf("inspect OpenClaw home for %s: %w", candidate.username, err)}
+		}
+		return []externalagentprotocol.RuntimeProfileCandidate{{CandidateID: profileID(candidate, "default", installationSecret), Label: "Default", RuntimeKind: externalagentprotocol.RuntimeKindOpenClaw}}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func accountID(candidate account, installationSecret string) string {
+	return opaqueID(installationSecret, "account", candidate.username, candidate.homeDir)
+}
+func profileID(candidate account, name string, installationSecret string) string {
+	return opaqueID(installationSecret, "profile", candidate.username, candidate.homeDir, name)
+}
+
+func profileHome(candidate account, kind connectorruntime.AdapterKind, candidateID string, installationSecret string) string {
+	if kind != connectorruntime.AdapterKindHermes {
+		return ""
+	}
+	if candidateID == profileID(candidate, "default", installationSecret) {
+		return filepath.Join(candidate.homeDir, ".hermes")
+	}
+	entries, _ := readDir(filepath.Join(candidate.homeDir, ".hermes", "profiles"))
+	for _, entry := range entries {
+		if entry.IsDir() && candidateID == profileID(candidate, entry.Name(), installationSecret) {
+			return filepath.Join(candidate.homeDir, ".hermes", "profiles", entry.Name())
+		}
+	}
+	return ""
+}
+
+func opaqueID(parts ...string) string {
+	secret := ""
+	if len(parts) > 0 {
+		secret = parts[0]
+		parts = parts[1:]
+	}
+	key := []byte(secret)
+	if len(key) == 0 {
+		key = []byte("personastack-connector-unpaired")
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(strings.Join(parts, "\x00")))
+	return "rt_" + hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
+func protocolRuntimeKind(kind connectorruntime.AdapterKind) externalagentprotocol.RuntimeKind {
+	switch kind {
+	case connectorruntime.AdapterKindHermes:
+		return externalagentprotocol.RuntimeKindHermes
+	case connectorruntime.AdapterKindOpenClaw:
+		return externalagentprotocol.RuntimeKindOpenClaw
+	default:
+		return ""
+	}
+}

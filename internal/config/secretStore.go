@@ -21,6 +21,10 @@ var (
 )
 
 func storeBindingSecrets(binding Binding) (Binding, error) {
+	// Target choice belongs to PersonaStack. These former pair-time fields may
+	// appear in legacy state, but must never survive another local write.
+	binding.HermesHome = ""
+	binding.OpenClawAgentID = ""
 	connectionID := strings.TrimSpace(string(binding.ConnectionID))
 	if connectionID == "" {
 		return binding, nil
@@ -72,6 +76,10 @@ func storeBindingSecrets(binding Binding) (Binding, error) {
 }
 
 func loadBindingSecrets(binding Binding) Binding {
+	// Scrub legacy path and agent fields before any command can reuse them as a
+	// fallback target. The connector must await an API-selected runtime target.
+	binding.HermesHome = ""
+	binding.OpenClawAgentID = ""
 	connectionID := strings.TrimSpace(string(binding.ConnectionID))
 	if connectionID == "" {
 		return binding

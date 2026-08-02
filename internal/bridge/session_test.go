@@ -35,10 +35,10 @@ func TestConnectFrameSignsAPIVerifiableMessage(t *testing.T) {
 	if !ed25519.Verify(publicKey, []byte(CredentialProofMessage(frame)), signature) {
 		t.Fatal("signature did not verify")
 	}
-	if frame.Connect.ProtocolVersion != externalagentprotocol.ProtocolVersionV3 {
+	if frame.Connect.ProtocolVersion != externalagentprotocol.ProtocolVersionV4 {
 		t.Fatalf("protocol version: got=%s", frame.Connect.ProtocolVersion)
 	}
-	if len(frame.Connect.SupportedProtocolVersions) != 1 || frame.Connect.SupportedProtocolVersions[0] != externalagentprotocol.ProtocolVersionV3 {
+	if len(frame.Connect.SupportedProtocolVersions) != 1 || frame.Connect.SupportedProtocolVersions[0] != externalagentprotocol.ProtocolVersionV4 {
 		t.Fatalf("supported protocol versions: %+v", frame.Connect.SupportedProtocolVersions)
 	}
 	if frame.Connect.ConnectorVersion != buildinfo.VersionString() {

@@ -8,11 +8,11 @@ import (
 const (
 	// ProtocolVersionV2 identifies the legacy Connector websocket protocol version.
 	ProtocolVersionV2 = "external-agent-v2"
-	// ProtocolVersionV3 identifies the Connector websocket protocol version that carries run-frame connection generation.
-	ProtocolVersionV3 = "external-agent-v3"
+	// ProtocolVersionV4 identifies the Connector websocket protocol version that carries API-selected runtime targets.
+	ProtocolVersionV4 = "external-agent-v4"
 )
 
-var supportedProtocolVersions = []string{ProtocolVersionV3}
+var supportedProtocolVersions = []string{ProtocolVersionV4}
 
 // SupportedProtocolVersions returns the protocol versions this binary can speak, in preference order.
 func SupportedProtocolVersions() []string {
@@ -94,6 +94,7 @@ const (
 	FrameTypeConnectRejected    FrameType = "connect.rejected"
 	FrameTypeHeartbeat          FrameType = "heartbeat"
 	FrameTypeCapabilitiesReport FrameType = "capabilities.report"
+	FrameTypeTargetInventory    FrameType = "target_inventory.report"
 	FrameTypePing               FrameType = "ping"
 	FrameTypeWakeProbe          FrameType = "wake.probe"
 	FrameTypeWakeProbeAccepted  FrameType = "wake.probe.accepted"
@@ -272,6 +273,7 @@ type Frame struct {
 	ConnectRejected   *ConnectRejectedPayload   `json:"connect_rejected,omitempty"`
 	Heartbeat         *HeartbeatPayload         `json:"heartbeat,omitempty"`
 	Capabilities      *CapabilitiesPayload      `json:"capabilities,omitempty"`
+	TargetInventory   *TargetInventoryPayload   `json:"target_inventory,omitempty"`
 	WakeProbe         *WakeProbePayload         `json:"wake_probe,omitempty"`
 	WakeProbeAccepted *WakeProbeAcceptedPayload `json:"wake_probe_accepted,omitempty"`
 	RunStart          *RunStartPayload          `json:"run_start,omitempty"`
@@ -386,7 +388,37 @@ type RunStartPayload struct {
 	NativeMCPServerName    string            `json:"native_mcp_server_name"`
 	NativeMCPToolNamespace string            `json:"native_mcp_tool_namespace"`
 	DeadlineAt             time.Time         `json:"deadline_at"`
+	RuntimeTarget          *RuntimeTarget    `json:"runtime_target,omitempty"`
 	Metadata               map[string]string `json:"metadata,omitempty"`
+}
+
+// RuntimeTarget is the API-selected local runtime target. It contains no local path or UID.
+type RuntimeTarget struct {
+	AccountCandidateID string      `json:"account_candidate_id"`
+	ProfileCandidateID string      `json:"profile_candidate_id"`
+	RuntimeKind        RuntimeKind `json:"runtime_kind"`
+	SelectionRevision  int64       `json:"selection_revision"`
+}
+
+// TargetInventoryPayload contains browser-safe candidates discovered on the Connector host.
+type TargetInventoryPayload struct {
+	InventoryGeneration int64                     `json:"inventory_generation"`
+	Accounts            []RuntimeAccountCandidate `json:"accounts"`
+}
+
+// RuntimeAccountCandidate is one Connector-accessible local account.
+type RuntimeAccountCandidate struct {
+	CandidateID string                    `json:"candidate_id"`
+	Label       string                    `json:"label"`
+	Profiles    []RuntimeProfileCandidate `json:"profiles"`
+}
+
+// RuntimeProfileCandidate is one Connector-accessible runtime profile.
+type RuntimeProfileCandidate struct {
+	CandidateID string      `json:"candidate_id"`
+	Label       string      `json:"label"`
+	RuntimeKind RuntimeKind `json:"runtime_kind"`
+	Readiness   string      `json:"readiness,omitempty"`
 }
 
 type PromptContext struct {
@@ -433,9 +465,10 @@ type RunCancelPayload struct {
 }
 
 type ConfigRefreshPayload struct {
-	MCPURL                 string `json:"mcp_url,omitempty"`
-	NativeMCPServerName    string `json:"native_mcp_server_name,omitempty"`
-	NativeMCPToolNamespace string `json:"native_mcp_tool_namespace,omitempty"`
+	MCPURL                 string         `json:"mcp_url,omitempty"`
+	NativeMCPServerName    string         `json:"native_mcp_server_name,omitempty"`
+	NativeMCPToolNamespace string         `json:"native_mcp_tool_namespace,omitempty"`
+	RuntimeTarget          *RuntimeTarget `json:"runtime_target,omitempty"`
 }
 
 type TokenRevokedPayload struct {

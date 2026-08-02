@@ -68,15 +68,17 @@ external persona.
   command when recommended releases advance.
 - Each binding has one PersonaStack connection id, persona id, external agent
   kind, bridge credential, PersonaStack MCP credential, native MCP server name,
-  local runtime selection, optional Hermes profile home, and local readiness
-  state.
+  and local readiness state. It does not persist an account candidate, profile
+  candidate, Hermes home, or OpenClaw agent id.
 - Local assignment state is persisted until the API has acknowledged a terminal
   run event.
 - Redelivered `run.start` frames for the currently active run id must reuse the
   journaled native run id and resend accepted/started frames instead of starting
   a second local runtime run.
-- Connector websocket sessions advertise `external-agent-v3`. Connector-emitted
-  run lifecycle and terminal frames must include the active
+- Connector websocket sessions require `external-agent-v4`. The Connector
+  reports redacted account/profile inventory after connect. `run.start` carries
+  the API-selected opaque target and the Connector validates it again locally.
+  Connector-emitted run lifecycle and terminal frames must include the active
   binding `connection_generation` so the API can reject stale Connector session
   callbacks.
 - A `run.start` for a different run id while local state still has an active
@@ -162,6 +164,12 @@ not collect OpenClaw tokens, passwords, or device credentials.
 System service scope keeps the Connector bridge online before login. It must
 report runtime readiness honestly and must not claim `wakeable` until the native
 Hermes/OpenClaw runtime, native MCP configuration, and wake probe are live.
+Discovery authority is the daemon effective UID. A non-root daemon reports only
+its own accessible profiles. A root system daemon reports root plus eligible
+non-system local accounts. Discovery warnings are local diagnostics and never
+make pairing fail. Browser-visible inventory contains only opaque candidate IDs,
+safe labels, runtime kind, and readiness. It contains no paths, UIDs, or local
+credentials.
 
 The V1 Connector does not expose a local HTTP UI/control listener. CLI control
 is local process execution and native MCP uses stdio; any future local control

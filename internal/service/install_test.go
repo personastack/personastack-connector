@@ -89,7 +89,6 @@ func TestInstallerWritesSystemdSystemUnit(t *testing.T) {
 	unit := string(raw)
 	for _, want := range []string{
 		"After=network-online.target",
-		`Environment="HOME=` + homeDir + `"`,
 		`ExecStart="/opt/PersonaStack Connector/personastack-connector" run --foreground --service-scope linux_system_service`,
 		"Restart=always",
 		"RestartSec=30",
@@ -99,12 +98,17 @@ func TestInstallerWritesSystemdSystemUnit(t *testing.T) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)
 		}
 	}
+	for _, unwanted := range []string{"User=", "Environment=\"HOME=", "Environment=\"HERMES_HOME="} {
+		if strings.Contains(unit, unwanted) {
+			t.Fatalf("system Connector must run as root, found %q:\n%s", unwanted, unit)
+		}
+	}
 	if len(runner.commands) != 2 || !strings.Contains(runner.commands[1], "enable --now") {
 		t.Fatalf("unexpected commands: %+v", runner.commands)
 	}
 }
 
-func TestInstallerWritesHermesHomeToSystemdSystemUnit(t *testing.T) {
+func TestInstallerDoesNotWriteHermesHomeToSystemdSystemUnit(t *testing.T) {
 	homeDir := t.TempDir()
 	hermesHome := filepath.Join(homeDir, ".hermes", "profiles", "homeschool")
 	systemRoot := t.TempDir()
@@ -125,8 +129,8 @@ func TestInstallerWritesHermesHomeToSystemdSystemUnit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read unit: %v", err)
 	}
-	if !strings.Contains(string(raw), `Environment="HERMES_HOME=`+hermesHome+`"`) {
-		t.Fatalf("unit missing HERMES_HOME:\n%s", string(raw))
+	if strings.Contains(string(raw), hermesHome) || strings.Contains(string(raw), "HERMES_HOME") {
+		t.Fatalf("unit leaked selected Hermes home:\n%s", string(raw))
 	}
 }
 

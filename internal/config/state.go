@@ -282,8 +282,28 @@ func (store FileStore) load() State {
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return State{}
 	}
+	if scrubLegacyTargetFields(&state) {
+		if sanitized, marshalErr := json.MarshalIndent(state, "", "  "); marshalErr == nil {
+			_ = os.WriteFile(store.path, sanitized, 0o600)
+		}
+	}
 	for i, binding := range state.Bindings {
 		state.Bindings[i] = loadBindingSecrets(binding)
 	}
 	return state
+}
+
+func scrubLegacyTargetFields(state *State) bool {
+	if state == nil {
+		return false
+	}
+	changed := false
+	for index := range state.Bindings {
+		if state.Bindings[index].HermesHome != "" || state.Bindings[index].OpenClawAgentID != "" {
+			state.Bindings[index].HermesHome = ""
+			state.Bindings[index].OpenClawAgentID = ""
+			changed = true
+		}
+	}
+	return changed
 }

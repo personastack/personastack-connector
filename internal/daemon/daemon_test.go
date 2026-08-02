@@ -69,7 +69,7 @@ func readFrameOfType(t *testing.T, conn *websocket.Conn, want externalagentproto
 	}
 }
 
-func TestRunnerAdapterForBindingUsesHermesHome(t *testing.T) {
+func TestRunnerAdapterForBindingDoesNotReuseHermesHome(t *testing.T) {
 	homeDir := t.TempDir()
 	hermesHome := filepath.Join(t.TempDir(), "hermes-profile")
 	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
@@ -90,8 +90,8 @@ func TestRunnerAdapterForBindingUsesHermesHome(t *testing.T) {
 	if !ok {
 		t.Fatalf("adapter type = %T, want runtime.HermesAdapter", adapter)
 	}
-	if adapter.APIKey != "profile-key" {
-		t.Fatalf("APIKey = %q, want profile-key", adapter.APIKey)
+	if adapter.APIKey == "profile-key" {
+		t.Fatalf("adapter reused legacy selected profile key")
 	}
 }
 
@@ -193,7 +193,7 @@ func TestRunnerStartsBindingSavedAfterIdle(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -283,7 +283,7 @@ func TestRunnerCancelsRemovedBindingAndStartsReplacement(t *testing.T) {
 			ConnectionID: connectionID,
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -1038,7 +1038,7 @@ func TestRunnerConnectsAndSendsHeartbeat(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -1116,7 +1116,7 @@ func TestRunnerReloadsFileBackedBindingAfterRestart(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -1214,7 +1214,7 @@ func TestRunnerReconnectsAfterServerDrainingWithoutOverlap(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -1403,7 +1403,7 @@ func TestRunnerForwardsHermesRunEventsAfterMCPVerification(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -1880,7 +1880,7 @@ func TestRunnerKeepsMissingNativeRunStateUntilTerminalAck(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -2185,7 +2185,7 @@ func TestRunnerForwardsStreamingRunEventsAfterAccepted(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -2323,7 +2323,7 @@ func TestRunnerTokenRevokedDeletesBindingAndStopsReconnect(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -2640,7 +2640,7 @@ func TestDuplicateRunStartMessageIDReplaysCachedStartedFrame(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},
@@ -2933,7 +2933,7 @@ func TestRunnerGatesRedeliveredRunStartUntilWakeProbe(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -3102,7 +3102,7 @@ func TestRunnerReconnectsWithFreshGenerationAfterDrainHint(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -3212,7 +3212,7 @@ func TestRunnerReconnectsWhenWebsocketReadDeadlineExpires(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -3288,7 +3288,7 @@ func TestRunnerEstablishedWebsocketReadFailuresBackoff(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -3374,7 +3374,7 @@ func TestRunnerServerDrainingReconnectWaitsBeforeFreshGeneration(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: connectFrame.Connect.ConnectionGeneration,
 				HeartbeatSeconds:     15,
 			},
@@ -3616,7 +3616,7 @@ func TestRunStartClearsStaleActiveRunBeforeReadinessRejection(t *testing.T) {
 			ConnectionID: "conn-1",
 			SentAt:       time.Now().UTC(),
 			ConnectAccepted: &externalagentprotocol.ConnectAcceptedPayload{
-				ProtocolVersion:      externalagentprotocol.ProtocolVersionV3,
+				ProtocolVersion:      externalagentprotocol.ProtocolVersionV4,
 				ConnectionGeneration: 1,
 				HeartbeatSeconds:     15,
 			},

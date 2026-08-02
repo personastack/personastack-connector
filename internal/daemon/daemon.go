@@ -20,6 +20,7 @@ import (
 	"github.com/personastack/personastack-connector/internal/mcp"
 	"github.com/personastack/personastack-connector/internal/openclawauth"
 	"github.com/personastack/personastack-connector/internal/runtime"
+	"github.com/personastack/personastack-connector/internal/targetinventory"
 )
 
 type Runner struct {
@@ -487,6 +488,33 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 	if err := writeFrame(heartbeat); err != nil {
 		return fmt.Errorf("write heartbeat frame: %w", err)
 	}
+	reportTargetInventory := func() error {
+		inventory, warnings := targetinventory.Discover(binding.RuntimeKind, binding.BridgePrivateKey)
+		for _, warning := range warnings {
+			log.Printf("connector runtime target discovery warning connection_id=%s err=%v", binding.ConnectionID, warning)
+		}
+		inventory.InventoryGeneration = r.now().UnixNano()
+		if inventory.InventoryGeneration <= 0 {
+			inventory.InventoryGeneration = 1
+		}
+		if err := writeFrame(externalagentprotocol.Frame{
+			MessageID:            uuid.NewString(),
+			MessageType:          externalagentprotocol.FrameTypeTargetInventory,
+			PersonaID:            string(binding.PersonaID),
+			ConnectionID:         string(binding.ConnectionID),
+			ConnectionGeneration: binding.ConnectionGeneration,
+			SentAt:               r.now(),
+			TargetInventory:      &inventory,
+		}); err != nil {
+			return fmt.Errorf("write runtime target inventory: %w", err)
+		}
+		return nil
+	}
+	if accepted.ConnectAccepted.ProtocolVersion == externalagentprotocol.ProtocolVersionV4 {
+		if err := reportTargetInventory(); err != nil {
+			return err
+		}
+	}
 	capabilityReporter := newNativeCapabilityChangeReporter()
 	runObservations := newRunObservationRegistry()
 	if err := r.replayActiveRun(sessionCtx, binding, session, adapter, runObservations, writeFrame); err != nil {
@@ -504,6 +532,8 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 		_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
+		inventoryTicker := time.NewTicker(5 * time.Minute)
+		defer inventoryTicker.Stop()
 		for {
 			select {
 			case <-heartbeatStop:
@@ -516,6 +546,10 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				_ = writeFrame(session.HeartbeatFrameWithDetection(readiness, lastSessionWakeProbeAt()))
 				_ = writePing()
 				_ = capabilityReporter.writeIfChanged(sessionCtx, r, session, adapter, binding, readiness, lastSessionWakeProbeAt, writeFrame)
+			case <-inventoryTicker.C:
+				if accepted.ConnectAccepted.ProtocolVersion == externalagentprotocol.ProtocolVersionV4 {
+					_ = reportTargetInventory()
+				}
 			}
 		}
 	}()
@@ -621,7 +655,20 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
-			readiness := r.bindingReadiness(adapter, binding)
+			runAdapter := adapter
+			if accepted.ConnectAccepted.ProtocolVersion == externalagentprotocol.ProtocolVersionV4 {
+				var targetErr error
+				runAdapter, targetErr = r.adapterForRuntimeTarget(binding, frame.RunStart.RuntimeTarget)
+				if targetErr != nil {
+					failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, targetErr.Error())
+					commandCache.storeReply(frame, failed)
+					if writeErr := writeFrame(failed); writeErr != nil {
+						return fmt.Errorf("write runtime target failure: %w", writeErr)
+					}
+					continue
+				}
+			}
+			readiness := r.bindingReadiness(runAdapter, binding)
 			if !canStartRunWithReadiness(readiness.State, lastSessionWakeProbeAt()) {
 				failed := session.RunTerminalFrame(frame, externalagentprotocol.RunStatusFailed, externalagentprotocol.TerminalReasonFailed, "external runtime is not ready: "+readiness.State.String())
 				commandCache.storeReply(frame, failed)
@@ -638,7 +685,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				}
 				continue
 			}
-			nativeRunID, err := adapter.StartRun(runtime.RunRequest{
+			nativeRunID, err := runAdapter.StartRun(runtime.RunRequest{
 				RunID:                  frame.RunID,
 				AssignmentID:           frame.AssignmentID,
 				FullyComposedPrompt:    frame.RunStart.FullyComposedPrompt,
@@ -655,7 +702,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				continue
 			}
 			if err := r.recordNativeRunID(binding, frame.RunID, nativeRunID); err != nil {
-				failed := runRecordFailureTerminal(adapter, session, frame, nativeRunID, err)
+				failed := runRecordFailureTerminal(runAdapter, session, frame, nativeRunID, err)
 				commandCache.storeReply(frame, failed)
 				if writeErr := writeFrame(failed); writeErr != nil {
 					return fmt.Errorf("write run journal failure: %w", writeErr)
@@ -675,10 +722,10 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				commandCache.storeReplies(frame, []externalagentprotocol.Frame{accepted, started})
 				return writeFrame(started)
 			}
-			go func(frame externalagentprotocol.Frame, nativeRunID string) {
+			go func(frame externalagentprotocol.Frame, nativeRunID string, executionAdapter runtime.Adapter) {
 				observeCtx, cancelObserve := contextForRunDeadline(sessionCtx, frame.RunStart.DeadlineAt)
 				defer runObservations.track(frame.RunID, cancelObserve)()
-				result, err := adapter.StreamOrPollRun(observeCtx, nativeRunID, func(event runtime.RunEvent) error {
+				result, err := executionAdapter.StreamOrPollRun(observeCtx, nativeRunID, func(event runtime.RunEvent) error {
 					switch event.Kind {
 					case runtime.RunEventStarted:
 						return writeStarted(event.StartedAt)
@@ -706,7 +753,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 					}
 					if reason == externalagentprotocol.TerminalReasonExpired {
 						go func() {
-							_ = adapter.CancelRun(nativeRunID)
+							_ = executionAdapter.CancelRun(nativeRunID)
 						}()
 					}
 					return
@@ -724,7 +771,7 @@ func (r Runner) runBindingSession(ctx context.Context, binding config.Binding, s
 				if writeErr := writeFrame(session.RunTerminalFrame(frame, status, reason, result.Output)); writeErr != nil {
 					return
 				}
-			}(frame, nativeRunID)
+			}(frame, nativeRunID, runAdapter)
 		case externalagentprotocol.FrameTypeRunCancel:
 			if frame.RunCancel == nil {
 				continue
@@ -1208,9 +1255,6 @@ func (r Runner) bindingReadiness(adapter runtime.Adapter, binding config.Binding
 }
 
 func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
-	if binding.RuntimeKind == runtime.AdapterKindHermes && strings.TrimSpace(binding.HermesHome) != "" {
-		return runtime.NewHermesAdapterForHome(getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), binding.HermesHome)
-	}
 	if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
 		return runtime.NewAdapter(binding.RuntimeKind)
 	}
@@ -1225,7 +1269,7 @@ func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
 			return runtime.NewErrorAdapter(runtime.AdapterKindOpenClaw, runtime.AdapterStateAuthMissing, err.Error())
 		}
 	}
-	adapter := runtime.NewOpenClawAdapterWithAuth(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, binding.OpenClawAgentID)
+	adapter := runtime.NewOpenClawAdapterWithAuth(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, "")
 	adapter.DeviceTokenSink = func(deviceToken string) error {
 		writable, ok := r.Store.(config.WritableStore)
 		if !ok {
@@ -1243,6 +1287,43 @@ func (r Runner) adapterForBinding(binding config.Binding) runtime.Adapter {
 		return writable.SaveBinding(latest)
 	}
 	return adapter
+}
+
+// adapterForRuntimeTarget resolves the API-selected account/profile at dispatch
+// time. It deliberately keeps home and profile paths out of Binding storage.
+func (r Runner) adapterForRuntimeTarget(binding config.Binding, target *externalagentprotocol.RuntimeTarget) (runtime.Adapter, error) {
+	homeDir, hermesHome, err := targetinventory.Resolve(binding.RuntimeKind, target, binding.BridgePrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	switch binding.RuntimeKind {
+	case runtime.AdapterKindHermes:
+		if strings.TrimSpace(hermesHome) == "" {
+			return nil, fmt.Errorf("selected Hermes profile is unavailable")
+		}
+		return runtime.NewHermesAdapterForHome(getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), hermesHome), nil
+	case runtime.AdapterKindOpenClaw:
+		resolved, err := openclawauth.Resolve(openclawauth.Options{
+			HomeDir: homeDir,
+			Env: func(name string) string {
+				switch name {
+				case "OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD", "OPENCLAW_GATEWAY_DEVICE_TOKEN", "OPENCLAW_CONFIG_PATH":
+					return ""
+				default:
+					return getenv(name)
+				}
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("resolve selected OpenClaw credentials: %w", err)
+		}
+		if !resolved.Found() {
+			return nil, fmt.Errorf("selected OpenClaw profile has no usable local credential")
+		}
+		return runtime.NewOpenClawAdapterWithAuth(getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, ""), nil
+	default:
+		return nil, fmt.Errorf("unsupported runtime target")
+	}
 }
 
 func (r Runner) writeCapabilitiesFrame(

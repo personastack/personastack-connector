@@ -510,10 +510,6 @@ WantedBy=default.target
 
 func (installer Installer) installSystemdSystem(_ string, executablePath string) (InstallResult, error) {
 	path := filepath.Join(installer.systemRoot(), "etc", "systemd", "system", serviceName+".service")
-	target, err := installer.SystemServiceTarget()
-	if err != nil {
-		return InstallResult{}, err
-	}
 	unit := fmt.Sprintf(`[Unit]
 Description=PersonaStack Connector
 After=network-online.target
@@ -521,17 +517,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=%s
-Environment=%s
-%s
-WorkingDirectory=%s
 ExecStart=%s run --foreground --service-scope %s
 Restart=always
 RestartSec=30
 
 [Install]
 WantedBy=multi-user.target
-`, systemdValue(target.Username), systemdQuote("HOME="+target.HomeDir), systemdEnvironmentLine("HERMES_HOME", installer.HermesHome), systemdQuote(target.HomeDir), systemdQuote(executablePath), ServiceScopeLinuxSystemService)
+`, systemdQuote(executablePath), ServiceScopeLinuxSystemService)
 	if err := writeSystemServiceFile(path, []byte(unit)); err != nil {
 		return InstallResult{}, err
 	}

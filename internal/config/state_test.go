@@ -39,6 +39,49 @@ func TestFileStoreSavesBinding(t *testing.T) {
 	}
 }
 
+func TestFileStoreScrubsLegacyLocalTargetFields(t *testing.T) {
+	path := t.TempDir() + "/state.json"
+	store := NewFileStore(path)
+	if err := store.SaveBinding(Binding{
+		ConnectionID:    "conn-1",
+		HermesHome:      "/home/alice/.hermes/profiles/work",
+		OpenClawAgentID: "agent-1",
+	}); err != nil {
+		t.Fatalf("save binding: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if strings.Contains(string(raw), "/home/alice") || strings.Contains(string(raw), "agent-1") {
+		t.Fatalf("state retained a local target: %s", raw)
+	}
+	loaded, ok := store.Binding("conn-1")
+	if !ok || loaded.HermesHome != "" || loaded.OpenClawAgentID != "" {
+		t.Fatalf("legacy fields not scrubbed: %+v", loaded)
+	}
+}
+
+func TestFileStoreMigratesLegacyLocalTargetFieldsOnRead(t *testing.T) {
+	path := t.TempDir() + "/state.json"
+	legacy := `{"Bindings":[{"ConnectionID":"conn-1","HermesHome":"/root/.hermes","OpenClawAgentID":"agent-1"}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	store := NewFileStore(path)
+	loaded, ok := store.Binding("conn-1")
+	if !ok || loaded.HermesHome != "" || loaded.OpenClawAgentID != "" {
+		t.Fatalf("legacy fields not scrubbed on read: %+v", loaded)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read migrated state: %v", err)
+	}
+	if strings.Contains(string(raw), "/root/.hermes") || strings.Contains(string(raw), "agent-1") {
+		t.Fatalf("legacy target persisted after migration: %s", raw)
+	}
+}
+
 func TestFileStoreMovesSecretsToKeyring(t *testing.T) {
 	secrets := map[string]string{}
 	originalGet := keyringGet
