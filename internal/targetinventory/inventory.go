@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	connectorruntime "github.com/personastack/personastack-connector/internal/runtime"
@@ -41,6 +42,7 @@ var currentUser = user.Current
 var readFile = os.ReadFile
 var readDir = os.ReadDir
 var stat = os.Stat
+var lstat = os.Lstat
 var effectiveUID = os.Geteuid
 
 // Discover returns candidates visible to the effective Connector process. A
@@ -94,18 +96,56 @@ func Resolve(kind connectorruntime.AdapterKind, target *externalagentprotocol.Ru
 				if accountID(candidate, secret) != accountCandidate.CandidateID {
 					continue
 				}
+				runtimeHome := profileHome(candidate, kind, profile.CandidateID, secret)
+				if err := validateResolvedTarget(candidate, kind, runtimeHome); err != nil {
+					return ResolvedTarget{}, err
+				}
 				return ResolvedTarget{
 					Username:   candidate.username,
 					HomeDir:    candidate.homeDir,
 					UID:        candidate.uid,
 					GID:        candidate.gid,
 					GroupIDs:   append([]int(nil), candidate.groupIDs...),
-					HermesHome: profileHome(candidate, kind, profile.CandidateID, secret),
+					HermesHome: runtimeHome,
 				}, nil
 			}
 		}
 	}
 	return ResolvedTarget{}, fmt.Errorf("selected runtime target is no longer available")
+}
+
+func validateResolvedTarget(candidate account, kind connectorruntime.AdapterKind, runtimeHome string) error {
+	paths := []string{candidate.homeDir}
+	switch kind {
+	case connectorruntime.AdapterKindHermes:
+		paths = append(paths, runtimeHome)
+	case connectorruntime.AdapterKindOpenClaw:
+		paths = append(paths, filepath.Join(candidate.homeDir, ".openclaw"))
+	}
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			return fmt.Errorf("selected runtime path unavailable")
+		}
+		info, err := lstat(path)
+		if err != nil {
+			return fmt.Errorf("inspect selected runtime path: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("selected runtime path is unsafe")
+		}
+		if effectiveUID() == 0 && !ownedByAccount(info, candidate.uid) {
+			return fmt.Errorf("selected runtime path ownership cannot be established")
+		}
+	}
+	return nil
+}
+
+func ownedByAccount(info os.FileInfo, uid int) bool {
+	if info == nil || uid < 0 {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == uid
 }
 
 func discoverAccounts() ([]account, []error) {

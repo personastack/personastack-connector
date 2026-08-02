@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
@@ -59,6 +60,32 @@ func TestDiscoverOmitsUnreadableOrMissingNonRootHomeWithoutFailure(t *testing.T)
 	inventory, warnings := Discover(runtime.AdapterKindHermes)
 	if len(warnings) != 0 || len(inventory.Accounts) != 0 {
 		t.Fatalf("missing home must be graceful: inventory=%+v warnings=%v", inventory, warnings)
+	}
+}
+
+func TestResolveRejectsSymlinkedHermesProfile(t *testing.T) {
+	homeDir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(homeDir, ".hermes")); err != nil {
+		t.Fatalf("symlink Hermes home: %v", err)
+	}
+	oldCurrentUser := currentUser
+	oldEffectiveUID := effectiveUID
+	currentUser = func() (*user.User, error) {
+		return &user.User{Username: "alice", HomeDir: homeDir, Uid: "501", Gid: "20"}, nil
+	}
+	effectiveUID = func() int { return 501 }
+	t.Cleanup(func() {
+		currentUser = oldCurrentUser
+		effectiveUID = oldEffectiveUID
+	})
+	inventory, _ := Discover(runtime.AdapterKindHermes, "secret")
+	if len(inventory.Accounts) != 1 || len(inventory.Accounts[0].Profiles) != 1 {
+		t.Fatalf("inventory = %+v", inventory)
+	}
+	_, err := Resolve(runtime.AdapterKindHermes, &externalagentprotocol.RuntimeTarget{AccountCandidateID: inventory.Accounts[0].CandidateID, ProfileCandidateID: inventory.Accounts[0].Profiles[0].CandidateID, RuntimeKind: externalagentprotocol.RuntimeKindHermes, SelectionRevision: 1}, "secret")
+	if err == nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("Resolve() error = %v, want unsafe path", err)
 	}
 }
 
