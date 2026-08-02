@@ -25,7 +25,6 @@ import (
 	"github.com/personastack/personastack-connector/internal/runtime"
 	"github.com/personastack/personastack-connector/internal/service"
 	"github.com/zalando/go-keyring"
-	"golang.org/x/sys/unix"
 )
 
 const usage = `Usage:
@@ -509,39 +508,6 @@ func firstOpenClawBinding(bindings []config.Binding) config.Binding {
 	return config.Binding{}
 }
 
-func firstHermesHome(bindings []config.Binding) string {
-	for _, binding := range bindings {
-		if binding.RuntimeKind != runtime.AdapterKindHermes {
-			continue
-		}
-		if strings.TrimSpace(binding.HermesHome) != "" {
-			return strings.TrimSpace(binding.HermesHome)
-		}
-	}
-	return ""
-}
-
-func (cmd command) persistHermesHome(hermesHome string) error {
-	trimmed := strings.TrimSpace(hermesHome)
-	if trimmed == "" {
-		return nil
-	}
-	writable, ok := cmd.store.(config.WritableStore)
-	if !ok {
-		return nil
-	}
-	for _, binding := range cmd.store.ListBindings() {
-		if binding.RuntimeKind != runtime.AdapterKindHermes {
-			continue
-		}
-		binding.HermesHome = trimmed
-		if err := writable.SaveBinding(binding); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func openClawCredentialRequiredMessage() string {
 	return "OpenClaw operator credential required; run `openclaw config get gateway.auth.token`, rerun with --openclaw-token, --openclaw-password, --openclaw-device-token, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD/OPENCLAW_GATEWAY_DEVICE_TOKEN"
 }
@@ -654,7 +620,7 @@ func (cmd command) runRuntime(args []string) error {
 			return err
 		}
 		for _, binding := range bindings {
-			detection := adapterForBinding(binding).Diagnose()
+			detection := adapterForRuntimeKind(binding.RuntimeKind).Diagnose()
 			if detection.State != runtime.AdapterStateReady {
 				fmt.Fprintf(cmd.stdout, "runtime repair binding=%s runtime=%s state=%s note=%q action=%s\n", binding.ConnectionID, binding.RuntimeKind, detection.State, detection.Note, runtimeRepairAction(detection.State))
 				continue
@@ -725,11 +691,6 @@ func (cmd command) runRuntimeHermes(args []string) error {
 			return err
 		}
 		fmt.Fprintf(cmd.stdout, "runtime hermes configure state=%s note=%q\n", report.State, report.Note)
-	}
-	if strings.TrimSpace(hermesHome) != "" {
-		if err := cmd.persistHermesHome(paths.HermesHome); err != nil {
-			return err
-		}
 	}
 	if configureMCP {
 		results, err := cmd.installMCPForKind(runtime.AdapterKindHermes)
@@ -815,20 +776,21 @@ func detectSingleReadyRuntimeForHermesHome(hermesHome string) (runtime.AdapterKi
 }
 
 func adapterForBinding(binding config.Binding) runtime.Adapter {
-	if binding.RuntimeKind == runtime.AdapterKindHermes && strings.TrimSpace(binding.HermesHome) != "" {
-		return runtime.NewHermesAdapterForHome(os.Getenv("PERSONASTACK_CONNECTOR_HERMES_URL"), binding.HermesHome)
-	}
+	// Binding target fields are legacy data. Diagnostics may use the stored
+	// OpenClaw credential, but never a stored account or profile selection.
+	binding.HermesHome = ""
+	binding.OpenClawAgentID = ""
 	if binding.RuntimeKind != runtime.AdapterKindOpenClaw {
 		return runtime.NewAdapter(binding.RuntimeKind)
 	}
 	if !openclawauth.GatewayIsLoopback(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL")) {
-		return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{}, binding.OpenClawAgentID)
+		return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), runtime.OpenClawAuth{}, "")
 	}
 	resolved, err := openclawauth.Resolve(openclawauth.Options{Binding: binding})
 	if err != nil {
 		return runtime.NewErrorAdapter(runtime.AdapterKindOpenClaw, runtime.AdapterStateAuthMissing, err.Error())
 	}
-	return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, binding.OpenClawAgentID)
+	return runtime.NewOpenClawAdapterWithAuth(os.Getenv("PERSONASTACK_CONNECTOR_OPENCLAW_GATEWAY_URL"), resolved.Auth, "")
 }
 
 func adapterForRuntimeKind(kind runtime.AdapterKind) runtime.Adapter {
@@ -996,9 +958,6 @@ func (cmd command) installMCPForServiceScope(scope service.ServiceScope) ([]stri
 	err := withLinuxSystemServiceConfigEnv(func() error {
 		var installErr error
 		results, installErr = cmd.installMCP()
-		if chownErr := chownLinuxSystemScopePaths(firstHermesHome(cmd.store.ListBindings())); chownErr != nil {
-			return chownErr
-		}
 		return installErr
 	})
 	if err != nil {
@@ -1110,9 +1069,6 @@ func (cmd command) repairSetup(configureMCP bool, scope service.ServiceScope) ([
 		err := withLinuxSystemServiceConfigEnv(func() error {
 			var setupErr error
 			results, setupErr = cmd.repairSetupInCurrentEnv(configureMCP, scope)
-			if chownErr := chownLinuxSystemScopePaths(firstHermesHome(cmd.store.ListBindings())); chownErr != nil {
-				return chownErr
-			}
 			return setupErr
 		})
 		if err != nil {
@@ -1141,32 +1097,7 @@ func (cmd command) repairSetupInCurrentEnv(configureMCP bool, scope service.Serv
 }
 
 func (cmd command) installServiceForBindings(scope service.ServiceScope) (service.InstallResult, error) {
-	hermesHome := firstHermesHome(cmd.store.ListBindings())
-	if hermesHome == "" {
-		return installService(scope)
-	}
-	return withHermesHome(hermesHome, func() (service.InstallResult, error) {
-		return installService(scope)
-	})
-}
-
-func withHermesHome(hermesHome string, fn func() (service.InstallResult, error)) (service.InstallResult, error) {
-	trimmed := strings.TrimSpace(hermesHome)
-	if trimmed == "" {
-		return fn()
-	}
-	oldValue, hadValue := os.LookupEnv("HERMES_HOME")
-	if err := os.Setenv("HERMES_HOME", trimmed); err != nil {
-		return service.InstallResult{}, err
-	}
-	defer func() {
-		if hadValue {
-			_ = os.Setenv("HERMES_HOME", oldValue)
-		} else {
-			_ = os.Unsetenv("HERMES_HOME")
-		}
-	}()
-	return fn()
+	return installService(scope)
 }
 
 func (cmd command) installMCP() ([]string, error) {
@@ -1269,9 +1200,6 @@ func (cmd command) runUnpair(args []string) error {
 			if err != nil {
 				return err
 			}
-			if err := chownLinuxSystemScopePaths(binding.HermesHome); err != nil && !os.IsNotExist(err) {
-				return err
-			}
 		} else {
 			if err := deleting.DeleteBinding(binding.ConnectionID); err != nil {
 				return err
@@ -1369,80 +1297,6 @@ func withLinuxSystemServiceConfigEnv(fn func() error) error {
 		}
 	}()
 	return fn()
-}
-
-func chownLinuxSystemScopePaths(hermesHome string) error {
-	if os.Geteuid() != 0 {
-		return nil
-	}
-	target, err := (service.Installer{GOOS: currentGOOS}).SystemServiceTarget()
-	if err != nil {
-		return err
-	}
-	paths := []string{
-		filepath.Join(target.HomeDir, ".config", "personastack"),
-		filepath.Join(target.HomeDir, ".config", "personastack", "connector"),
-		filepath.Join(target.HomeDir, ".config", "personastack", "connector", "state.json"),
-		filepath.Join(target.HomeDir, ".config", "personastack", "connector", "secrets.enc"),
-		filepath.Join(target.HomeDir, ".config", "personastack", "connector", "secrets.key"),
-		filepath.Join(target.HomeDir, ".openclaw"),
-		filepath.Join(target.HomeDir, ".openclaw", "openclaw.json"),
-		filepath.Join(target.HomeDir, ".openclaw", "openclaw.json.personastack.bak"),
-	}
-	hermesPaths := hermessetup.ResolvePaths(target.HomeDir, hermesHome)
-	paths = append(paths,
-		hermesPaths.HermesHome,
-		hermesPaths.EnvPath,
-		hermesPaths.EnvPath+".personastack.bak",
-		hermesPaths.ConfigPath,
-		hermesPaths.ConfigPath+".personastack.bak",
-	)
-	for _, path := range paths {
-		if err := lchownPathNoSymlinkAncestors(path, target.UID, target.GID); err != nil {
-			return fmt.Errorf("chown linux system scope path: %w", err)
-		}
-	}
-	return nil
-}
-
-func lchownPathNoSymlinkAncestors(path string, uid int, gid int) error {
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		return fmt.Errorf("path must be absolute: %s", path)
-	}
-	components := strings.Split(strings.TrimPrefix(cleaned, string(os.PathSeparator)), string(os.PathSeparator))
-	if len(components) == 0 || components[0] == "" {
-		return nil
-	}
-	dirFd, err := unix.Open(string(os.PathSeparator), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY, 0)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = unix.Close(dirFd)
-	}()
-	for _, component := range components[:len(components)-1] {
-		nextFd, err := unix.Openat(dirFd, component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
-		if err != nil {
-			if errors.Is(err, unix.ENOENT) {
-				return nil
-			}
-			return err
-		}
-		if err := unix.Close(dirFd); err != nil {
-			_ = unix.Close(nextFd)
-			return err
-		}
-		dirFd = nextFd
-	}
-	leaf := components[len(components)-1]
-	if err := unix.Fchownat(dirFd, leaf, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return nil
-		}
-		return err
-	}
-	return nil
 }
 
 func protocolServiceScope(scope service.ServiceScope) externalagentprotocol.ServiceScope {

@@ -83,6 +83,37 @@ func TestRunServicePlan(t *testing.T) {
 	}
 }
 
+func TestInstallServiceForBindingsDoesNotReuseLegacyHermesHome(t *testing.T) {
+	t.Setenv("HERMES_HOME", "")
+	oldInstallService := installService
+	defer func() {
+		installService = oldInstallService
+	}()
+
+	var gotScope service.ServiceScope
+	var gotHermesHome string
+	installService = func(scope service.ServiceScope) (service.InstallResult, error) {
+		gotScope = scope
+		gotHermesHome = os.Getenv("HERMES_HOME")
+		return service.InstallResult{Scope: scope}, nil
+	}
+	cmd := command{store: config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID: "connection-1",
+		RuntimeKind:  runtime.AdapterKindHermes,
+		HermesHome:   "/home/alice/.hermes/profiles/work",
+	}}})}
+
+	if _, err := cmd.installServiceForBindings(service.ServiceScopeLinuxSystemService); err != nil {
+		t.Fatalf("installServiceForBindings() error = %v", err)
+	}
+	if gotScope != service.ServiceScopeLinuxSystemService {
+		t.Fatalf("scope = %q", gotScope)
+	}
+	if gotHermesHome != "" {
+		t.Fatalf("HERMES_HOME = %q, want empty", gotHermesHome)
+	}
+}
+
 func TestRunServiceUninstall(t *testing.T) {
 	homeDir := t.TempDir()
 	path := filepath.Join(homeDir, ".config", "systemd", "user", "personastack-connector.service")
@@ -1043,18 +1074,18 @@ func TestMCPCommandsRequireWebsiteTargetSelection(t *testing.T) {
 	}
 }
 
-func TestAdapterForBindingUsesHermesHome(t *testing.T) {
+func TestAdapterForBindingIgnoresLegacyHermesHome(t *testing.T) {
 	homeDir := t.TempDir()
 	hermesHome := filepath.Join(t.TempDir(), "hermes-profile")
 	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
 		t.Fatalf("create Hermes home: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(hermesHome, ".env"), []byte("API_SERVER_KEY=profile-key\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(hermesHome, ".env"), []byte("API_SERVER_KEY=legacy-profile-key\n"), 0o600); err != nil {
 		t.Fatalf("write Hermes env: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("PERSONASTACK_CONNECTOR_FORCE_SECRET_FALLBACK", "1")
-	t.Setenv("HERMES_API_SERVER_KEY", "")
+	t.Setenv("HERMES_API_SERVER_KEY", "current-account-key")
 
 	adapter, ok := adapterForBinding(config.Binding{
 		RuntimeKind: runtime.AdapterKindHermes,
@@ -1063,8 +1094,8 @@ func TestAdapterForBindingUsesHermesHome(t *testing.T) {
 	if !ok {
 		t.Fatalf("adapter type = %T, want runtime.HermesAdapter", adapter)
 	}
-	if adapter.APIKey != "profile-key" {
-		t.Fatalf("APIKey = %q, want profile-key", adapter.APIKey)
+	if adapter.APIKey != "current-account-key" {
+		t.Fatalf("APIKey = %q, want current account key", adapter.APIKey)
 	}
 }
 
