@@ -287,7 +287,8 @@ func TestReleaseWorkflowContainsDryRunValidationSteps(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1",
+		"sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6",
+		"cosign-release: v2.4.1",
 		"goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a",
 		"args: check",
 		"args: release --snapshot --clean --skip=publish",
