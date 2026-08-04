@@ -80,9 +80,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Cosign
-        run: |
-          go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.4.1
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
       - name: Check release policy
