@@ -420,8 +420,13 @@ Adapter result states must be concrete typed enums, including:
   metadata must not describe the Connector as open source unless the license
   changes to an OSI-style open-source grant.
 - Signed auto-update launch scope stays deferred until a separate
-  `personastack-ship` decision; package-manager/manual update prompts remain
-  the default guidance.
+  `personastack-ship` decision. Connector V1 never accepts an update request,
+  downloads an artifact, invokes a package manager, or restarts itself.
+  Connect and heartbeat frames report only locally verified install metadata:
+  Homebrew, `.deb`, and `.rpm` installs are `manual_required` and `idle`.
+  Archive, unknown, and ambiguous installs are `unsupported` with the bounded
+  `unknown_install_channel` reason. The product must not infer an update
+  command from an unverified local path.
 - Stable public release activation is a separate `personastack-ship` gate and
   is not part of routine implementation completion.
 - WSL2 uses the Linux Connector inside the WSL2 environment.

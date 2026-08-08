@@ -159,6 +159,65 @@ const (
 	ServiceScopeLinuxSystemService ServiceScope = "linux_system_service"
 )
 
+// InstallChannel identifies the locally verified Connector installation source.
+// It is metadata only. The Connector never uses it to execute an update.
+type InstallChannel string
+
+const (
+	InstallChannelHomebrew InstallChannel = "homebrew"
+	InstallChannelDeb      InstallChannel = "deb"
+	InstallChannelRPM      InstallChannel = "rpm"
+	InstallChannelArchive  InstallChannel = "archive"
+	InstallChannelUnknown  InstallChannel = "unknown"
+)
+
+// ExecutablePathClass is a bounded, path-safe classification of the Connector binary.
+type ExecutablePathClass string
+
+const (
+	ExecutablePathClassHomebrewOpt    ExecutablePathClass = "homebrew_opt"
+	ExecutablePathClassPackageManaged ExecutablePathClass = "package_managed"
+	ExecutablePathClassArchivePath    ExecutablePathClass = "archive_path"
+	ExecutablePathClassUnknown        ExecutablePathClass = "unknown"
+)
+
+// UpdateCapability declares whether the current Connector install can update itself.
+// V1 only reports manual_required or unsupported.
+type UpdateCapability string
+
+const (
+	UpdateCapabilityOneClickAvailable UpdateCapability = "one_click_available"
+	UpdateCapabilityManualRequired    UpdateCapability = "manual_required"
+	UpdateCapabilityUnsupported       UpdateCapability = "unsupported"
+	UpdateCapabilityUnknown           UpdateCapability = "unknown"
+)
+
+// UpdateState is retained as bounded status metadata for API compatibility.
+// V1 always reports idle because it has no self-updater.
+type UpdateState string
+
+const (
+	UpdateStateIdle       UpdateState = "idle"
+	UpdateStateChecking   UpdateState = "checking"
+	UpdateStateAvailable  UpdateState = "available"
+	UpdateStateRunning    UpdateState = "running"
+	UpdateStateRestarting UpdateState = "restarting"
+	UpdateStateSucceeded  UpdateState = "succeeded"
+	UpdateStateFailed     UpdateState = "failed"
+)
+
+// UpdateReason is a bounded explanation for an unavailable manual path.
+type UpdateReason string
+
+const (
+	UpdateReasonRequiresSudo               UpdateReason = "requires_sudo"
+	UpdateReasonSystemLaunchDaemonHomebrew UpdateReason = "system_launchdaemon_homebrew"
+	UpdateReasonPackageManagerMissing      UpdateReason = "package_manager_missing"
+	UpdateReasonUnknownInstallChannel      UpdateReason = "unknown_install_channel"
+	UpdateReasonReleaseMetadataUnavailable UpdateReason = "release_metadata_unavailable"
+	UpdateReasonWSL2ManualRequired         UpdateReason = "wsl2_manual_required"
+)
+
 // ConnectionStatus identifies Connector bridge status reported to Gateway.
 type ConnectionStatus string
 
@@ -301,20 +360,25 @@ type Frame struct {
 }
 
 type ConnectPayload struct {
-	ProtocolVersion           string      `json:"protocol_version"`
-	SupportedProtocolVersions []string    `json:"supported_protocol_versions,omitempty"`
-	ConnectorVersion          string      `json:"connector_version"`
-	RuntimeKind               RuntimeKind `json:"runtime_kind"`
-	ConnectionGeneration      int64       `json:"connection_generation"`
-	Hostname                  string      `json:"hostname,omitempty"`
-	OS                        string      `json:"os,omitempty"`
-	Arch                      string      `json:"arch,omitempty"`
-	DevicePublicKey           string      `json:"device_public_key"`
-	CredentialID              string      `json:"credential_id"`
-	CredentialProof           string      `json:"credential_proof"`
-	CredentialProofNonce      string      `json:"credential_proof_nonce"`
-	CredentialProofUnix       int64       `json:"credential_proof_unix"`
-	SupportsTargetClear       bool        `json:"supports_target_clear"`
+	ProtocolVersion           string              `json:"protocol_version"`
+	SupportedProtocolVersions []string            `json:"supported_protocol_versions,omitempty"`
+	ConnectorVersion          string              `json:"connector_version"`
+	RuntimeKind               RuntimeKind         `json:"runtime_kind"`
+	ConnectionGeneration      int64               `json:"connection_generation"`
+	Hostname                  string              `json:"hostname,omitempty"`
+	OS                        string              `json:"os,omitempty"`
+	Arch                      string              `json:"arch,omitempty"`
+	InstallChannel            InstallChannel      `json:"install_channel,omitempty"`
+	ExecutablePathClass       ExecutablePathClass `json:"executable_path_class,omitempty"`
+	UpdateCapability          UpdateCapability    `json:"update_capability,omitempty"`
+	UpdateState               UpdateState         `json:"update_state,omitempty"`
+	UpdateReason              UpdateReason        `json:"update_reason,omitempty"`
+	DevicePublicKey           string              `json:"device_public_key"`
+	CredentialID              string              `json:"credential_id"`
+	CredentialProof           string              `json:"credential_proof"`
+	CredentialProofNonce      string              `json:"credential_proof_nonce"`
+	CredentialProofUnix       int64               `json:"credential_proof_unix"`
+	SupportsTargetClear       bool                `json:"supports_target_clear"`
 }
 
 type ConnectAcceptedPayload struct {
@@ -346,6 +410,11 @@ type HeartbeatPayload struct {
 	OS                      string               `json:"os,omitempty"`
 	Arch                    string               `json:"arch,omitempty"`
 	ReleaseChannel          string               `json:"release_channel,omitempty"`
+	InstallChannel          InstallChannel       `json:"install_channel,omitempty"`
+	ExecutablePathClass     ExecutablePathClass  `json:"executable_path_class,omitempty"`
+	UpdateCapability        UpdateCapability     `json:"update_capability,omitempty"`
+	UpdateState             UpdateState          `json:"update_state,omitempty"`
+	UpdateReason            UpdateReason         `json:"update_reason,omitempty"`
 	LastWakeProbeAt         *time.Time           `json:"last_wake_probe_at,omitempty"`
 	DiagnosticCode          DiagnosticCode       `json:"diagnostic_code,omitempty"`
 	TargetSelectionRevision int64                `json:"target_selection_revision,omitempty"`

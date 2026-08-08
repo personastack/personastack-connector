@@ -15,6 +15,32 @@ func TestProtocolVersionSupportedRecognizesCurrentVersion(t *testing.T) {
 	}
 }
 
+func TestConnectAndHeartbeatPreserveManualOnlyUpdateMetadata(t *testing.T) {
+	tests := []string{
+		`{"message_type":"connect","connect":{"protocol_version":"external-agent-v4","connector_version":"v0.1.0","runtime_kind":"hermes","connection_generation":3,"device_public_key":"key","credential_id":"credential","credential_proof":"proof","install_channel":"homebrew","executable_path_class":"homebrew_opt","update_capability":"manual_required","update_state":"idle"}}`,
+		`{"message_type":"heartbeat","heartbeat":{"connection_status":"bridge_connected","readiness_status":"wakeable","runtime_kind":"hermes","connection_generation":3,"connector_version":"v0.1.0","install_channel":"deb","executable_path_class":"package_managed","update_capability":"manual_required","update_state":"idle","update_reason":"unknown_install_channel"}}`,
+	}
+	for _, raw := range tests {
+		var frame Frame
+		err := json.Unmarshal([]byte(raw), &frame)
+		if err != nil {
+			t.Fatalf("unmarshal frame: %v", err)
+		}
+		roundTrip, err := json.Marshal(frame)
+		if err != nil {
+			t.Fatalf("marshal frame: %v", err)
+		}
+		for _, field := range []string{"install_channel", "executable_path_class", "update_capability", "update_state"} {
+			if !strings.Contains(string(roundTrip), `"`+field+`"`) {
+				t.Fatalf("round trip dropped %s: %s", field, roundTrip)
+			}
+		}
+		if strings.Contains(raw, "update_reason") && !strings.Contains(string(roundTrip), `"update_reason"`) {
+			t.Fatalf("round trip dropped update_reason: %s", roundTrip)
+		}
+	}
+}
+
 func TestTargetInventoryDiscoveryStatusRoundTrips(t *testing.T) {
 	payload := TargetInventoryPayload{InventoryGeneration: 3, DiscoveryStatus: DiscoveryStatusDegraded}
 	raw, err := json.Marshal(payload)

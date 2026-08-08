@@ -13,6 +13,7 @@ import (
 	"github.com/personastack/personastack-connector/internal/buildinfo"
 	"github.com/personastack/personastack-connector/internal/config"
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
+	"github.com/personastack/personastack-connector/internal/installmetadata"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
 
@@ -39,10 +40,11 @@ func CredentialFromBinding(binding config.Binding) (Credential, error) {
 }
 
 type Session struct {
-	Binding      config.Binding
-	Credential   Credential
-	ServiceScope externalagentprotocol.ServiceScope
-	Now          func() time.Time
+	Binding         config.Binding
+	Credential      Credential
+	ServiceScope    externalagentprotocol.ServiceScope
+	InstallMetadata installmetadata.Metadata
+	Now             func() time.Time
 }
 
 func NewSession(binding config.Binding, credential Credential) (Session, error) {
@@ -62,8 +64,9 @@ func NewSession(binding config.Binding, credential Credential) (Session, error) 
 		return Session{}, fmt.Errorf("ed25519 public key required")
 	}
 	return Session{
-		Binding:    binding,
-		Credential: credential,
+		Binding:         binding,
+		Credential:      credential,
+		InstallMetadata: installmetadata.DetectCurrent(),
 		Now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -82,6 +85,11 @@ func (s Session) ConnectFrame(nonce string) (externalagentprotocol.Frame, error)
 		Hostname:                  localHostname(),
 		OS:                        stdruntime.GOOS,
 		Arch:                      stdruntime.GOARCH,
+		InstallChannel:            s.InstallMetadata.InstallChannel,
+		ExecutablePathClass:       s.InstallMetadata.ExecutablePathClass,
+		UpdateCapability:          s.InstallMetadata.UpdateCapability,
+		UpdateState:               s.InstallMetadata.UpdateState,
+		UpdateReason:              s.InstallMetadata.UpdateReason,
 		DevicePublicKey:           base64.StdEncoding.EncodeToString(s.Credential.PublicKey),
 		CredentialID:              strings.TrimSpace(s.Credential.ID),
 		CredentialProofNonce:      strings.TrimSpace(nonce),
@@ -128,6 +136,11 @@ func (s Session) HeartbeatFrameWithDiagnostic(state runtime.AdapterState, diagno
 		OS:                     stdruntime.GOOS,
 		Arch:                   stdruntime.GOARCH,
 		ReleaseChannel:         buildinfo.ReleaseChannelString(),
+		InstallChannel:         s.InstallMetadata.InstallChannel,
+		ExecutablePathClass:    s.InstallMetadata.ExecutablePathClass,
+		UpdateCapability:       s.InstallMetadata.UpdateCapability,
+		UpdateState:            s.InstallMetadata.UpdateState,
+		UpdateReason:           s.InstallMetadata.UpdateReason,
 		LastWakeProbeAt:        lastWakeProbeAt,
 	}
 	return frame
