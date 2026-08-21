@@ -60,6 +60,9 @@ func (e ExchangeError) Error() string {
 }
 
 func (c Client) Exchange(ctx context.Context, request Request) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	code := strings.TrimSpace(request.Code)
 	if code == "" {
 		return Result{}, fmt.Errorf("pairing code required")

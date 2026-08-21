@@ -1,6 +1,7 @@
 package pairing
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -234,5 +235,24 @@ func TestClientExchangeContract(t *testing.T) {
 				t.Fatalf("binding = %+v", result.Binding)
 			}
 		})
+	}
+}
+
+func TestClientExchangeCancelledContextMakesNoHTTPRequest(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	client := Client{
+		GatewayBaseURL: "https://gateway.example",
+		HTTPClient: &http.Client{Transport: pairingRoundTripper(func(request *http.Request) (*http.Response, error) {
+			t.Fatalf("unexpected request: %s %s", request.Method, request.URL)
+			return nil, nil
+		})},
+	}
+
+	_, err := client.Exchange(ctx, Request{Code: "PAIR-1234", RuntimeKind: runtime.AdapterKindHermes})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Exchange() error = %v, want context canceled", err)
 	}
 }

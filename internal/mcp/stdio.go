@@ -112,6 +112,9 @@ func (proxy StdioProxy) httpClientOrDefault() *http.Client {
 }
 
 func (proxy StdioProxy) forward(ctx context.Context, mcpURL string, token string, payload []byte, session *stdioProxySession) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var message rpcMessage
 	if err := json.Unmarshal(payload, &message); err != nil {
 		return nil, fmt.Errorf("decode mcp stdio message: %w", err)
@@ -209,6 +212,9 @@ func (stream *mcpGetStream) run(ctx context.Context, client *http.Client, mcpURL
 var errMCPGetStreamUnsupported = errors.New("mcp get stream unsupported")
 
 func (stream *mcpGetStream) once(ctx context.Context, client *http.Client, mcpURL string, token string, session stdioProxySession, output *lockedLineWriter) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mcpURL, nil)
 	if err != nil {
 		return err

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,6 +40,80 @@ func TestStdioProxyForwardsJSONLines(t *testing.T) {
 	if !strings.Contains(stdout.String(), `"result"`) {
 		t.Fatalf("unexpected stdout: %s", stdout.String())
 	}
+}
+
+func TestStdioProxyForwardContractFencesRejectedInputsAndCancellation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("maps canonical request", func(t *testing.T) {
+		t.Parallel()
+		proxy := StdioProxy{httpClient: &http.Client{Transport: verifyContractRoundTripper(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodPost || request.URL.String() != "https://mcp.example.test/mcp" {
+				t.Fatalf("request = %s %s", request.Method, request.URL)
+			}
+			if request.Header.Get("Authorization") != "Bearer durable-token" || request.Header.Get("Content-Type") != "application/json" || request.Header.Get("Accept") != "application/json, text/event-stream" {
+				t.Fatalf("request headers = %+v", request.Header)
+			}
+			if request.Header.Get("MCP-Session-Id") != "session-1" || request.Header.Get("MCP-Protocol-Version") != "2025-11-25" {
+				t.Fatalf("session headers = %+v", request.Header)
+			}
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			if !jsonRawMessagesEqual(body, []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}`)) {
+				t.Fatalf("request body = %s", body)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":7,"result":{"tools":[]}}`)), Request: request}, nil
+		})}}
+		session := &stdioProxySession{sessionID: "session-1", protocolVersion: defaultMCPProtocolVersion, initialized: true}
+		response, err := proxy.forward(t.Context(), "https://mcp.example.test/mcp", "durable-token", []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}`), session)
+		if err != nil || !jsonRawMessagesEqual(response, []byte(`{"jsonrpc":"2.0","id":7,"result":{"tools":[]}}`)) {
+			t.Fatalf("forward response = %s, error = %v", response, err)
+		}
+	})
+
+	for _, testCase := range []struct {
+		name string
+		ctx  context.Context
+		body []byte
+	}{
+		{name: "malformed JSON", ctx: t.Context(), body: []byte(`{"jsonrpc":`)},
+		{name: "cancelled context", ctx: cancelledContext(t), body: []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/list"}`)},
+	} {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			proxy := StdioProxy{httpClient: &http.Client{Transport: verifyContractRoundTripper(func(request *http.Request) (*http.Response, error) {
+				t.Fatalf("unexpected request: %s %s", request.Method, request.URL)
+				return nil, nil
+			})}}
+			_, err := proxy.forward(testCase.ctx, "https://mcp.example.test/mcp", "durable-token", testCase.body, &stdioProxySession{protocolVersion: defaultMCPProtocolVersion})
+			if err == nil {
+				t.Fatal("expected rejected forward")
+			}
+		})
+	}
+}
+
+func TestMCPGetStreamOnceCancelledContextMakesNoHTTPRequest(t *testing.T) {
+	t.Parallel()
+
+	stream := &mcpGetStream{}
+	err := stream.once(cancelledContext(t), &http.Client{Transport: verifyContractRoundTripper(func(request *http.Request) (*http.Response, error) {
+		t.Fatalf("unexpected request: %s %s", request.Method, request.URL)
+		return nil, nil
+	})}, "https://mcp.example.test/mcp", "durable-token", stdioProxySession{sessionID: "session-1", protocolVersion: defaultMCPProtocolVersion}, &lockedLineWriter{writer: io.Discard})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("once() error = %v, want context canceled", err)
+	}
+}
+
+func cancelledContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	return ctx
 }
 
 func TestStdioProxyUsesDurablePersonaToken(t *testing.T) {
