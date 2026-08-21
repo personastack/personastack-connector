@@ -3,6 +3,7 @@ package pairing
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	goruntime "runtime"
@@ -12,6 +13,12 @@ import (
 	"github.com/personastack/personastack-connector/internal/externalagentprotocol"
 	"github.com/personastack/personastack-connector/internal/runtime"
 )
+
+type pairingRoundTripper func(*http.Request) (*http.Response, error)
+
+func (roundTripper pairingRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTripper(request)
+}
 
 func TestClientExchangeBuildsBinding(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,5 +129,110 @@ func TestClientExchangeSurfacesUnsupportedConnectorVersion(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "personastack-connector update") {
 		t.Fatalf("missing update command: %v", err)
+	}
+}
+
+func TestClientExchangeContract(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name         string
+		request      Request
+		responseKind externalagentprotocol.RuntimeKind
+		wantCalls    int
+		wantError    bool
+	}
+	testCases := []testCase{
+		{
+			name: "builds explicit hermes binding",
+			request: Request{
+				Code:         " PAIR-1234 ",
+				RuntimeKind:  runtime.AdapterKindHermes,
+				ConfigureMCP: true,
+			},
+			responseKind: externalagentprotocol.RuntimeKindHermes,
+			wantCalls:    1,
+		},
+		{
+			name: "rejects empty pairing code before http",
+			request: Request{
+				Code:        "   ",
+				RuntimeKind: runtime.AdapterKindHermes,
+			},
+			wantError: true,
+		},
+		{
+			name: "rejects response that changes explicit runtime",
+			request: Request{
+				Code:        "PAIR-1234",
+				RuntimeKind: runtime.AdapterKindHermes,
+			},
+			responseKind: externalagentprotocol.RuntimeKindOpenClaw,
+			wantCalls:    1,
+			wantError:    true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			calls := 0
+			client := Client{
+				GatewayBaseURL: "https://gateway.example",
+				HTTPClient: &http.Client{Transport: pairingRoundTripper(func(request *http.Request) (*http.Response, error) {
+					calls++
+					if request.Method != http.MethodPost || request.URL.Path != externalagentprotocol.ExternalAgentPairingExchangePath || request.Header.Get("Content-Type") != "application/json" {
+						t.Fatalf("exchange request = method:%q path:%q content-type:%q", request.Method, request.URL.Path, request.Header.Get("Content-Type"))
+					}
+					var payload externalagentprotocol.PairingExchangeRequest
+					err := json.NewDecoder(request.Body).Decode(&payload)
+					if err != nil {
+						t.Fatalf("decode exchange request: %v", err)
+					}
+					if payload.Code != "PAIR-1234" || payload.RuntimeKind != externalagentprotocol.RuntimeKindHermes || payload.DevicePublicKey == "" || payload.DeviceKeyProof == "" || payload.GatewayWebsocketURL != "wss://gateway.example/v1/external-agent/ws" || payload.ConfigureMCP != testCase.request.ConfigureMCP {
+						t.Fatalf("exchange payload = %+v", payload)
+					}
+					responseBody, err := json.Marshal(externalagentprotocol.PairingExchangeResponse{
+						PersonaID:            "persona-1",
+						ConnectionID:         "conn-1",
+						CredentialID:         "credential-1",
+						RuntimeKind:          testCase.responseKind,
+						ConnectionGeneration: 3,
+						GatewayWebsocketURL:  "wss://gateway.example/v1/external-agent/ws",
+						PersonaMCPURL:        "https://mcp.example/mcp",
+						PersonaMCPToken:      "mcp-token",
+					})
+					if err != nil {
+						t.Fatalf("marshal exchange response: %v", err)
+					}
+					headers := make(http.Header)
+					headers.Set("Content-Type", "application/json")
+					return &http.Response{StatusCode: http.StatusOK, Header: headers, Body: io.NopCloser(strings.NewReader(string(responseBody)))}, nil
+				})},
+			}
+
+			result, err := client.Exchange(t.Context(), testCase.request)
+
+			if calls != testCase.wantCalls {
+				t.Fatalf("http calls = %d, want %d", calls, testCase.wantCalls)
+			}
+			if testCase.wantError {
+				if err == nil {
+					t.Fatal("expected exchange error")
+				}
+				if result.Binding.ConnectionID != "" || result.Binding.BridgePrivateKey != "" || result.Binding.PersonaMCPToken != "" {
+					t.Fatalf("rejected exchange returned binding: %+v", result.Binding)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("exchange: %v", err)
+			}
+			if result.Binding.ConnectionID != "conn-1" || result.Binding.PersonaID != "persona-1" || result.Binding.RuntimeKind != runtime.AdapterKindHermes || result.Binding.ConnectionGeneration != 3 || !result.Binding.HasBridgeSecret || !result.Binding.HasPersonaMCPToken {
+				t.Fatalf("binding = %+v", result.Binding)
+			}
+		})
 	}
 }
