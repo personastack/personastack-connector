@@ -30,18 +30,18 @@ func VerifyBindingLive(ctx context.Context, binding config.Binding, client *http
 	session := stdioProxySession{protocolVersion: defaultMCPProtocolVersion}
 	proxy := StdioProxy{httpClient: client}
 	initialize := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"` + defaultMCPProtocolVersion + `","capabilities":{},"clientInfo":{"name":"personastack-connector","version":"verify"}}}`)
-	raw, err := proxy.forward(ctx, mcpURL, token, initialize, &session)
+	raw, err := proxy.forward(ctx, mcpURL, token, initialize, &session, nil)
 	if err != nil {
 		return LiveVerifyResult{Note: "initialize failed: " + err.Error(), DiagnosticCode: diagnosticCodeForMCPLiveError(err)}
 	}
 	if err := requireJSONRPCResult(raw); err != nil {
 		return LiveVerifyResult{Note: "initialize invalid: " + err.Error(), DiagnosticCode: "runtime_error"}
 	}
-	_, err = proxy.forward(ctx, mcpURL, token, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`), &session)
+	_, err = proxy.forward(ctx, mcpURL, token, []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`), &session, nil)
 	if err != nil {
 		return LiveVerifyResult{Note: "initialized notification failed: " + err.Error(), DiagnosticCode: diagnosticCodeForMCPLiveError(err)}
 	}
-	raw, err = proxy.forward(ctx, mcpURL, token, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`), &session)
+	raw, err = proxy.forward(ctx, mcpURL, token, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`), &session, nil)
 	if err != nil {
 		return LiveVerifyResult{Note: "tools/list failed: " + err.Error(), DiagnosticCode: diagnosticCodeForMCPLiveError(err)}
 	}

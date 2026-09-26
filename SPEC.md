@@ -262,7 +262,10 @@ Adapter result states must be concrete typed enums, including:
 - External run-start handling must not require or store run-scoped PersonaStack
   MCP bearer tokens.
 - Streamable HTTP SSE responses may be long-lived; the stdio proxy must emit the
-  first complete JSON-RPC SSE event back to stdio without waiting for stream EOF.
+  matching JSON-RPC response back to stdio without waiting for stream EOF.
+  For a `tools/call` POST, it must forward progress notifications with the
+  request's `_meta.progressToken` as they arrive before the final response.
+  It must ignore progress for other tokens and responses for other request ids.
 - After MCP initialization completes, the stdio proxy must open the Streamable
   HTTP GET session stream, forward JSON-RPC SSE `data:` payloads to stdio as
   JSON lines, ignore non-JSON readiness/keepalive events, and reconnect with

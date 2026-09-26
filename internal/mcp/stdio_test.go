@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,7 +69,7 @@ func TestStdioProxyForwardContractFencesRejectedInputsAndCancellation(t *testing
 			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":7,"result":{"tools":[]}}`)), Request: request}, nil
 		})}}
 		session := &stdioProxySession{sessionID: "session-1", protocolVersion: defaultMCPProtocolVersion, initialized: true}
-		response, err := proxy.forward(t.Context(), "https://mcp.example.test/mcp", "durable-token", []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}`), session)
+		response, err := proxy.forward(t.Context(), "https://mcp.example.test/mcp", "durable-token", []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/list","params":{}}`), session, nil)
 		if err != nil || !jsonRawMessagesEqual(response, []byte(`{"jsonrpc":"2.0","id":7,"result":{"tools":[]}}`)) {
 			t.Fatalf("forward response = %s, error = %v", response, err)
 		}
@@ -88,7 +90,7 @@ func TestStdioProxyForwardContractFencesRejectedInputsAndCancellation(t *testing
 				t.Fatalf("unexpected request: %s %s", request.Method, request.URL)
 				return nil, nil
 			})}}
-			_, err := proxy.forward(testCase.ctx, "https://mcp.example.test/mcp", "durable-token", testCase.body, &stdioProxySession{protocolVersion: defaultMCPProtocolVersion})
+			_, err := proxy.forward(testCase.ctx, "https://mcp.example.test/mcp", "durable-token", testCase.body, &stdioProxySession{protocolVersion: defaultMCPProtocolVersion}, nil)
 			if err == nil {
 				t.Fatal("expected rejected forward")
 			}
@@ -264,6 +266,111 @@ func TestStdioProxySkipsJSONRPCSSEWithDifferentRequestID(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), `"wrong":true`) || !strings.Contains(stdout.String(), `"ok":true`) {
 		t.Fatalf("unexpected stdout: %s", stdout.String())
+	}
+}
+
+type stdioLineCapture struct {
+	pending string
+	lines   chan string
+}
+
+func (capture *stdioLineCapture) Write(payload []byte) (int, error) {
+	capture.pending += string(payload)
+	for {
+		line, rest, ok := strings.Cut(capture.pending, "\n")
+		if !ok {
+			break
+		}
+		capture.pending = rest
+		capture.lines <- line
+	}
+	return len(payload), nil
+}
+
+func TestStdioProxyForwardsMatchingToolProgressBeforeFinalResponse(t *testing.T) {
+	t.Parallel()
+	finalGate := make(chan struct{})
+	var releaseFinal sync.Once
+	defer releaseFinal.Do(func() { close(finalGate) })
+	streamReader, streamWriter := io.Pipe()
+	defer streamReader.Close()
+	transport := verifyContractRoundTripper(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodPost {
+			return nil, fmt.Errorf("unexpected method: %s", request.Method)
+		}
+		go func() {
+			for _, event := range []string{
+				`{"jsonrpc":"2.0","id":99,"result":{"other":true}}`,
+				`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"other-call","message":"other progress"}}`,
+				`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"our-call","message":"working"}}`,
+			} {
+				_, _ = io.WriteString(streamWriter, "event: message\ndata: "+event+"\n\n")
+			}
+			<-finalGate
+			_, _ = io.WriteString(streamWriter, "event: message\ndata: "+`{"jsonrpc":"2.0","id":7,"result":{"ok":true}}`+"\n\n")
+			_ = streamWriter.Close()
+		}()
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: streamReader, Request: request}, nil
+	})
+	store := config.NewMemoryStore(config.State{Bindings: []config.Binding{{
+		ConnectionID: "conn-1", PersonaMCPURL: "https://mcp.example.test/mcp", PersonaMCPToken: "token-1",
+	}}})
+	proxy := NewStdioProxy(store)
+	proxy.httpClient = &http.Client{Transport: transport}
+	capture := &stdioLineCapture{lines: make(chan string, 4)}
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.Serve(t.Context(), "conn-1", strings.NewReader(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"desktop_control_shell","_meta":{"progressToken":"our-call"}}}`+"\n"), capture, io.Discard)
+	}()
+	select {
+	case line := <-capture.lines:
+		if !strings.Contains(line, `"message":"working"`) || strings.Contains(line, "other") {
+			t.Fatalf("first stdio line = %s", line)
+		}
+	case err := <-done:
+		t.Fatalf("Serve() finished before progress: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("matching progress was not sent before final response")
+	}
+	if len(capture.lines) != 0 {
+		t.Fatalf("unexpected extra stdio lines before final response: %d", len(capture.lines))
+	}
+	releaseFinal.Do(func() { close(finalGate) })
+	select {
+	case line := <-capture.lines:
+		if !strings.Contains(line, `"ok":true`) || strings.Contains(line, "other") {
+			t.Fatalf("final stdio line = %s", line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("final response not sent")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+}
+
+func TestStdioProxyDoesNotForwardProgressFromFailedHTTPResponse(t *testing.T) {
+	t.Parallel()
+	transport := verifyContractRoundTripper(func(request *http.Request) (*http.Response, error) {
+		body := strings.Join([]string{
+			"event: message",
+			`data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"our-call","message":"must stay private"}}`,
+			"",
+			"event: message",
+			`data: {"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"rejected"}}`,
+			"",
+			"",
+		}, "\n")
+		return &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+	})
+	proxy := StdioProxy{httpClient: &http.Client{Transport: transport}}
+	capture := &stdioLineCapture{lines: make(chan string, 2)}
+	_, err := proxy.forward(t.Context(), "https://mcp.example.test/mcp", "token-1", []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"_meta":{"progressToken":"our-call"}}}`), &stdioProxySession{}, &lockedLineWriter{writer: capture})
+	if err == nil || !strings.Contains(err.Error(), "mcp status 403") {
+		t.Fatalf("forward() error = %v", err)
+	}
+	if len(capture.lines) != 0 {
+		t.Fatalf("failed HTTP response forwarded %d progress lines", len(capture.lines))
 	}
 }
 

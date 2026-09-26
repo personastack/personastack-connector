@@ -79,7 +79,7 @@ func (proxy StdioProxy) Serve(ctx context.Context, bindingID config.ConnectionID
 		if len(line) == 0 {
 			continue
 		}
-		response, err := proxy.forward(ctx, mcpURL, token, line, &session)
+		response, err := proxy.forward(ctx, mcpURL, token, line, &session, output)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "PersonaStack MCP proxy error: %v\n", err)
 			return err
@@ -111,7 +111,7 @@ func (proxy StdioProxy) httpClientOrDefault() *http.Client {
 	return http.DefaultClient
 }
 
-func (proxy StdioProxy) forward(ctx context.Context, mcpURL string, token string, payload []byte, session *stdioProxySession) ([]byte, error) {
+func (proxy StdioProxy) forward(ctx context.Context, mcpURL string, token string, payload []byte, session *stdioProxySession, output *lockedLineWriter) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -137,7 +137,11 @@ func (proxy StdioProxy) forward(ctx context.Context, mcpURL string, token string
 		return nil, fmt.Errorf("post mcp request: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, err := readMCPHTTPResponse(resp, message.ID)
+	progressOutput := output
+	if resp.StatusCode >= 300 {
+		progressOutput = nil
+	}
+	raw, err := readMCPHTTPResponse(resp, message.ID, toolCallProgressToken(message.Method, payload), progressOutput)
 	if err != nil {
 		return nil, fmt.Errorf("read mcp response: %w", err)
 	}
@@ -149,9 +153,9 @@ func (proxy StdioProxy) forward(ctx context.Context, mcpURL string, token string
 	return raw, nil
 }
 
-func readMCPHTTPResponse(resp *http.Response, requestID json.RawMessage) ([]byte, error) {
+func readMCPHTTPResponse(resp *http.Response, requestID json.RawMessage, progressToken json.RawMessage, output *lockedLineWriter) ([]byte, error) {
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		return readSSEJSONPayloads(resp.Body, requestID)
+		return readSSEJSONPayloads(resp.Body, requestID, progressToken, output)
 	}
 	return io.ReadAll(resp.Body)
 }
@@ -279,8 +283,29 @@ func (event sseEvent) dataPayload() []byte {
 	return []byte(strings.Join(event.Data, "\n"))
 }
 
-func readSSEJSONPayloads(body io.Reader, requestID json.RawMessage) ([]byte, error) {
-	var output bytes.Buffer
+func toolCallProgressToken(method string, payload []byte) json.RawMessage {
+	if method != "tools/call" {
+		return nil
+	}
+	var request struct {
+		Params struct {
+			Meta struct {
+				ProgressToken json.RawMessage `json:"progressToken"`
+			} `json:"_meta"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(payload, &request) != nil {
+		return nil
+	}
+	token := request.Params.Meta.ProgressToken
+	if len(token) == 0 || bytes.Equal(token, []byte("null")) || bytes.Equal(token, []byte(`""`)) {
+		return nil
+	}
+	return token
+}
+
+func readSSEJSONPayloads(body io.Reader, requestID json.RawMessage, progressToken json.RawMessage, output *lockedLineWriter) ([]byte, error) {
+	var response []byte
 	err := readSSEStream(body, func(event sseEvent) error {
 		payload := event.dataPayload()
 		ok, err := event.isJSONRPCPayload()
@@ -290,22 +315,44 @@ func readSSEJSONPayloads(body io.Reader, requestID json.RawMessage) ([]byte, err
 		if !ok {
 			return nil
 		}
+		if progressTokenMatches(payload, progressToken) {
+			if output != nil {
+				return output.writeLine(payload)
+			}
+			return nil
+		}
 		if !jsonRPCPayloadMatchesRequestID(payload, requestID) {
 			return nil
 		}
-		if output.Len() > 0 {
-			output.WriteByte('\n')
-		}
-		output.Write(payload)
+		response = append(response, payload...)
 		return io.EOF
 	})
 	if errors.Is(err, io.EOF) {
-		return output.Bytes(), nil
+		return response, nil
 	}
-	if err == nil && output.Len() == 0 {
+	if err == nil && len(response) == 0 {
 		return nil, fmt.Errorf("mcp SSE response ended without JSON-RPC event matching request")
 	}
-	return output.Bytes(), err
+	return response, err
+}
+
+func progressTokenMatches(payload []byte, requestToken json.RawMessage) bool {
+	if len(requestToken) == 0 {
+		return false
+	}
+	var notification struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Params  struct {
+			ProgressToken json.RawMessage `json:"progressToken"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(payload, &notification) != nil {
+		return false
+	}
+	return notification.JSONRPC == "2.0" && len(notification.ID) == 0 && notification.Method == "notifications/progress" &&
+		len(notification.Params.ProgressToken) > 0 && jsonRawMessagesEqual(notification.Params.ProgressToken, requestToken)
 }
 
 func jsonRPCPayloadMatchesRequestID(payload []byte, requestID json.RawMessage) bool {
@@ -313,12 +360,13 @@ func jsonRPCPayloadMatchesRequestID(payload []byte, requestID json.RawMessage) b
 		return true
 	}
 	var envelope struct {
-		ID json.RawMessage `json:"id"`
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return false
 	}
-	if len(envelope.ID) == 0 {
+	if len(envelope.ID) == 0 || envelope.Method != "" {
 		return false
 	}
 	return jsonRawMessagesEqual(envelope.ID, requestID)
