@@ -44,6 +44,9 @@ external persona.
 - `agent-gateway` owns pairing exchange ingress, websocket transport, routing,
   dispatch/cancel frames, protocol versioning, and Gateway-to-API callbacks.
 - `mcp` owns PersonaStack MCP authentication, authorization, and tool execution.
+- The loopback MCP proxy preserves modern `Mcp-Method`, `Mcp-Name`, protocol-version and explicit `PersonaStack-Tool-Catalog` headers without collapsing duplicate values. The MCP server validates their meaning. It preserves upstream cache policy and bearer challenges while replacing the local bearer with the durable remote credential.
+- The proxy forwards unrecognized `Mcp-Param-*` headers unchanged. Mirrored parameter validation stays with the upstream MCP server that owns the tool schema.
+- Native Hermes/OpenClaw configuration keeps the full named catalog. Compact activation requires proved target-level permission behavior and host catalog-cache isolation or explicit reload. Header forwarding alone does not prove either property.
 - This repository owns its Connector protocol DTO package for public build
   reproducibility. `agent-gateway` owns protocol behavior and compatibility.
 

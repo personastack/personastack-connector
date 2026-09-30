@@ -135,6 +135,7 @@ func (handler loopbackHTTPProxyHandler) ServeHTTP(w http.ResponseWriter, r *http
 	}
 	defer resp.Body.Close()
 	copyMCPProxyHeaders(w.Header(), resp.Header)
+	copyMCPResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
@@ -167,13 +168,30 @@ func firstNonEmpty(values ...string) string {
 }
 
 func copyMCPProxyHeaders(dst http.Header, src http.Header) {
-	for _, key := range []string{"Accept", "Content-Type", "MCP-Protocol-Version", "MCP-Session-Id", "Last-Event-ID"} {
+	for _, key := range []string{"Accept", "Content-Type", "MCP-Protocol-Version", "MCP-Session-Id", "Last-Event-ID", "Mcp-Method", "Mcp-Name", "PersonaStack-Tool-Catalog"} {
 		values := src.Values(key)
 		if len(values) == 0 {
 			continue
 		}
 		dst.Del(key)
 		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+	for key, values := range src {
+		if !strings.HasPrefix(strings.ToLower(key), "mcp-param-") {
+			continue
+		}
+		dst.Del(key)
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func copyMCPResponseHeaders(dst http.Header, src http.Header) {
+	for _, key := range []string{"Cache-Control", "Vary", "WWW-Authenticate", "Allow", "X-Accel-Buffering"} {
+		for _, value := range src.Values(key) {
 			dst.Add(key, value)
 		}
 	}
