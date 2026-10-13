@@ -1,98 +1,13 @@
-# PersonaStack Connector
+# PersonaStack Connector historical source
 
-PersonaStack Connector is the local bridge for external personas.
+This repository retains the previous standalone local-agent implementation for historical inspection. Managed HermesAgent and OpenClaw connections use PersonaStack for macOS and its embedded Background Agents helper. See the [Local agents guide](https://personastack.ai/docs/personas/local-agents/).
 
-This repository is public source for user audit. It is not open source: the
-license permits inspection, but does not grant reuse, modification,
-redistribution, hosting, or commercial rights without written permission.
+Standalone release and Homebrew publication are disabled in this source. The release workflow has no tag trigger or publication job. The macOS app owns the replacement implementation. The historical source is not a build input for the API, app, or Ship.
 
-See [DATA-HANDLING.md](DATA-HANDLING.md) for Connector's local data, credential, network, and deletion boundaries.
+This source change does not archive the GitHub repository, alter existing releases, migrate a binding, uninstall software, or delete user data. Those operations require a separate authorized cutover.
 
-It runs on a user's macOS or Linux machine, pairs with PersonaStack,
-configures a supported local agent runtime, and keeps that runtime wakeable as a
-PersonaStack stack member.
+This repository is public source for user audit. It is not open source: the license permits inspection, but does not grant reuse, modification, redistribution, hosting, or commercial rights without written permission.
 
-Hermes Termux installs are not Connector hosts. OpenClaw mobile nodes are also
-not Connector hosts because the Gateway still has to run on macOS, Linux,
-or the Linux Connector inside WSL2.
+See [DATA-HANDLING.md](DATA-HANDLING.md) for the historical implementation's local data, credential, network, and deletion boundaries. Existing policy documents and historical versions are unchanged.
 
-Initial supported runtime targets:
-
-- Hermes Agent
-- OpenClaw
-
-The Connector is not a PersonaStack integration and does not expose local
-Hermes/OpenClaw tools as PersonaStack tools. It owns local runtime detection,
-local MCP proxying, local credential storage, daemon startup, and local dispatch
-into the selected runtime.
-
-Shared product state, pairing state, run admission, PromptStack rendering, and
-browser-visible runtime state remain owned by `personastack-api`.
-
-Pairing reports local account/profile inventory. PersonaStack selects the target
-before the Connector changes native MCP configuration. The Connector does not
-claim wakeable success until the authenticated bridge, selected runtime health,
-native MCP verification, and wake probe have all reported through PersonaStack.
-OpenClaw users must provide an approved operator
-credential during pairing with `--openclaw-token`, `--openclaw-password`, or
-`--openclaw-device-token`, or through the matching `OPENCLAW_GATEWAY_*`
-environment variable.
-
-The Connector has no public or LAN-facing local control listener in V1. CLI and
-stdio MCP control are local process interfaces; any future loopback control
-surface must bind `127.0.0.1` only. Any tray/menu UX is optional and limited to
-status, repair, logs, and pairing; headless Linux must stay CLI-first.
-
-Hermes fallback through responses or chat completions is degraded-only. OpenClaw
-CLI fallback is also degraded-only and does not imply full Gateway streaming or
-cancel support.
-
-## Build, Audit, and Release
-
-- Local validation: `go test ./...`
-- Public clone validation: `go list -mod=mod ./...`
-- Race-sensitive validation: `go test -race ./internal/bridge ./internal/daemon ./internal/mcp`
-- Security validation: `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`
-- Release config validation: `go run github.com/goreleaser/goreleaser/v2@latest check`
-- Release artifact smoke: `./scripts/smoke-release-artifacts.sh dist <version>` or
-  `./scripts/smoke-release-artifacts.sh dist auto` for snapshot builds.
-- CI runs unit tests, formatting, targeted race tests, `go vet`,
-  `govulncheck`, license-file validation, and a GoReleaser snapshot dry-run
-  with Syft installed for SBOM generation. Snapshot artifacts are validation
-  only and are not a distribution channel.
-- Tagged `v*` releases publish draft GitHub Releases under
-  `personastack/personastack-connector` with archives, Linux packages,
-  checksums, SBOMs, a machine-readable release manifest plus manifest
-  checksum, signed checksum bundles, a signed release manifest bundle, and
-  provenance attestations.
-- Each shippable upload is identified by one shipping-agent-selected semver
-  tag. Admin release activation sends only that semver to PersonaStack API,
-  which derives every canonical GitHub Release asset URL from the tag and
-  supported OS/arch/package matrix.
-- macOS binaries are signed and notarized through GoReleaser only when the
-  release environment provides the Apple signing and App Store Connect inputs;
-  default install metadata must stay gated off until that pipeline is enabled.
-- macOS release artifacts stay split by `darwin/amd64` and `darwin/arm64`;
-  Connector setup still uses LaunchAgent registration after installation.
-- V1 signed distribution channels are GitHub Release archives for macOS and
-  Linux plus Linux `.deb` and `.rpm` packages; tagged releases also generate
-  and push a Homebrew formula to the public `personastack/homebrew-tap`
-  repository from the signed checksum file.
-- Release metadata only promotes installer defaults when the release signing
-  gate is active; Linux package defaults stay off until that gate is enabled.
-- Default install guidance must stay a simple one-line Homebrew, `.deb`, or
-  `.rpm` command. Advanced verification can use signed release metadata.
-- Release notes must enumerate supported OS/arch, known runtime caveats,
-  upgrade notes, and a rollback command.
-- V1 binary distribution stays GitHub Releases only; mirrored binary hosts are
-  a later decision, not part of the initial public install path.
-- Update prompts stay package-manager/manual only until signed auto-update
-  launch scope is explicitly decided and shipped.
-- The tagged release workflow declares the protected `release` environment and
-  fails closed unless GitHub CLI metadata shows active `v*` tag rules and at
-  least one required reviewer on that environment.
-- Public stable release activation is gated separately by
-  `personastack-ship`; routine implementation work does not make a version the
-  recommended release.
-- The repository is public at `https://github.com/personastack/personastack-connector`;
-  release notes and install docs may link to public release artifacts.
+Historical validation remains available through the repository's CI. It produces no supported distribution. Existing tags, releases and source remain historical evidence.
